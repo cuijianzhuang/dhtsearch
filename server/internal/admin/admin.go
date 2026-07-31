@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"dhtsearch/server/internal/settings"
@@ -34,18 +35,51 @@ type Config struct {
 	// RestartOnly is reported next to the live settings so the operator can
 	// see the knobs the console deliberately does not offer.
 	RestartOnly map[string]string
-	Logger      *log.Logger
+	// BaseCtx bounds background work started by the console. A manual sweep
+	// outlives the request that asked for it, so it cannot use the request's
+	// context — that one is cancelled as soon as the response is written.
+	// This should be the server's lifetime context so a sweep still stops on
+	// shutdown. Nil falls back to context.Background.
+	BaseCtx context.Context
+	Logger  *log.Logger
+}
+
+// sweepState tracks the manual moderation sweep, which runs in the background
+// and is reported through /api/admin/state.
+type sweepState struct {
+	mu       sync.Mutex
+	running  bool
+	started  time.Time
+	finished time.Time
+	reviewed int
+	deleted  int64
+	failure  string
+}
+
+func (s *sweepState) snapshot() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]any{"running": s.running}
+	if !s.started.IsZero() {
+		out["started_at"] = s.started.Unix()
+	}
+	if !s.finished.IsZero() {
+		out["finished_at"] = s.finished.Unix()
+		out["reviewed"] = s.reviewed
+		out["deleted"] = s.deleted
+		if s.failure != "" {
+			out["error"] = s.failure
+		}
+	}
+	return out
 }
 
 // Server is the admin console.
 type Server struct {
-	cfg  Config
-	st   *store.Store
-	auth *auth
-	// sweeping guards against a second moderation pass being launched while
-	// one is still running; the pass is not re-entrant and a double click
-	// would otherwise double the API spend.
-	sweeping chan struct{}
+	cfg   Config
+	st    *store.Store
+	auth  *auth
+	sweep sweepState
 }
 
 // New builds the console. It returns nil when no password is configured,
@@ -57,12 +91,10 @@ func New(st *store.Store, cfg Config) *Server {
 	if cfg.Logger == nil {
 		cfg.Logger = log.Default()
 	}
-	return &Server{
-		cfg:      cfg,
-		st:       st,
-		auth:     newAuth(cfg.Password, cfg.Secure),
-		sweeping: make(chan struct{}, 1),
+	if cfg.BaseCtx == nil {
+		cfg.BaseCtx = context.Background()
 	}
+	return &Server{cfg: cfg, st: st, auth: newAuth(cfg.Password, cfg.Secure)}
 }
 
 // Mount registers the console's routes on mux.
@@ -178,6 +210,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		"settings":     s.cfg.Settings.Defs(),
 		"restart_only": s.cfg.RestartOnly,
 		"can_sweep":    s.cfg.SweepNow != nil,
+		"sweep":        s.sweep.snapshot(),
 	})
 }
 
@@ -294,25 +327,44 @@ func (s *Server) handleResetReviewed(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSweep(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.SweepNow == nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "审核未启用（缺少 OPENAI_API_KEY 或已关闭）"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "审核未启用（缺少 OPENAI_API_KEY）"})
 		return
 	}
-	select {
-	case s.sweeping <- struct{}{}:
-		defer func() { <-s.sweeping }()
-	default:
+	s.sweep.mu.Lock()
+	if s.sweep.running {
+		s.sweep.mu.Unlock()
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "已有一轮审核在进行中"})
 		return
 	}
+	s.sweep.running = true
+	s.sweep.started = time.Now()
+	s.sweep.finished = time.Time{}
+	s.sweep.failure = ""
+	s.sweep.mu.Unlock()
+
+	// The sweep runs detached from this request. A pass of MaxBatches batches
+	// can take many minutes while the server's WriteTimeout is 30 seconds, so
+	// answering synchronously would have the console report a network failure
+	// on a sweep that is in fact still running — and invite a retry that pays
+	// the model twice. Report acceptance now; progress comes from /state.
 	s.audit(r, "manual moderation sweep started")
-	reviewed, deleted, err := s.cfg.SweepNow(r.Context())
-	if err != nil {
-		s.cfg.Logger.Printf("admin: manual sweep: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	s.audit(r, "manual sweep done: reviewed=%d deleted=%d", reviewed, deleted)
-	writeJSON(w, http.StatusOK, map[string]any{"reviewed": reviewed, "deleted": deleted})
+	go func() {
+		reviewed, deleted, err := s.cfg.SweepNow(s.cfg.BaseCtx)
+		s.sweep.mu.Lock()
+		s.sweep.running = false
+		s.sweep.finished = time.Now()
+		s.sweep.reviewed, s.sweep.deleted = reviewed, deleted
+		if err != nil {
+			s.sweep.failure = err.Error()
+		}
+		s.sweep.mu.Unlock()
+		if err != nil {
+			s.cfg.Logger.Printf("admin: manual sweep: %v", err)
+			return
+		}
+		s.cfg.Logger.Printf("admin: manual sweep done: reviewed=%d deleted=%d", reviewed, deleted)
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
 }
 
 // decodeBody reads a bounded JSON body.

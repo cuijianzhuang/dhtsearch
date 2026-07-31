@@ -299,19 +299,87 @@ func TestAdminOperations(t *testing.T) {
 		t.Errorf("blocked count after unblock = %d, want 0", n)
 	}
 
-	// A manual sweep reports what the pass did.
+	// A manual sweep is accepted immediately and reports through /state.
 	resp = post(t, c, srv.URL+"/api/admin/sweep", `{}`, hdr)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("sweep: status %d", resp.StatusCode)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("sweep: status %d, want 202", resp.StatusCode)
 	}
-	var sw struct {
-		Reviewed int   `json:"reviewed"`
-		Deleted  int64 `json:"deleted"`
-	}
-	json.NewDecoder(resp.Body).Decode(&sw)
+	sw := awaitSweep(t, c, srv)
 	if sw.Reviewed != 3 || sw.Deleted != 1 {
 		t.Errorf("sweep reported %+v, want reviewed=3 deleted=1", sw)
+	}
+	if sw.Error != "" {
+		t.Errorf("sweep error = %q", sw.Error)
+	}
+}
+
+type sweepReport struct {
+	Running    bool   `json:"running"`
+	FinishedAt int64  `json:"finished_at"`
+	Reviewed   int    `json:"reviewed"`
+	Deleted    int64  `json:"deleted"`
+	Error      string `json:"error"`
+}
+
+// awaitSweep polls /state until the background sweep reports completion.
+func awaitSweep(t *testing.T, c *http.Client, srv *httptest.Server) sweepReport {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := c.Get(srv.URL + "/api/admin/state")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var st struct {
+			Sweep sweepReport `json:"sweep"`
+		}
+		json.NewDecoder(resp.Body).Decode(&st)
+		resp.Body.Close()
+		if !st.Sweep.Running && st.Sweep.FinishedAt != 0 {
+			return st.Sweep
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("sweep did not finish")
+	return sweepReport{}
+}
+
+// A sweep that outlives its request must keep running: the request context is
+// cancelled the moment the response is written, and a real pass takes minutes
+// against a 30-second WriteTimeout.
+func TestSweepOutlivesItsRequest(t *testing.T) {
+	release := make(chan struct{})
+	var sawCancel bool
+	srv, _, _ := newConsole(t, func(c *Config) {
+		c.SweepNow = func(ctx context.Context) (int, int64, error) {
+			<-release
+			sawCancel = ctx.Err() != nil
+			return 5, 0, nil
+		}
+	})
+	cl := newClient(t)
+	hdr := map[string]string{csrfHeader: login(t, cl, srv)}
+
+	resp := post(t, cl, srv.URL+"/api/admin/sweep", `{}`, hdr)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status %d, want 202 before the sweep finishes", resp.StatusCode)
+	}
+	// A second request while one is running is refused rather than doubling
+	// the model spend.
+	busy := post(t, cl, srv.URL+"/api/admin/sweep", `{}`, hdr)
+	busy.Body.Close()
+	if busy.StatusCode != http.StatusConflict {
+		t.Errorf("concurrent sweep: status %d, want 409", busy.StatusCode)
+	}
+	close(release)
+	sw := awaitSweep(t, cl, srv)
+	if sawCancel {
+		t.Error("sweep context was cancelled when its request ended")
+	}
+	if sw.Reviewed != 5 {
+		t.Errorf("reviewed = %d, want 5", sw.Reviewed)
 	}
 }
 

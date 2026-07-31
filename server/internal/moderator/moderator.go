@@ -62,11 +62,24 @@ type Live struct {
 	AllowAdult bool
 }
 
+// ErrSweepInProgress is returned when a sweep is already running. Callers
+// that were going to start one on a timer should simply skip; a caller acting
+// on an operator's request should say so.
+var ErrSweepInProgress = errors.New("moderator: a sweep is already in progress")
+
 // Moderator runs the periodic classification pass.
 type Moderator struct {
 	st  *store.Store
 	cfg Config
 	hc  *http.Client
+
+	// running admits one sweep at a time across every caller. Nothing claims
+	// the rows a sweep is working on — Unreviewed just selects reviewed_at = 0
+	// — so two concurrent sweeps would classify the same batch twice, paying
+	// the model twice and double-counting the result before racing to update
+	// the same rows. The guard lives here rather than in any one caller so the
+	// timer and the admin console cannot overlap with each other.
+	running chan struct{}
 }
 
 // live returns the settings in force right now.
@@ -118,7 +131,7 @@ func New(st *store.Store, cfg Config) (*Moderator, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: cfg.Timeout}
 	}
-	return &Moderator{st: st, cfg: cfg, hc: hc}, nil
+	return &Moderator{st: st, cfg: cfg, hc: hc, running: make(chan struct{}, 1)}, nil
 }
 
 // Run sweeps every Interval until ctx is cancelled. It blocks.
@@ -140,6 +153,10 @@ func (m *Moderator) Run(ctx context.Context) {
 				if ctx.Err() != nil {
 					return
 				}
+				if errors.Is(err, ErrSweepInProgress) {
+					// A manual sweep is running; this tick has nothing to do.
+					continue
+				}
 				m.cfg.Logger.Printf("moderator: sweep: %v", err)
 				m.st.IncrStat("llm_errors", 1)
 				continue
@@ -154,8 +171,17 @@ func (m *Moderator) Run(ctx context.Context) {
 
 // SweepOnce classifies up to MaxBatches batches of unreviewed torrents.
 // A batch that fails is left unmarked so the next sweep retries it.
+//
+// Only one sweep runs at a time process-wide; a second concurrent call
+// returns ErrSweepInProgress without touching the model.
 func (m *Moderator) SweepOnce(ctx context.Context) (Summary, error) {
 	var total Summary
+	select {
+	case m.running <- struct{}{}:
+		defer func() { <-m.running }()
+	default:
+		return total, ErrSweepInProgress
+	}
 	for n := 0; m.cfg.MaxBatches == 0 || n < m.cfg.MaxBatches; n++ {
 		cands, err := m.st.Unreviewed(m.cfg.BatchSize)
 		if err != nil {

@@ -37,10 +37,12 @@ var minTotalSize atomic.Int64
 
 func init() { minTotalSize.Store(100 << 20) } // 100 MiB
 
-// SetMinTotalSize changes the size floor for subsequent checks. A value of 0
-// or less is ignored, since it would admit every zero-byte stub in the DHT.
+// SetMinTotalSize changes the size floor for subsequent checks. Zero disables
+// the floor, which is what MIN_TORRENT_SIZE=0 has always meant — and is safe,
+// because Check only applies the floor to torrents with a positive size and
+// already rejects zero-size ones as spam. Negatives are ignored as nonsense.
 func SetMinTotalSize(n int64) {
-	if n > 0 {
+	if n >= 0 {
 		minTotalSize.Store(n)
 	}
 }

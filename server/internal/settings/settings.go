@@ -114,6 +114,12 @@ type Store interface {
 type Settings struct {
 	db Store
 
+	// writeMu serializes whole writes. Without it two concurrent Set calls on
+	// one key can interleave their persist and publish steps — A persists,
+	// B persists, B publishes, A publishes — leaving memory holding a value
+	// the database disagrees with until the next restart flips it back.
+	writeMu sync.Mutex
+
 	mu   sync.RWMutex
 	vals map[string]string
 
@@ -156,6 +162,8 @@ func (s *Settings) Set(key, raw string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", key, err)
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if err := s.db.SetSetting(key, norm); err != nil {
 		return err
 	}
@@ -183,6 +191,8 @@ func normalize(kind Kind, raw string) (string, error) {
 		if n < 0 {
 			return "", fmt.Errorf("must not be negative: %d", n)
 		}
+		// 0 is meaningful: it disables the floor entirely, which is what
+		// MIN_TORRENT_SIZE=0 has always meant.
 		return strconv.FormatInt(n, 10), nil
 	}
 	return "", fmt.Errorf("unknown kind %q", kind)

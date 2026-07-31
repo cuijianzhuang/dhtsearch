@@ -313,13 +313,18 @@ func main() {
 	}
 
 	// Periodic LLM moderation pass over rows the static filter admitted.
-	// sweepNow stays nil when the pass is not running, which the console shows
-	// rather than offering a button that cannot work.
+	//
+	// Construction is gated on having an API key, not on the enable setting:
+	// whether the pass actually runs is a live setting the console owns, and a
+	// moderator that was never built could not be switched on there. The
+	// startup value only seeds that setting. sweepNow stays nil when there is
+	// no key at all, which the console reports rather than offering a button
+	// that cannot work.
 	var sweepNow func(context.Context) (int, int64, error)
-	if *modEnabled {
+	{
 		key := os.Getenv("OPENAI_API_KEY")
 		if key == "" {
-			logger.Printf("moderator: disabled (OPENAI_API_KEY not set; see env.example)")
+			logger.Printf("moderator: unavailable (OPENAI_API_KEY not set; see env.example)")
 		} else {
 			mod, err := moderator.New(st, moderator.Config{
 				BaseURL:    *modBaseURL,
@@ -350,6 +355,10 @@ func main() {
 			sweepNow = func(ctx context.Context) (int, int64, error) {
 				sum, err := mod.SweepOnce(ctx)
 				return sum.Reviewed, sum.Deleted, err
+			}
+			if !live.Bool(settings.ModerationEnabled) {
+				logger.Printf("moderator: built but idle (moderation is switched off; " +
+					"turn it on from /admin without a restart)")
 			}
 			go mod.Run(ctx)
 		}
@@ -438,6 +447,7 @@ func main() {
 		Settings:    live,
 		Stats:       apiSrv.StatsJSON,
 		SweepNow:    sweepNow,
+		BaseCtx:     ctx,
 		RestartOnly: restartOnly(*metaWorkers, *samplers, *metaTimeout, *scrapeEnabled, *rateRPS),
 		Logger:      logger,
 	}); adm != nil {

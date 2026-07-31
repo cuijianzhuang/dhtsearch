@@ -115,7 +115,9 @@
     <div class="row">
       <div>
         <div class="label">立即审核一轮</div>
-        <div class="help">不等下一个整点，马上跑一轮 LLM 复审。会消耗 API 额度。</div>
+        <div class="help">不等下一个整点，马上跑一轮 LLM 复审。会消耗 API 额度。
+          整轮可能要跑几分钟，所以它在后台运行，进度在这里刷新。</div>
+        <div class="help" id="sweepStatus"></div>
       </div>
       <button id="sweepBtn">运行</button>
     </div>
@@ -311,12 +313,38 @@ function renderBlocked(rows) {
   wrap.append(table);
 }
 
+// sweepPoll is the timer that follows a running sweep; only one at a time.
+let sweepPoll = null;
+
+function renderSweep(sw, canSweep) {
+  const el = $("sweepStatus");
+  const btn = $("sweepBtn");
+  sw = sw || {};
+  if (sw.running) {
+    const secs = sw.started_at ? Math.max(0, Math.round(Date.now() / 1000 - sw.started_at)) : 0;
+    el.textContent = "进行中… 已用时 " + secs + " 秒";
+    btn.disabled = true;
+    // Follow it to completion without the operator having to hit 刷新.
+    if (!sweepPoll) sweepPoll = setInterval(() => load().catch(() => {}), 5000);
+    return;
+  }
+  if (sweepPoll) { clearInterval(sweepPoll); sweepPoll = null; }
+  btn.disabled = !canSweep;
+  if (sw.error) {
+    el.textContent = "上一轮失败：" + sw.error;
+  } else if (sw.finished_at) {
+    el.textContent = "上一轮：复审 " + (sw.reviewed || 0) + " 条，删除 " + (sw.deleted || 0) + " 条";
+  } else {
+    el.textContent = canSweep ? "" : "审核不可用（缺少 OPENAI_API_KEY）";
+  }
+}
+
 async function load() {
   const s = await api("state");
   renderTiles(s.stats || {});
   renderSettings(s.settings || []);
   renderRestartOnly(s.restart_only);
-  $("sweepBtn").disabled = !s.can_sweep;
+  renderSweep(s.sweep, s.can_sweep);
   showApp();
 }
 
@@ -371,9 +399,8 @@ $("unblockAdult").onclick = bulkUnblock("adult", "成人内容");
 $("unblockSpam").onclick = bulkUnblock("spam", "垃圾内容");
 
 $("sweepBtn").onclick = (e) => act(e.target, async () => {
-  toast("审核进行中…", true);
-  const r = await api("sweep", {});
-  toast("审核完成：复审 " + r.reviewed + " 条，删除 " + r.deleted + " 条", true);
+  await api("sweep", {});
+  toast("审核已在后台开始，进度见下方", true);
   await load();
 });
 

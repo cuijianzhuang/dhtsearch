@@ -2,11 +2,14 @@ package settings
 
 import (
 	"errors"
+	"strconv"
+	"sync"
 	"testing"
 )
 
 // fakeStore is an in-memory Store.
 type fakeStore struct {
+	mu      sync.Mutex
 	vals    map[string]string
 	setErr  error
 	loadErr error
@@ -16,6 +19,8 @@ type fakeStore struct {
 func newFake() *fakeStore { return &fakeStore{vals: map[string]string{}} }
 
 func (f *fakeStore) Settings() (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.loadErr != nil {
 		return nil, f.loadErr
 	}
@@ -27,6 +32,8 @@ func (f *fakeStore) Settings() (map[string]string, error) {
 }
 
 func (f *fakeStore) SetSetting(key, value string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.setErr != nil {
 		return f.setErr
 	}
@@ -162,5 +169,52 @@ func TestLoadPropagatesStoreError(t *testing.T) {
 	db.loadErr = errors.New("database is locked")
 	if _, err := Load(db, nil); err == nil {
 		t.Fatal("expected the load error to surface rather than starting with defaults")
+	}
+}
+
+// Zero is a real value for the size floor: MIN_TORRENT_SIZE=0 has always meant
+// "no floor". Rejecting it here, or accepting it and having the filter ignore
+// it, both leave the console displaying a number the pipeline is not using.
+func TestZeroMinSizeIsAccepted(t *testing.T) {
+	db := newFake()
+	s, err := Load(db, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set(MinTorrentSize, "0"); err != nil {
+		t.Fatalf("Set(0): %v", err)
+	}
+	if got := s.Int64(MinTorrentSize); got != 0 {
+		t.Errorf("Int64 = %d, want 0", got)
+	}
+	if db.vals[MinTorrentSize] != "0" {
+		t.Errorf("persisted %q, want \"0\"", db.vals[MinTorrentSize])
+	}
+}
+
+// Concurrent writes to one key must not leave memory and disk disagreeing.
+func TestConcurrentSetKeepsStoreAndMemoryAgreeing(t *testing.T) {
+	db := newFake()
+	s, err := Load(db, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			v := "false"
+			if i%2 == 0 {
+				v = "true"
+			}
+			if err := s.Set(FilterAdult, v); err != nil {
+				t.Errorf("Set: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if got, want := strconv.FormatBool(s.Bool(FilterAdult)), db.vals[FilterAdult]; got != want {
+		t.Errorf("memory has %q but the database has %q", got, want)
 	}
 }
