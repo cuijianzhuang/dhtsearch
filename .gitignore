@@ -10,3 +10,6 @@ data/
 # matched by these patterns.
 .env
 .env.*
+
+# Local build output from start.sh.
+.run/

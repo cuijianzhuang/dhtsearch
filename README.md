@@ -92,18 +92,34 @@ seeder 数，然后按 seeder 数从高到低喂给获取端——热门资源�
 
 ## 快速开始
 
-### 后端
+### 一键启动
+
+```bash
+./start.sh --demo    # 不爬 DHT，插入演示数据——想立刻看到界面用这个
+./start.sh           # 完整模式：爬虫运行，索引随时间增长
+./start.sh --prod    # 前端用生产构建而非 dev server
+```
+
+前后端一起起，等两边都真正就绪了才打印地址，Ctrl-C 一次全部停干净。首次运行会自动
+从 `env.example` 生成 `.env` 并安装前端依赖。端口和路径可用 `API_PORT`（8080）、
+`WEB_PORT`（3000）、`DB_PATH`（`./data/dhtsearch.db`）覆盖。
+
+`--demo` 同时关掉爬虫和元数据获取：没有爬虫就没有东西要取，而元数据获取会开监听
+套接字，在没有 IPv6 的容器里直接启动失败——那恰恰是最需要演示模式的地方。
+
+### 手动启动
 
 ```bash
 cp env.example .env           # 填入 OPENAI_API_KEY（.env 已 gitignore）
 
 cd server
 
-# 完整模式：启动 DHT 爬虫（需要 UDP 出站，索引随时间增长）
-go run ./cmd/server
+# 注意 ENV_FILE：它是相对**工作目录**解析的。在 server/ 下不指定的话，仓库根目录
+# 的 .env 会被静默忽略（不报错），里面的 OPENAI_API_KEY、ADMIN_PASSWORD 全部失效。
+ENV_FILE=../.env go run ./cmd/server
 
-# 演示模式：不爬 DHT，插入演示数据，便于本地验证 API/前端
-CRAWL_ENABLED=false go run ./cmd/server --seed-demo
+# 演示模式
+ENV_FILE=../.env CRAWL_ENABLED=false FETCH_METADATA=false go run ./cmd/server --seed-demo
 ```
 
 默认监听 `:8080`。配置项（环境变量或同名 flag）：
