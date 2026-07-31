@@ -40,6 +40,11 @@ type Config struct {
 	Timeout    time.Duration // per-request timeout
 	DryRun     bool          // classify and log, but delete nothing
 	TrimTitles bool          // also strip advertising from titles
+	// AllowAdult keeps adult listings instead of removing them, for indexes
+	// whose static filter is admitting them on purpose (FILTER_ADULT=false).
+	// Spam removal is unaffected. The zero value filters adult content, so
+	// forgetting to set this can never widen what the index keeps.
+	AllowAdult bool
 	Logger     *log.Logger
 	HTTPClient *http.Client // optional; for tests
 }
@@ -92,8 +97,8 @@ func New(st *store.Store, cfg Config) (*Moderator, error) {
 
 // Run sweeps every Interval until ctx is cancelled. It blocks.
 func (m *Moderator) Run(ctx context.Context) {
-	m.cfg.Logger.Printf("moderator: enabled (model=%s interval=%s batch=%d dry-run=%v trim-titles=%v)",
-		m.cfg.Model, m.cfg.Interval, m.cfg.BatchSize, m.cfg.DryRun, m.cfg.TrimTitles)
+	m.cfg.Logger.Printf("moderator: enabled (model=%s interval=%s batch=%d dry-run=%v trim-titles=%v allow-adult=%v)",
+		m.cfg.Model, m.cfg.Interval, m.cfg.BatchSize, m.cfg.DryRun, m.cfg.TrimTitles, m.cfg.AllowAdult)
 	t := time.NewTicker(m.cfg.Interval)
 	defer t.Stop()
 	for {
@@ -352,7 +357,12 @@ func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]ve
 		}
 		switch strings.ToLower(strings.TrimSpace(v.Label)) {
 		case labelAdult:
-			out[v.I-1].label = labelAdult
+			// Left as "ok" when adult content is allowed, which also lets the
+			// title trimming below apply to it — it is being kept, so it
+			// should be as clean as anything else on the page.
+			if !m.cfg.AllowAdult {
+				out[v.I-1].label = labelAdult
+			}
 		case labelSpam:
 			out[v.I-1].label = labelSpam
 		}

@@ -339,8 +339,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"seen":           counters["seen"],
 		"fetched":        counters["fetched"],
 		"adult_filtered": counters["adult_filtered"],
-		"spam_filtered":  counters["spam_filtered"],
-		"size_filtered":  counters["size_filtered"],
+		// Adult torrents admitted because FILTER_ADULT is off. Stays 0 in the
+		// default configuration, where they are dropped and counted above.
+		"adult_indexed": counters["adult_indexed"],
+		"spam_filtered": counters["spam_filtered"],
+		"size_filtered": counters["size_filtered"],
 		// Metadata fetch outcomes. A timeout share near 100% means the
 		// fetch pool, not discovery, is what caps indexing throughput.
 		"fetch": map[string]any{

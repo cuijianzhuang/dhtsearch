@@ -119,6 +119,7 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | `META_TIMEOUT` | `45s` | 元数据获取超时基准值（按 seeder 数缩放，见上） |
 | `FETCH_METADATA` | `true` | 是否获取元数据（false 时只收 infohash） |
 | `MIN_TORRENT_SIZE` | `104857600`（100 MiB） | 低于此总体积的种子不入库 |
+| `FILTER_ADULT` | `true` | 是否过滤成人内容（`false` 时入库，且 LLM 审核也不再删除，见下） |
 | `ENV_FILE` | `.env` | .env 文件路径（相对工作目录） |
 | `RATE_LIMIT_RPS` | `3` | 每客户端 IP 的持续请求速率（令牌桶，0 = 关闭限流） |
 | `RATE_LIMIT_BURST` | `30` | 令牌桶突发容量 |
@@ -243,6 +244,25 @@ API 搜索路径加入同一防护规则；仅监听回环地址时则不需要�
 - **体积下限**：总体积小于 `MIN_TORRENT_SIZE`（默认 100 MiB）的种子直接丢弃，滤掉假种、单图、纯链接/说明文件等垃圾
 
 命中任一即丢弃并计入统计（`adult_filtered` / `spam_filtered` / `size_filtered`）。规则见 `server/internal/filter/`。
+
+### 成人内容开关（`FILTER_ADULT`）
+
+置 `false` 后成人内容照常入库。**这个开关必须同时作用于两层**——静态词表不再拒绝，
+LLM 审核也不再删除。少改一层的后果不是「没生效」而是更糟：爬虫整天往里索引，审核
+每小时删一遍，还把每个 infohash 写进 `blocked` 表永久拉黑。垃圾内容和体积过小的种子
+不受影响，照样丢弃。
+
+几个需要知道的边界：
+
+- **只对以后生效**。已经被丢弃的内容不会回来，索引得按每分钟约 33 条重新积累。
+- **存量黑名单不动**。之前被 LLM 删掉的成人 hash 仍在 `blocked` 表里、仍会被拒。
+  该表存了 `reason`，所以可以只解封成人那部分：`DELETE FROM blocked WHERE reason
+  = 'adult'`。但注意每条解封的 hash 被重新发现后都要重新占用一个 fetch 槽位，而管道
+  每分钟只消化得掉三十几条，解封量大会明显拖慢新内容入库。
+- **没有分级，也没有访客开关**。结果不打标记，成人内容会直接混在普通搜索结果里。
+  前端那条「本站结果已自动过滤成人内容」的横幅是写死的，关掉开关的话记得改
+  `web/app/search/page.tsx`。
+- 看 `/api/stats`：`adult_filtered` 是拒绝数，`adult_indexed` 是这个开关放行的数量。
 
 ### 第二道：LLM 二次审核（每小时）
 

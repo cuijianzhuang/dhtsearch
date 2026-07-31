@@ -133,6 +133,8 @@ func main() {
 	seedDemo := flag.Bool("seed-demo", false, "insert demo records at startup")
 	minSize := flag.Int64("min-size", envInt64("MIN_TORRENT_SIZE", 100<<20),
 		"skip torrents whose total size is below this many bytes")
+	filterAdult := flag.Bool("filter-adult", envBool("FILTER_ADULT", true),
+		"drop adult content (false: index it, and stop the LLM pass deleting it)")
 
 	// API DoS defenses. See internal/api.Options for what each knob bounds.
 	rateRPS := flag.Float64("rate-rps", envFloat("RATE_LIMIT_RPS", 3),
@@ -172,6 +174,11 @@ func main() {
 	flag.Parse()
 
 	filter.MinTotalSize = *minSize
+
+	if !*filterAdult {
+		logger.Printf("filter: adult filtering is OFF (FILTER_ADULT=false) — " +
+			"adult content will be indexed and the LLM pass will not remove it")
+	}
 
 	st, err := store.Open(*dbPath)
 	if err != nil {
@@ -245,17 +252,15 @@ func main() {
 		}
 		fetcher.Run(ctx, requests, func(rec metadata.Record) {
 			res := filter.Check(rec.Name, rec.Files, rec.TotalSize)
+			if stat, drop := dropReason(res, *filterAdult); drop {
+				st.IncrStat(stat, 1)
+				return
+			}
 			if res.Adult {
-				st.IncrStat("adult_filtered", 1)
-				return
-			}
-			if res.Spam {
-				st.IncrStat("spam_filtered", 1)
-				return
-			}
-			if res.TooSmall {
-				st.IncrStat("size_filtered", 1)
-				return
+				// Admitted on purpose. Counted separately so the operator can
+				// see what the switch is letting through without digging
+				// through the index for it.
+				st.IncrStat("adult_indexed", 1)
 			}
 			if err := st.Upsert(store.Torrent{
 				InfoHash:  rec.InfoHash,
@@ -303,6 +308,11 @@ func main() {
 				MaxBatches: *modMaxBatches,
 				DryRun:     *modDryRun,
 				TrimTitles: *modTrim,
+				// Without this the hourly pass would delete every night what
+				// the crawler indexed that day: the static filter admits the
+				// content, then the classifier removes it and blocklists the
+				// infohash so it can never come back.
+				AllowAdult: !*filterAdult,
 				Logger:     logger,
 			})
 			if err != nil {
@@ -401,6 +411,22 @@ func main() {
 		logger.Fatalf("http: %v", err)
 	}
 	logger.Printf("shutdown complete")
+}
+
+// dropReason maps a filter result onto the counter it should be charged to,
+// or reports that the torrent may be indexed. Adult content is the only
+// signal that is conditional: with filtering off it is admitted, while spam
+// and undersized torrents are junk regardless of anyone's content policy.
+func dropReason(res filter.Result, filterAdult bool) (stat string, drop bool) {
+	switch {
+	case res.Adult && filterAdult:
+		return "adult_filtered", true
+	case res.Spam:
+		return "spam_filtered", true
+	case res.TooSmall:
+		return "size_filtered", true
+	}
+	return "", false
 }
 
 // rankedRequests converts the scraper's prioritized output into fetch
