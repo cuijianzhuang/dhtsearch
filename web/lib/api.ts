@@ -57,6 +57,11 @@ export interface StatsResponse {
   seen?: number;
   fetched?: number;
   adult_filtered?: number;
+  adult_indexed?: number;
+  // Whether the backend is filtering adult content right now. The UI words
+  // its claims from this rather than a second frontend setting, so the copy
+  // cannot promise filtering the pipeline is not doing.
+  filter_adult?: boolean;
   spam_filtered?: number;
   size_filtered?: number;
   fetch?: {
@@ -139,6 +144,30 @@ export async function fetchTrending(): Promise<TrendingResponse | null> {
   } catch {
     // Trending is decorative — degrade to no section.
     return null;
+  }
+}
+
+// Whether adult filtering is on, for pages that need the answer but not the
+// counts. Shared cache and no per-client IP headers, matching fetchTrending:
+// this is one constant for the whole site, so caching it per visitor would
+// fragment the cache and spend a rate-limit token per page view.
+//
+// A minute, not the five fetchTrending uses: this drives a claim about what
+// the site filters, and after an operator flips the switch the window where
+// the page still says the old thing should be short.
+//
+// Unreachable backend answers false. The banner this drives is a promise to
+// visitors, and a promise that cannot be verified should not be made.
+export async function fetchAdultFilterEnabled(): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}/api/stats`, {
+      next: { revalidate: 60 },
+    });
+    if (!res.ok) return false;
+    const stats = (await res.json()) as StatsResponse;
+    return stats.filter_adult === true;
+  } catch {
+    return false;
   }
 }
 

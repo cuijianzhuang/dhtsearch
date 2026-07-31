@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>DHTSearch 控制台</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#09090b; color:#e4e4e7; font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:960px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:20px; margin:0; letter-spacing:-.01em; }
+  h1 span { color:#10b981; }
+  h2 { font-size:15px; margin:32px 0 12px; color:#a1a1aa; font-weight:600; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:16px;
+           border-bottom:1px solid #27272a; padding-bottom:16px; }
+  .card { border:1px solid #27272a; background:#18181b99; border-radius:8px; padding:16px; }
+  .grid { display:grid; gap:10px; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); }
+  .tile { border:1px solid #27272a; border-radius:8px; padding:10px 12px; background:#18181b99; }
+  .tile .k { font-size:11px; color:#71717a; }
+  .tile .v { font-size:18px; font-variant-numeric:tabular-nums; margin-top:2px; }
+  .row { display:flex; align-items:flex-start; justify-content:space-between; gap:16px;
+         padding:12px 0; border-bottom:1px solid #27272a; }
+  .row:last-child { border-bottom:0; }
+  .row .label { font-weight:500; }
+  .row .help { font-size:12px; color:#71717a; margin-top:2px; }
+  button { font:inherit; border-radius:6px; border:1px solid #3f3f46; background:#27272a;
+           color:#e4e4e7; padding:6px 14px; cursor:pointer; }
+  button:hover:not(:disabled) { border-color:#10b981; color:#34d399; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.danger:hover:not(:disabled) { border-color:#ef4444; color:#f87171; }
+  button.on { background:#065f46; border-color:#10b981; color:#d1fae5; }
+  input { font:inherit; background:#09090b; border:1px solid #3f3f46; border-radius:6px;
+          color:#e4e4e7; padding:6px 10px; }
+  input:focus { outline:none; border-color:#10b981; }
+  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; color:#a1a1aa; }
+  .muted { color:#71717a; font-size:12px; }
+  .warn { border-color:#78350f; background:#451a0326; color:#fbbf24; }
+  #login { max-width:340px; margin:15vh auto; }
+  #login h1 { text-align:center; margin-bottom:24px; }
+  #login form { display:flex; flex-direction:column; gap:10px; }
+  #toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%);
+           border-radius:6px; padding:10px 18px; display:none; max-width:90vw;
+           border:1px solid #3f3f46; background:#18181b; box-shadow:0 8px 24px #000a; }
+  #toast.err { border-color:#7f1d1d; color:#fca5a5; }
+  #toast.ok  { border-color:#065f46; color:#6ee7b7; }
+  table { width:100%; border-collapse:collapse; margin-top:8px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #27272a; font-size:12px;
+           vertical-align:top; }
+  th { color:#71717a; font-weight:500; }
+  td.hash { font-family:ui-monospace,monospace; color:#a1a1aa; word-break:break-all; }
+  .ops { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+</style>
+</head>
+<body>
+<div id="login">
+  <h1>DHT<span>Search</span> 控制台</h1>
+  <form id="loginForm">
+    <input type="password" id="pw" placeholder="管理口令" autocomplete="current-password" autofocus>
+    <button type="submit">登录</button>
+  </form>
+</div>
+
+<main id="app" hidden>
+  <header>
+    <h1>DHT<span>Search</span> 控制台</h1>
+    <div class="ops">
+      <button id="refresh">刷新</button>
+      <button id="logout">退出</button>
+    </div>
+  </header>
+
+  <h2>索引与管道</h2>
+  <div class="grid" id="tiles"></div>
+
+  <h2>运行时配置</h2>
+  <div class="card" id="settings"></div>
+  <p class="muted" id="restartOnly"></p>
+
+  <h2>操作</h2>
+  <div class="card">
+    <div class="row">
+      <div>
+        <div class="label">删除种子</div>
+        <div class="help">按 infohash 从索引删除。勾选「同时拉黑」后爬虫不会再收录它。</div>
+      </div>
+    </div>
+    <div class="ops" style="padding-bottom:12px">
+      <input id="delHash" placeholder="40 位 infohash" size="44">
+      <label class="muted"><input type="checkbox" id="delBlock" checked> 同时拉黑</label>
+      <button class="danger" id="delBtn">删除</button>
+    </div>
+    <div class="row">
+      <div>
+        <div class="label">解封 infohash</div>
+        <div class="help">从黑名单移除。种子不会立刻回来，要等爬虫重新发现并取到元数据。</div>
+      </div>
+    </div>
+    <div class="ops" style="padding-bottom:12px">
+      <input id="unblockHash" placeholder="40 位 infohash" size="44">
+      <button id="unblockBtn">解封</button>
+    </div>
+    <div class="row">
+      <div>
+        <div class="label">批量解封</div>
+        <div class="help">按原因整批解封。每条被解封的 hash 重新发现后都要占一个取元数据的槽位，
+          而管道每分钟只消化得掉几十条——量大时会明显拖慢新内容入库。</div>
+      </div>
+    </div>
+    <div class="ops" style="padding-bottom:12px">
+      <button class="danger" id="unblockAdult">解封全部成人内容</button>
+      <button class="danger" id="unblockSpam">解封全部垃圾内容</button>
+    </div>
+    <div class="row">
+      <div>
+        <div class="label">立即审核一轮</div>
+        <div class="help">不等下一个整点，马上跑一轮 LLM 复审。会消耗 API 额度。
+          整轮可能要跑几分钟，所以它在后台运行，进度在这里刷新。</div>
+        <div class="help" id="sweepStatus"></div>
+      </div>
+      <button id="sweepBtn">运行</button>
+    </div>
+    <div class="row">
+      <div>
+        <div class="label">重置审核标记</div>
+        <div class="help">让全部已审核记录重新排队复审。<strong>会按全库重新计费</strong>。</div>
+      </div>
+      <button class="danger" id="resetBtn">重置</button>
+    </div>
+  </div>
+
+  <h2>黑名单</h2>
+  <div class="card">
+    <div class="ops">
+      <button id="showBlocked">加载最近 100 条</button>
+      <span class="muted" id="blockedCount"></span>
+    </div>
+    <div id="blockedWrap"></div>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+function toast(msg, ok) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = ok ? "ok" : "err";
+  t.style.display = "block";
+  clearTimeout(t._h);
+  t._h = setTimeout(() => { t.style.display = "none"; }, 4000);
+}
+
+function csrf() {
+  const m = document.cookie.match(/(?:^|;\s*)dhtsearch_admin_csrf=([^;]*)/);
+  return m ? decodeURIComponent(m[1]) : "";
+}
+
+async function api(path, body) {
+  const opts = { method: body === undefined ? "GET" : "POST", credentials: "same-origin" };
+  if (body !== undefined) {
+    opts.headers = { "Content-Type": "application/json", "X-Admin-CSRF": csrf() };
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch("/api/admin/" + path, opts);
+  let data = {};
+  try { data = await res.json(); } catch (e) { /* non-JSON error page */ }
+  if (res.status === 401) { showLogin(); throw new Error("请重新登录"); }
+  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  return data;
+}
+
+function showLogin() { $("login").hidden = false; $("app").hidden = true; }
+function showApp() { $("login").hidden = true; $("app").hidden = false; }
+
+// --- rendering. Every value from the server goes in via textContent: torrent
+// names are attacker-supplied, and this page must not be the place that
+// finally renders one as markup. ---
+
+function tile(parent, key, value) {
+  const d = document.createElement("div");
+  d.className = "tile";
+  const k = document.createElement("div"); k.className = "k"; k.textContent = key;
+  const v = document.createElement("div"); v.className = "v";
+  v.textContent = typeof value === "number" ? value.toLocaleString("zh-CN") : String(value);
+  d.append(k, v);
+  parent.append(d);
+}
+
+function pct(a, b) { return b > 0 ? (100 * a / b).toFixed(1) + "%" : "-"; }
+
+function renderTiles(s) {
+  const el = $("tiles");
+  el.textContent = "";
+  const f = s.fetch || {}, c = s.crawler || {}, sc = s.scraper || {}, m = s.moderation || {};
+  tile(el, "已收录", s.torrents || 0);
+  tile(el, "发现 infohash", s.seen || 0);
+  tile(el, "取到元数据", f.fetched || 0);
+  tile(el, "取元数据超时", f.timed_out || 0);
+  tile(el, "已知跳过", f.skipped || 0);
+  tile(el, "成人内容已过滤", s.adult_filtered || 0);
+  if (s.filter_adult === false) tile(el, "成人内容已收录", s.adult_indexed || 0);
+  tile(el, "垃圾已过滤", s.spam_filtered || 0);
+  tile(el, "体积不足已过滤", s.size_filtered || 0);
+  tile(el, "DHT 节点数", c.nodes || 0);
+  tile(el, "采样成功率", pct(c.sampled || 0, (c.sampled || 0) + (c.sample_errors || 0)));
+  tile(el, "刮削命中率", pct(sc.seeded || 0, sc.scraped || 0));
+  tile(el, "刮削队列", sc.queue || 0);
+  tile(el, "待审核", m.pending || 0);
+  tile(el, "已审核", m.reviewed || 0);
+  tile(el, "黑名单", m.blocked || 0);
+}
+
+function renderSettings(defs) {
+  const el = $("settings");
+  el.textContent = "";
+  for (const d of defs) {
+    const row = document.createElement("div"); row.className = "row";
+    const left = document.createElement("div");
+    const label = document.createElement("div"); label.className = "label"; label.textContent = d.label;
+    const help = document.createElement("div"); help.className = "help"; help.textContent = d.help;
+    const env = document.createElement("div"); env.className = "help";
+    env.append(document.createTextNode("环境变量 "));
+    const code = document.createElement("code"); code.textContent = d.env;
+    env.append(code, document.createTextNode("（此处的改动会覆盖它并持久化）"));
+    left.append(label, help, env);
+
+    let control;
+    if (d.kind === "bool") {
+      const on = d.value === "true";
+      control = document.createElement("button");
+      control.className = on ? "on" : "";
+      control.textContent = on ? "已开启" : "已关闭";
+      control.onclick = async () => {
+        control.disabled = true;
+        try {
+          const r = await api("settings", { key: d.key, value: on ? "false" : "true" });
+          renderSettings(r.settings);
+          toast(d.label + (on ? " 已关闭" : " 已开启"), true);
+        } catch (e) { toast(e.message, false); control.disabled = false; }
+      };
+    } else {
+      control = document.createElement("span");
+      control.className = "ops";
+      const input = document.createElement("input");
+      input.value = d.value; input.size = 12; input.inputMode = "numeric";
+      const save = document.createElement("button");
+      save.textContent = "保存";
+      save.onclick = async () => {
+        save.disabled = true;
+        try {
+          const r = await api("settings", { key: d.key, value: input.value.trim() });
+          renderSettings(r.settings);
+          toast(d.label + " 已保存", true);
+        } catch (e) { toast(e.message, false); save.disabled = false; }
+      };
+      control.append(input, save);
+    }
+    row.append(left, control);
+    el.append(row);
+  }
+}
+
+function renderRestartOnly(map) {
+  const el = $("restartOnly");
+  el.textContent = "";
+  const keys = Object.keys(map || {}).sort();
+  if (!keys.length) return;
+  el.append(document.createTextNode("需重启才能生效，只读："));
+  keys.forEach((k, i) => {
+    if (i) el.append(document.createTextNode(" · "));
+    const c = document.createElement("code");
+    c.textContent = k + "=" + map[k];
+    el.append(c);
+  });
+}
+
+function renderBlocked(rows) {
+  const wrap = $("blockedWrap");
+  wrap.textContent = "";
+  $("blockedCount").textContent = rows.length + " 条";
+  if (!rows.length) return;
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const htr = document.createElement("tr");
+  for (const h of ["infohash", "原因", "名称", ""]) {
+    const th = document.createElement("th"); th.textContent = h; htr.append(th);
+  }
+  thead.append(htr);
+  const tbody = document.createElement("tbody");
+  for (const b of rows) {
+    const tr = document.createElement("tr");
+    const h = document.createElement("td"); h.className = "hash"; h.textContent = b.info_hash;
+    const r = document.createElement("td"); r.textContent = b.reason;
+    const n = document.createElement("td"); n.textContent = b.name || "(无)";
+    const a = document.createElement("td");
+    const btn = document.createElement("button");
+    btn.textContent = "解封";
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try { await api("unblock", { info_hash: b.info_hash }); tr.remove(); toast("已解封", true); }
+      catch (e) { toast(e.message, false); btn.disabled = false; }
+    };
+    a.append(btn);
+    tr.append(h, r, n, a);
+    tbody.append(tr);
+  }
+  table.append(thead, tbody);
+  wrap.append(table);
+}
+
+// sweepPoll is the timer that follows a running sweep; only one at a time.
+let sweepPoll = null;
+
+function renderSweep(sw, canSweep) {
+  const el = $("sweepStatus");
+  const btn = $("sweepBtn");
+  sw = sw || {};
+  if (sw.running) {
+    const secs = sw.started_at ? Math.max(0, Math.round(Date.now() / 1000 - sw.started_at)) : 0;
+    el.textContent = "进行中… 已用时 " + secs + " 秒";
+    btn.disabled = true;
+    // Follow it to completion without the operator having to hit 刷新.
+    if (!sweepPoll) sweepPoll = setInterval(() => load().catch(() => {}), 5000);
+    return;
+  }
+  if (sweepPoll) { clearInterval(sweepPoll); sweepPoll = null; }
+  btn.disabled = !canSweep;
+  if (sw.error) {
+    el.textContent = "上一轮失败：" + sw.error;
+  } else if (sw.finished_at) {
+    el.textContent = "上一轮：复审 " + (sw.reviewed || 0) + " 条，删除 " + (sw.deleted || 0) + " 条";
+  } else {
+    el.textContent = canSweep ? "" : "审核不可用（缺少 OPENAI_API_KEY）";
+  }
+}
+
+async function load() {
+  const s = await api("state");
+  renderTiles(s.stats || {});
+  renderSettings(s.settings || []);
+  renderRestartOnly(s.restart_only);
+  renderSweep(s.sweep, s.can_sweep);
+  showApp();
+}
+
+// --- wiring ---
+
+$("loginForm").onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    await api("login", { password: $("pw").value });
+    $("pw").value = "";
+    await load();
+  } catch (err) { toast(err.message, false); }
+};
+
+$("logout").onclick = async () => {
+  try { await api("logout", {}); } catch (e) { /* clearing locally regardless */ }
+  showLogin();
+};
+
+$("refresh").onclick = () => load().catch((e) => toast(e.message, false));
+
+async function act(btn, fn) {
+  btn.disabled = true;
+  try { await fn(); } catch (e) { toast(e.message, false); }
+  btn.disabled = false;
+}
+
+$("delBtn").onclick = (e) => act(e.target, async () => {
+  const hash = $("delHash").value.trim();
+  const r = await api("torrent/delete", { info_hash: hash, blocklist: $("delBlock").checked });
+  toast(r.deleted ? "已删除" : "索引中没有这条记录" + ($("delBlock").checked ? "，已记入黑名单" : ""), r.deleted);
+  $("delHash").value = "";
+  await load();
+});
+
+$("unblockBtn").onclick = (e) => act(e.target, async () => {
+  const r = await api("unblock", { info_hash: $("unblockHash").value.trim() });
+  toast(r.unblocked ? "已解封" : "黑名单里没有这条", r.unblocked);
+  $("unblockHash").value = "";
+  await load();
+});
+
+function bulkUnblock(reason, label) {
+  return (e) => act(e.target, async () => {
+    if (!confirm("确定要解封全部" + label + "吗？每条被解封的 hash 重新发现后都要重新取一次元数据，量大会拖慢新内容入库。")) return;
+    const r = await api("unblock-reason", { reason });
+    toast("已解封 " + r.unblocked + " 条", true);
+    await load();
+  });
+}
+$("unblockAdult").onclick = bulkUnblock("adult", "成人内容");
+$("unblockSpam").onclick = bulkUnblock("spam", "垃圾内容");
+
+$("sweepBtn").onclick = (e) => act(e.target, async () => {
+  await api("sweep", {});
+  toast("审核已在后台开始，进度见下方", true);
+  await load();
+});
+
+$("resetBtn").onclick = (e) => act(e.target, async () => {
+  if (!confirm("确定要让全部已审核记录重新排队吗？这会按全库重新计费。")) return;
+  const r = await api("reset-reviewed", {});
+  toast(r.reset + " 条已重新排队复审", true);
+  await load();
+});
+
+$("showBlocked").onclick = (e) => act(e.target, async () => {
+  const r = await api("blocked?limit=100");
+  renderBlocked(r.blocked || []);
+});
+
+// A live session lands straight on the dashboard; anything else gets the form.
+load().catch(() => showLogin());
+</script>
+</body>
+</html>

@@ -40,15 +40,59 @@ type Config struct {
 	Timeout    time.Duration // per-request timeout
 	DryRun     bool          // classify and log, but delete nothing
 	TrimTitles bool          // also strip advertising from titles
+	// AllowAdult keeps adult listings instead of removing them, for indexes
+	// whose static filter is admitting them on purpose (FILTER_ADULT=false).
+	// Spam removal is unaffected. The zero value filters adult content, so
+	// forgetting to set this can never widen what the index keeps.
+	AllowAdult bool
+	// Live, when set, is consulted at the start of every sweep so the admin
+	// console can change these without a restart. It overrides the static
+	// fields above; nil leaves them in force.
+	Live       func() Live
 	Logger     *log.Logger
 	HTTPClient *http.Client // optional; for tests
 }
+
+// Live is the subset of the configuration that may change while the server is
+// running.
+type Live struct {
+	Enabled    bool
+	DryRun     bool
+	TrimTitles bool
+	AllowAdult bool
+}
+
+// ErrSweepInProgress is returned when a sweep is already running. Callers
+// that were going to start one on a timer should simply skip; a caller acting
+// on an operator's request should say so.
+var ErrSweepInProgress = errors.New("moderator: a sweep is already in progress")
 
 // Moderator runs the periodic classification pass.
 type Moderator struct {
 	st  *store.Store
 	cfg Config
 	hc  *http.Client
+
+	// running admits one sweep at a time across every caller. Nothing claims
+	// the rows a sweep is working on — Unreviewed just selects reviewed_at = 0
+	// — so two concurrent sweeps would classify the same batch twice, paying
+	// the model twice and double-counting the result before racing to update
+	// the same rows. The guard lives here rather than in any one caller so the
+	// timer and the admin console cannot overlap with each other.
+	running chan struct{}
+}
+
+// live returns the settings in force right now.
+func (m *Moderator) live() Live {
+	if m.cfg.Live != nil {
+		return m.cfg.Live()
+	}
+	return Live{
+		Enabled:    true,
+		DryRun:     m.cfg.DryRun,
+		TrimTitles: m.cfg.TrimTitles,
+		AllowAdult: m.cfg.AllowAdult,
+	}
 }
 
 // Summary reports what a single sweep did.
@@ -87,13 +131,13 @@ func New(st *store.Store, cfg Config) (*Moderator, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: cfg.Timeout}
 	}
-	return &Moderator{st: st, cfg: cfg, hc: hc}, nil
+	return &Moderator{st: st, cfg: cfg, hc: hc, running: make(chan struct{}, 1)}, nil
 }
 
 // Run sweeps every Interval until ctx is cancelled. It blocks.
 func (m *Moderator) Run(ctx context.Context) {
-	m.cfg.Logger.Printf("moderator: enabled (model=%s interval=%s batch=%d dry-run=%v trim-titles=%v)",
-		m.cfg.Model, m.cfg.Interval, m.cfg.BatchSize, m.cfg.DryRun, m.cfg.TrimTitles)
+	m.cfg.Logger.Printf("moderator: enabled (model=%s interval=%s batch=%d dry-run=%v trim-titles=%v allow-adult=%v)",
+		m.cfg.Model, m.cfg.Interval, m.cfg.BatchSize, m.cfg.DryRun, m.cfg.TrimTitles, m.cfg.AllowAdult)
 	t := time.NewTicker(m.cfg.Interval)
 	defer t.Stop()
 	for {
@@ -101,10 +145,17 @@ func (m *Moderator) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if !m.live().Enabled {
+				continue
+			}
 			s, err := m.SweepOnce(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
+				}
+				if errors.Is(err, ErrSweepInProgress) {
+					// A manual sweep is running; this tick has nothing to do.
+					continue
 				}
 				m.cfg.Logger.Printf("moderator: sweep: %v", err)
 				m.st.IncrStat("llm_errors", 1)
@@ -120,8 +171,17 @@ func (m *Moderator) Run(ctx context.Context) {
 
 // SweepOnce classifies up to MaxBatches batches of unreviewed torrents.
 // A batch that fails is left unmarked so the next sweep retries it.
+//
+// Only one sweep runs at a time process-wide; a second concurrent call
+// returns ErrSweepInProgress without touching the model.
 func (m *Moderator) SweepOnce(ctx context.Context) (Summary, error) {
 	var total Summary
+	select {
+	case m.running <- struct{}{}:
+		defer func() { <-m.running }()
+	default:
+		return total, ErrSweepInProgress
+	}
 	for n := 0; m.cfg.MaxBatches == 0 || n < m.cfg.MaxBatches; n++ {
 		cands, err := m.st.Unreviewed(m.cfg.BatchSize)
 		if err != nil {
@@ -179,7 +239,7 @@ func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate) (S
 		m.cfg.Logger.Printf("moderator: trim %s %q -> %q", h, raw[h], clean)
 	}
 
-	if m.cfg.DryRun {
+	if m.live().DryRun {
 		for i, h := range adultH {
 			m.cfg.Logger.Printf("moderator: [dry-run] would remove adult %s %q", h, adultN[i])
 		}
@@ -307,6 +367,7 @@ type verdict struct {
 // classify returns a verdict per candidate, aligned by index. Entries the model
 // omits or labels unknown default to "ok" (fail-open: never delete on doubt).
 func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]verdict, error) {
+	live := m.live()
 	// The listing goes over as JSON so "title" is unambiguously delimited. With
 	// a "<title> [1.2GB, 3 files]" line the model intermittently copied the
 	// size suffix into the cleaned title, which validation then rejected.
@@ -325,7 +386,7 @@ func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]ve
 		Temperature:    0,
 		ResponseFormat: &responseFormat{Type: "json_object"},
 		Messages: []chatMessage{
-			{Role: "system", Content: systemPromptFor(m.cfg.TrimTitles)},
+			{Role: "system", Content: systemPromptFor(live.TrimTitles)},
 			{Role: "user", Content: string(listing)},
 		},
 	})
@@ -352,11 +413,16 @@ func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]ve
 		}
 		switch strings.ToLower(strings.TrimSpace(v.Label)) {
 		case labelAdult:
-			out[v.I-1].label = labelAdult
+			// Left as "ok" when adult content is allowed, which also lets the
+			// title trimming below apply to it — it is being kept, so it
+			// should be as clean as anything else on the page.
+			if !live.AllowAdult {
+				out[v.I-1].label = labelAdult
+			}
 		case labelSpam:
 			out[v.I-1].label = labelSpam
 		}
-		if m.cfg.TrimTitles {
+		if live.TrimTitles {
 			out[v.I-1].clean = cleanTitle(cands[v.I-1].Name, v.Clean)
 		}
 	}

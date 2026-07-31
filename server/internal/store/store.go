@@ -81,6 +81,12 @@ CREATE TABLE IF NOT EXISTS stats (
 	key   TEXT PRIMARY KEY,
 	value INTEGER NOT NULL
 );
+-- Runtime configuration set from the admin page. Takes precedence over the
+-- environment, which only seeds keys this table has never held.
+CREATE TABLE IF NOT EXISTS settings (
+	key   TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
 -- Infohashes removed by moderation. Kept so the crawler cannot re-add (and
 -- re-pay to re-classify) a torrent that was already rejected.
 CREATE TABLE IF NOT EXISTS blocked (
@@ -754,4 +760,132 @@ func (s *Store) Close() error {
 func escapeLike(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 	return r.Replace(s)
+}
+
+// --- Runtime settings ---
+
+// Settings returns every stored setting. Missing keys are the caller's
+// problem: this reports what was persisted, not what the defaults are.
+func (s *Store) Settings() (map[string]string, error) {
+	rows, err := s.r.Query(`SELECT key, value FROM settings`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
+}
+
+// SetSetting stores one setting, overwriting any previous value.
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.w.Exec(
+		`INSERT INTO settings (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
+// --- Admin operations ---
+
+// BlockedEntry is one row of the moderation blocklist.
+type BlockedEntry struct {
+	InfoHash  string `json:"info_hash"`
+	Reason    string `json:"reason"`
+	Name      string `json:"name"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+// ListBlocked returns the most recently blocked infohashes, newest first.
+// reason filters by 'adult' or 'spam' when non-empty.
+func (s *Store) ListBlocked(ctx context.Context, reason string, limit int) ([]BlockedEntry, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	q := `SELECT info_hash, reason, name, created_at FROM blocked`
+	args := []any{}
+	if reason != "" {
+		q += ` WHERE reason = ?`
+		args = append(args, reason)
+	}
+	q += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.r.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BlockedEntry
+	for rows.Next() {
+		var b BlockedEntry
+		if err := rows.Scan(&b.InfoHash, &b.Reason, &b.Name, &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// Delete removes one torrent from the index. blocklist also records it as
+// rejected so the crawler cannot re-add it; without that the hash comes
+// straight back the next time it is discovered.
+func (s *Store) Delete(hash, reason string, blocklist bool, ts int64) (bool, error) {
+	if !blocklist {
+		res, err := s.w.Exec(`DELETE FROM torrents WHERE info_hash = ?`, hash)
+		if err != nil {
+			return false, err
+		}
+		n, err := res.RowsAffected()
+		return n > 0, err
+	}
+	var name string
+	// The name is only for the blocklist's audit trail, so a row that is
+	// already gone still blocks cleanly with an empty one.
+	s.r.QueryRow(`SELECT name FROM torrents WHERE info_hash = ?`, hash).Scan(&name)
+	n, err := s.Block([]string{hash}, []string{name}, reason, ts)
+	return n > 0, err
+}
+
+// Unblock lifts the moderation block on one infohash. The torrent itself is
+// not restored: it comes back only when the crawler next discovers it and the
+// fetch succeeds.
+func (s *Store) Unblock(hash string) (bool, error) {
+	res, err := s.w.Exec(`DELETE FROM blocked WHERE info_hash = ?`, hash)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// UnblockReason lifts every block recorded with the given reason, which is
+// how an operator undoes a policy rather than an individual verdict — for
+// instance after turning adult filtering off. Returns the number lifted.
+//
+// Each unblocked hash costs a metadata fetch when it is rediscovered, and the
+// pipeline only manages a few dozen a minute, so a large sweep here visibly
+// slows new indexing for a while.
+func (s *Store) UnblockReason(reason string) (int64, error) {
+	res, err := s.w.Exec(`DELETE FROM blocked WHERE reason = ?`, reason)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ResetReviewed clears the moderation stamp so the next sweeps re-classify
+// the rows. Every reset row is re-sent to the model, so this re-incurs the
+// API cost of everything it touches.
+func (s *Store) ResetReviewed() (int64, error) {
+	res, err := s.w.Exec(`UPDATE torrents SET reviewed_at = 0 WHERE reviewed_at <> 0`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }

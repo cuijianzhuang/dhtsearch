@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"unicode"
 )
 
@@ -27,10 +28,27 @@ type Result struct {
 // indexed.
 func (r Result) Rejected() bool { return r.Adult || r.Spam || r.TooSmall }
 
-// MinTotalSize is the smallest torrent worth indexing. Anything below it is
+// minTotalSize is the smallest torrent worth indexing. Anything below it is
 // dropped as junk (fake stubs, single images, link/readme-only torrents).
-// Overridable at startup from MIN_TORRENT_SIZE.
-var MinTotalSize int64 = 100 << 20 // 100 MiB
+// Seeded from MIN_TORRENT_SIZE and changeable from the admin console while the
+// crawler runs, so it is atomic rather than a plain variable: Check runs on
+// every metadata worker at once.
+var minTotalSize atomic.Int64
+
+func init() { minTotalSize.Store(100 << 20) } // 100 MiB
+
+// SetMinTotalSize changes the size floor for subsequent checks. Zero disables
+// the floor, which is what MIN_TORRENT_SIZE=0 has always meant — and is safe,
+// because Check only applies the floor to torrents with a positive size and
+// already rejects zero-size ones as spam. Negatives are ignored as nonsense.
+func SetMinTotalSize(n int64) {
+	if n >= 0 {
+		minTotalSize.Store(n)
+	}
+}
+
+// MinTotalSize returns the current size floor.
+func MinTotalSize() int64 { return minTotalSize.Load() }
 
 const (
 	maxNameLen        = 300
@@ -192,8 +210,8 @@ func Check(name string, files []File, totalSize int64) Result {
 	// --- Size floor ---
 	// Distinct from spam: the torrent may be perfectly legitimate, just too
 	// small to be worth indexing.
-	if totalSize > 0 && totalSize < MinTotalSize {
-		add("total size %d below minimum %d", totalSize, MinTotalSize)
+	if min := MinTotalSize(); totalSize > 0 && totalSize < min {
+		add("total size %d below minimum %d", totalSize, min)
 		r.TooSmall = true
 	}
 	if len(files) > maxFileCount {

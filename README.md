@@ -119,11 +119,14 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | `META_TIMEOUT` | `45s` | 元数据获取超时基准值（按 seeder 数缩放，见上） |
 | `FETCH_METADATA` | `true` | 是否获取元数据（false 时只收 infohash） |
 | `MIN_TORRENT_SIZE` | `104857600`（100 MiB） | 低于此总体积的种子不入库 |
+| `FILTER_ADULT` | `true` | 是否过滤成人内容（`false` 时入库，且 LLM 审核也不再删除，见下） |
 | `ENV_FILE` | `.env` | .env 文件路径（相对工作目录） |
 | `RATE_LIMIT_RPS` | `3` | 每客户端 IP 的持续请求速率（令牌桶，0 = 关闭限流） |
 | `RATE_LIMIT_BURST` | `30` | 令牌桶突发容量 |
 | `SEARCH_MAX_INFLIGHT` | `16` | 并发搜索上限，超出直接 503 甩负载 |
 | `SEARCH_TIMEOUT` | `10s` | 单次搜索的数据库时间预算 |
+| `ADMIN_PASSWORD` | 无 | 后台控制台口令，留空则整个控制台不挂载 |
+| `ADMIN_SECURE` | `true` | 会话 cookie 是否标记 Secure（仅在内网走 HTTP 时才关） |
 
 LLM 审核相关（见下文「LLM 二次审核」）：
 
@@ -148,6 +151,48 @@ npm install
 npm run dev                  # 开发
 # 或 npm run build && npm run start   # 生产
 ```
+
+## 后台控制台
+
+设了 `ADMIN_PASSWORD` 才会挂载，访问 `/admin`。**留空时连路由都不注册**——没有口令还能进的后台，比没有后台更糟。
+
+页面由 Go 二进制自己伺服（`go:embed` 的单文件），不进 Next.js 打包。这不是偷懒：
+公开 API 对所有响应发 `Access-Control-Allow-Origin: *`，而通配符和携带 cookie 的
+请求互斥，浏览器会直接拒绝发送会话 cookie。同源伺服把这个问题整个绕开了。
+
+能做的事：
+
+- **看板**：收录量、发现/取元数据/超时/跳过、各类过滤计数、DHT 节点数与采样成功率、
+  刮削命中率与队列深度、审核进度与黑名单规模。数据直接复用 `/api/stats` 的响应体，
+  所以看板和公开接口永远不会对不上。
+- **改运行时配置**：成人内容开关、最小种子体积、审核总开关/dry-run/标题清理。
+  **改动写进数据库并立刻生效**，重启后仍在——环境变量只在数据库从未存过该键时充当
+  初值。反过来说，改完环境变量重启是不会覆盖控制台里设过的值的，要改回去请在控制台改。
+- **写操作**：按 infohash 删除（可同时拉黑）、解封单个 hash、按原因批量解封、
+  立即跑一轮 LLM 审核、重置全库审核标记。
+- 面板里还会列出 `META_WORKERS`、`DHT_SAMPLERS` 等**只读**项。它们在组件构建时读取
+  一次，做成可改的控件只会显示一个管道并没有在用的值，所以这里只展示、不提供修改。
+
+安全设计：
+
+- 口令用常数时间比较，**连错 5 次锁 15 分钟**（锁定期间正确口令也不放行，否则拦不住
+  在线爆破）。计数按客户端 IP，且只有来自回环/内网的对端才采信 `X-Forwarded-For`。
+- 会话 cookie 是 `HttpOnly` + `SameSite=Strict` + `Secure`，服务端保存，退出即失效。
+- 所有写操作额外要求 `X-Admin-CSRF` 头（双提交令牌）。`SameSite=Strict` 是主防线，
+  这一层挡的是忽略 SameSite 的浏览器——跨站表单提交设不了自定义头。
+- 页面带 `default-src 'none'` 的 CSP 和 `frame-ancestors 'none'`，且所有服务端数据
+  都用 `textContent` 注入。种子名是攻击者可控的，这个页面不能是最终把它当成标记渲染的地方。
+- **每一次写操作都记审计日志**，含来源 IP：`admin[1.2.3.4]: set filter_adult = false`。
+
+反向代理要把两个前缀转给 Go 服务（并传 `X-Forwarded-For`，否则锁定会算在代理头上）：
+
+```nginx
+location /admin      { proxy_pass http://127.0.0.1:8081; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }
+location /api/admin/ { proxy_pass http://127.0.0.1:8081; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }
+```
+
+口令是暴露在公网上的单一共享密钥，建议用 `openssl rand -base64 24` 生成，并放进
+systemd 的 `EnvironmentFile`（`deploy.sh` 不会上传 `.env`）。
 
 ## API
 
@@ -243,6 +288,27 @@ API 搜索路径加入同一防护规则；仅监听回环地址时则不需要�
 - **体积下限**：总体积小于 `MIN_TORRENT_SIZE`（默认 100 MiB）的种子直接丢弃，滤掉假种、单图、纯链接/说明文件等垃圾
 
 命中任一即丢弃并计入统计（`adult_filtered` / `spam_filtered` / `size_filtered`）。规则见 `server/internal/filter/`。
+
+### 成人内容开关（`FILTER_ADULT`）
+
+置 `false` 后成人内容照常入库。**这个开关必须同时作用于两层**——静态词表不再拒绝，
+LLM 审核也不再删除。少改一层的后果不是「没生效」而是更糟：爬虫整天往里索引，审核
+每小时删一遍，还把每个 infohash 写进 `blocked` 表永久拉黑。垃圾内容和体积过小的种子
+不受影响，照样丢弃。
+
+几个需要知道的边界：
+
+- **只对以后生效**。已经被丢弃的内容不会回来，索引得按每分钟约 33 条重新积累。
+- **存量黑名单不动**。之前被 LLM 删掉的成人 hash 仍在 `blocked` 表里、仍会被拒。
+  该表存了 `reason`，所以可以只解封成人那部分：`DELETE FROM blocked WHERE reason
+  = 'adult'`。但注意每条解封的 hash 被重新发现后都要重新占用一个 fetch 槽位，而管道
+  每分钟只消化得掉三十几条，解封量大会明显拖慢新内容入库。
+- **没有分级，也没有访客开关**。结果不打标记，成人内容会直接混在普通搜索结果里。
+- **前端文案自动跟随**，不需要手改。开关状态通过 `/api/stats` 的 `filter_adult`
+  暴露，首页副标题、页脚统计和搜索页横幅都据此措辞——一个环境变量同时管住行为和
+  说法，不会出现「页面说已过滤、实际没过滤」。后端连不上时一律按「未过滤」显示：
+  验证不了的承诺就不做。
+- 看 `/api/stats`：`adult_filtered` 是拒绝数，`adult_indexed` 是这个开关放行的数量。
 
 ### 第二道：LLM 二次审核（每小时）
 

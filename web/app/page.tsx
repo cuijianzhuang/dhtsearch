@@ -23,6 +23,9 @@ function TrendingRow({ label, titles }: { label: string; titles: string[] }) {
 
 export default async function Home() {
   const [stats, trending] = await Promise.all([fetchStats(), fetchTrending()]);
+  // Read off the stats response already in hand. A second fetch of the same
+  // URL in this route would collide with that one's cache options.
+  const adultFiltered = stats?.filter_adult === true;
   const rows = [
     { label: "热门电影", titles: trending?.movies ?? [] },
     { label: "热门美剧", titles: trending?.tv ?? [] },
@@ -40,7 +43,7 @@ export default async function Home() {
           干净、无广告的磁力链接搜索引擎
           <br className="sm:hidden" />
           <span className="hidden sm:inline"> · </span>
-          基于 DHT 网络实时收录，自动过滤成人内容与垃圾信息
+          基于 DHT 网络实时收录，自动过滤{adultFiltered ? "成人内容与垃圾信息" : "垃圾信息"}
         </p>
 
         <div className="mt-10">
@@ -66,9 +69,13 @@ export default async function Home() {
       <footer className="mt-16 text-center text-xs text-zinc-500">
         {stats ? (
           <p>
-            已收录 {formatCount(stats.torrents)} 条 · 已过滤成人内容{" "}
-            {formatCount(stats.adult_filtered)} 条 · 垃圾信息{" "}
-            {formatCount(stats.spam_filtered)} 条
+            已收录 {formatCount(stats.torrents)} 条 ·{" "}
+            {adultFiltered && (
+              <>
+                已过滤成人内容 {formatCount(stats.adult_filtered)} 条 ·{" "}
+              </>
+            )}
+            垃圾信息 {formatCount(stats.spam_filtered)} 条
             {stats.crawler?.enabled === false && (
               <span className="ml-2 text-amber-500">（爬虫暂停中）</span>
             )}

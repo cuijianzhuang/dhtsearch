@@ -7,8 +7,12 @@ export const metadata: Metadata = {
     default: "DHTSearch - 干净的磁力链接搜索",
     template: "%s - DHTSearch",
   },
+  // Static, so it cannot mention adult filtering: that is a runtime setting,
+  // and making the root layout fetch it would put a second, differently-cached
+  // request to /api/stats in every route. The pages that show results carry
+  // the accurate wording via their own generateMetadata.
   description:
-    "干净、无广告的磁力链接搜索引擎。基于 DHT 网络实时收录，自动过滤成人内容与垃圾信息。",
+    "干净、无广告的磁力链接搜索引擎。基于 DHT 网络实时收录，自动过滤垃圾信息。",
 };
 
 const gaId = process.env.NEXT_PUBLIC_GA_ID;
