@@ -7,10 +7,13 @@ interface PaginationProps {
   q: string;
   page: number;
   total: number;
+  // total stopped at the backend's counting cap, so totalPages is a floor and
+  // there may be more pages than the label claims.
+  capped?: boolean;
   pageSize: number;
 }
 
-export default function Pagination({ q, page, total, pageSize }: PaginationProps) {
+export default function Pagination({ q, page, total, capped, pageSize }: PaginationProps) {
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const mkHref = (p: number) =>
     `/search?q=${encodeURIComponent(q)}&page=${p}`;
@@ -39,9 +42,9 @@ export default function Pagination({ q, page, total, pageSize }: PaginationProps
         <span className={disabledCls}>← 上一页</span>
       )}
       <span className="text-sm text-zinc-400">
-        第 {page} / {totalPages} 页
+        第 {page} / {totalPages}{capped ? "+" : ""} 页
       </span>
-      {page < totalPages ? (
+      {page < totalPages || capped ? (
         <Link
           href={mkHref(page + 1)}
           className={btnCls}

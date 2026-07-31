@@ -42,6 +42,17 @@ export function formatCount(n: number | undefined | null): string {
   return n.toLocaleString("zh-CN");
 }
 
+// Format a result count that may be a lower bound, e.g. 10,100+. The backend
+// stops counting past a cap so a keyword search never pays to tally matches
+// nobody can page to, which makes the exact figure unavailable by design.
+export function formatCountAtLeast(
+  n: number | undefined | null,
+  capped: boolean | undefined
+): string {
+  const s = formatCount(n);
+  return capped && s !== "-" ? `${s}+` : s;
+}
+
 // Longest directory prefix (ending in "/") shared by every path.
 //
 // Torrents almost always wrap their contents in one top-level folder named

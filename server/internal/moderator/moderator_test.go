@@ -115,7 +115,8 @@ func TestSweepRemovesAdultAndSpamKeepsOK(t *testing.T) {
 		t.Fatalf("summary = %+v", s)
 	}
 
-	items, total, err := st.Search(t.Context(), "", 1, 10)
+	res, err := st.Search(t.Context(), "", 1, 10)
+	items, total := res.Items, res.Total
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,8 +166,8 @@ func TestBlockedTorrentIsNotReAdded(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, total, _ := st.Search(t.Context(), "", 1, 10); total != 0 {
-		t.Fatalf("blocked infohash was re-added (total=%d)", total)
+	if res, _ := st.Search(t.Context(), "", 1, 10); res.Total != 0 {
+		t.Fatalf("blocked infohash was re-added (total=%d)", res.Total)
 	}
 	if n, _ := st.BlockedCount(t.Context()); n != 1 {
 		t.Fatalf("blocked count = %d, want 1", n)
@@ -186,8 +187,8 @@ func TestDryRunDeletesNothing(t *testing.T) {
 	if s.Adult != 1 || s.Deleted != 0 {
 		t.Fatalf("summary = %+v, want Adult=1 Deleted=0", s)
 	}
-	if _, total, _ := st.Search(t.Context(), "", 1, 10); total != 1 {
-		t.Fatalf("dry run deleted rows (total=%d)", total)
+	if res, _ := st.Search(t.Context(), "", 1, 10); res.Total != 1 {
+		t.Fatalf("dry run deleted rows (total=%d)", res.Total)
 	}
 }
 
@@ -206,8 +207,8 @@ func TestAPIErrorLeavesRowsUnreviewed(t *testing.T) {
 	if n, _ := st.PendingReviewCount(t.Context()); n != 1 {
 		t.Fatalf("pending = %d, want 1 (row must be retried)", n)
 	}
-	if _, total, _ := st.Search(t.Context(), "", 1, 10); total != 1 {
-		t.Fatalf("row deleted on API error (total=%d)", total)
+	if res, _ := st.Search(t.Context(), "", 1, 10); res.Total != 1 {
+		t.Fatalf("row deleted on API error (total=%d)", res.Total)
 	}
 }
 
@@ -257,8 +258,8 @@ func TestUnknownAndMissingLabelsDefaultToOK(t *testing.T) {
 	if s.Deleted != 0 {
 		t.Fatalf("deleted %d rows on malformed verdicts, want 0", s.Deleted)
 	}
-	if _, total, _ := st.Search(t.Context(), "", 1, 10); total != 3 {
-		t.Fatalf("total = %d, want 3", total)
+	if res, _ := st.Search(t.Context(), "", 1, 10); res.Total != 3 {
+		t.Fatalf("total = %d, want 3", res.Total)
 	}
 }
 

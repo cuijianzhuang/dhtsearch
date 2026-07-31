@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/klauspost/compress/zstd"
@@ -36,9 +37,18 @@ type Candidate struct {
 	FileCount int
 }
 
-// Store wraps the SQLite database handle.
+// readConns is the size of the read-only connection pool. WAL's whole point is
+// that readers never block on the writer, so serializing reads behind the
+// single write connection only made the moderation sweep and the search API
+// wait for each other.
+const readConns = 4
+
+// Store wraps the SQLite database handles: one connection for writes (SQLite
+// admits a single writer) and a small pool for reads.
 type Store struct {
-	db *sql.DB
+	w   *sql.DB
+	r   *sql.DB
+	fts bool
 }
 
 // Open opens (and creates if needed) the database at path and ensures the
@@ -120,13 +130,109 @@ CREATE TABLE IF NOT EXISTS blocked (
 		db.Close()
 		return nil, fmt.Errorf("create created_at index: %w", err)
 	}
-	return &Store{db: db}, nil
+	fts, err := setupFTS(db)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create fts index: %w", err)
+	}
+	s := &Store{w: db, r: db, fts: fts}
+	// An in-memory database lives inside its connection: a second handle would
+	// open a second, empty database. Tests are the only user, and they are
+	// single-threaded, so share the one handle there.
+	if !isMemory(path) {
+		rdb, err := sql.Open("sqlite", dsn)
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		rdb.SetMaxOpenConns(readConns)
+		rdb.SetMaxIdleConns(readConns)
+		s.r = rdb
+	}
+	return s, nil
+}
+
+// isMemory reports whether path names an in-memory database rather than a file.
+func isMemory(path string) bool {
+	return path == ":memory:" || strings.Contains(path, "mode=memory")
+}
+
+// FTSEnabled reports whether the full-text index backs keyword search. It is
+// informational: the LIKE path is a complete fallback, so a database without
+// the index answers the same queries, only slower on the rare-term case.
+func (s *Store) FTSEnabled() bool { return s.fts }
+
+// ftsTriggers keep the external-content index in step with the table. The
+// update trigger is scoped to the indexed columns so the moderation sweep's
+// reviewed_at stamping — a hundred rows a batch, none of them retitled — does
+// not churn the index.
+var ftsTriggers = []string{
+	`CREATE TRIGGER torrents_fts_ai AFTER INSERT ON torrents BEGIN
+		INSERT INTO torrents_fts(rowid, name, clean_name)
+			VALUES (new.rowid, new.name, new.clean_name);
+	END`,
+	`CREATE TRIGGER torrents_fts_ad AFTER DELETE ON torrents BEGIN
+		INSERT INTO torrents_fts(torrents_fts, rowid, name, clean_name)
+			VALUES ('delete', old.rowid, old.name, old.clean_name);
+	END`,
+	`CREATE TRIGGER torrents_fts_au AFTER UPDATE OF name, clean_name ON torrents BEGIN
+		INSERT INTO torrents_fts(torrents_fts, rowid, name, clean_name)
+			VALUES ('delete', old.rowid, old.name, old.clean_name);
+		INSERT INTO torrents_fts(rowid, name, clean_name)
+			VALUES (new.rowid, new.name, new.clean_name);
+	END`,
+}
+
+// setupFTS builds the full-text index over the two title columns, backfilling
+// it from rows that predate it.
+//
+// The tokenizer is trigram because it is the only one that preserves what LIKE
+// did: it matches a substring anywhere in the title, including inside a CJK run
+// that a word tokenizer would swallow whole. It indexes 3-rune sequences, so
+// shorter terms are invisible to it — Search keeps the LIKE conditions on top
+// for exactly that reason (see searchKeywords).
+//
+// Creation, backfill and triggers share one transaction: if the process dies
+// partway, the whole index rolls back and the next Open rebuilds it, so a
+// half-populated index is never left behind to answer queries with.
+func setupFTS(db *sql.DB) (bool, error) {
+	var exists int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'torrents_fts'`).Scan(&exists); err != nil {
+		return false, err
+	}
+	if exists > 0 {
+		return true, nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`CREATE VIRTUAL TABLE torrents_fts USING fts5(
+		name, clean_name, content='torrents', content_rowid='rowid', tokenize='trigram')`); err != nil {
+		// A build without FTS5 is not a failure: fall back to LIKE-only search.
+		return false, nil
+	}
+	if _, err := tx.Exec(`INSERT INTO torrents_fts(rowid, name, clean_name)
+		SELECT rowid, name, clean_name FROM torrents`); err != nil {
+		return false, err
+	}
+	for _, stmt := range ftsTriggers {
+		if _, err := tx.Exec(stmt); err != nil {
+			return false, err
+		}
+	}
+	return true, tx.Commit()
 }
 
 // Shared zstd coders. EncodeAll/DecodeAll on a nil-stream coder are safe for
 // concurrent use. Options are static and valid, so construction cannot fail.
 var (
-	zenc, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
+	// Default level, not SpeedBetterCompression: these are a few hundred bytes
+	// of JSON per row and the extra ratio is marginal, but the encode runs on
+	// the insert path of a machine whose CPU the fetch pool already wants.
+	zenc, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
 	zdec, _ = zstd.NewReader(nil)
 )
 
@@ -245,7 +351,7 @@ func (s *Store) Upsert(t Torrent) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(
+	_, err = s.w.Exec(
 		`INSERT OR IGNORE INTO torrents (info_hash, name, total_size, file_count, files, created_at)
 		 SELECT ?, ?, ?, ?, ?, ?
 		 WHERE NOT EXISTS (SELECT 1 FROM blocked WHERE info_hash = ?)`,
@@ -260,46 +366,155 @@ func (s *Store) Upsert(t Torrent) error {
 // ignored.
 const maxKeywords = 8
 
-// selectCols is the projection shared by Search and Latest, decoded by
-// scanTorrents.
-const selectCols = `SELECT info_hash, IIF(clean_name <> '', clean_name, name),
-	total_size, file_count, files, created_at FROM torrents`
+// minTrigramRunes is the shortest keyword the full-text index can find. The
+// trigram tokenizer indexes 3-rune sequences, so a 1- or 2-rune term matches
+// nothing there — and does so silently, returning no rows rather than an
+// error. Two-rune CJK titles ("三体", "沙丘") are ordinary queries here, so
+// short terms must never be handed to MATCH alone.
+const minTrigramRunes = 3
+
+// countCap bounds how far a result count will walk. maxOffset in the API stops
+// pagination at 10k rows, so a caller can never reach past this many results;
+// counting further only makes every search pay for a number nobody reads.
+const countCap = 10_100
+
+// selectFields is the projection shared by Search and Latest, decoded by
+// scanTorrents. The table is always aliased t so the same list works whether
+// or not the full-text index is joined in.
+const selectFields = `SELECT t.info_hash, IIF(t.clean_name <> '', t.clean_name, t.name),
+	t.total_size, t.file_count, t.files, t.created_at FROM `
+
+// Page is one page of search results.
+type Page struct {
+	Items []Torrent
+	// Total is the number of matches, counted no further than countCap.
+	Total int
+	// Capped reports that counting stopped early, making Total a lower bound.
+	Capped bool
+}
 
 // Search finds torrents whose name contains every space-separated keyword
 // of query (AND semantics), newest first. An empty query returns the latest
 // additions. page is 1-based; pageSize must be > 0. ctx bounds the queries:
-// keyword matching is a full-table scan, so callers must be able to cut it
-// off when the client hangs up or a deadline passes.
-func (s *Store) Search(ctx context.Context, query string, page, pageSize int) (items []Torrent, total int, err error) {
+// an unindexed keyword match is a full-table scan, so callers must be able to
+// cut it off when the client hangs up or a deadline passes.
+func (s *Store) Search(ctx context.Context, query string, page, pageSize int) (Page, error) {
 	if page < 1 {
 		page = 1
 	}
-	where, args := "", []interface{}{}
 	keywords := strings.Fields(query)
 	if len(keywords) > maxKeywords {
 		keywords = keywords[:maxKeywords]
 	}
-	if len(keywords) > 0 {
-		var conds []string
-		for _, kw := range keywords {
-			// Match either title: the raw one so trimming can never hide a
-			// result, and the cleaned one so a phrase that only reads
-			// contiguously once the ad text is gone still matches.
-			conds = append(conds, "(name LIKE ? ESCAPE '\\' OR clean_name LIKE ? ESCAPE '\\')")
-			args = append(args, "%"+escapeLike(kw)+"%", "%"+escapeLike(kw)+"%")
+	if len(keywords) == 0 {
+		items, err := s.Latest(ctx, page, pageSize)
+		if err != nil {
+			return Page{}, err
 		}
-		where = " WHERE " + strings.Join(conds, " AND ")
+		total, err := s.Count(ctx)
+		if err != nil {
+			return Page{}, err
+		}
+		return Page{Items: items, Total: total}, nil
 	}
-	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM torrents`+where, args...).Scan(&total); err != nil {
-		return nil, 0, err
+	return s.searchKeywords(ctx, keywords, page, pageSize)
+}
+
+// searchKeywords runs a keyword query, through the full-text index when one is
+// available.
+//
+// The LIKE conditions are applied either way, on top of any MATCH: the index
+// narrows the candidate set, the LIKE decides. That keeps results byte-identical
+// to the unindexed path — including for the short keywords the trigram index
+// cannot see at all — so the index is an accelerator and never the definition
+// of a match.
+func (s *Store) searchKeywords(ctx context.Context, keywords []string, page, pageSize int) (Page, error) {
+	conds, args := likeConds(keywords)
+	from, order := "torrents t", "t.created_at DESC"
+	if s.fts {
+		if match := ftsMatch(keywords); match != "" {
+			from = "torrents_fts f JOIN torrents t ON t.rowid = f.rowid"
+			// rowid is assigned in insertion order and created_at is stamped at
+			// insert, so walking the match list by rowid descending is already
+			// newest-first — and lets the scan stop as soon as the page is
+			// full, instead of materializing every match to sort it.
+			order = "f.rowid DESC"
+			conds = append([]string{"torrents_fts MATCH ?"}, conds...)
+			args = append([]any{match}, args...)
+		}
 	}
-	q := selectCols + where + ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
-	rows, err := s.db.QueryContext(ctx, q, append(args, pageSize, (page-1)*pageSize)...)
+	where := " WHERE " + strings.Join(conds, " AND ")
+
+	var p Page
+	countQ := `SELECT COUNT(*) FROM (SELECT 1 FROM ` + from + where + ` LIMIT ?)`
+	if err := s.r.QueryRowContext(ctx, countQ, append(append([]any{}, args...), countCap+1)...).
+		Scan(&p.Total); err != nil {
+		return Page{}, err
+	}
+	if p.Total > countCap {
+		p.Total, p.Capped = countCap, true
+	}
+
+	q := selectFields + from + where + ` ORDER BY ` + order + ` LIMIT ? OFFSET ?`
+	rows, err := s.r.QueryContext(ctx, q, append(args, pageSize, (page-1)*pageSize)...)
 	if err != nil {
-		return nil, 0, err
+		return Page{}, err
 	}
-	items, err = scanTorrents(rows)
-	return items, total, err
+	p.Items, err = scanTorrents(rows)
+	if err != nil {
+		return Page{}, err
+	}
+	if order != "t.created_at DESC" {
+		// rowid order tracks created_at only for rows this instance inserted
+		// itself; the delta sync merges older rows in after newer ones, which
+		// leaves the two orders slightly apart. Sorting the fetched page puts
+		// it right locally — the page boundaries stay approximate, which is
+		// all created_at ordering ever claimed to be.
+		sortByCreatedDesc(p.Items)
+	}
+	return p, nil
+}
+
+// likeConds builds the match conditions and their arguments, one per keyword.
+func likeConds(keywords []string) ([]string, []any) {
+	conds := make([]string, 0, len(keywords))
+	args := make([]any, 0, 2*len(keywords))
+	for _, kw := range keywords {
+		// Match either title: the raw one so trimming can never hide a
+		// result, and the cleaned one so a phrase that only reads
+		// contiguously once the ad text is gone still matches.
+		conds = append(conds, "(t.name LIKE ? ESCAPE '\\' OR t.clean_name LIKE ? ESCAPE '\\')")
+		args = append(args, "%"+escapeLike(kw)+"%", "%"+escapeLike(kw)+"%")
+	}
+	return conds, args
+}
+
+// ftsMatch builds an FTS5 MATCH expression ANDing the keywords the trigram
+// index can actually resolve. Returns "" when none qualify, which sends the
+// query down the plain LIKE path.
+func ftsMatch(keywords []string) string {
+	var terms []string
+	for _, kw := range keywords {
+		if len([]rune(kw)) < minTrigramRunes {
+			continue
+		}
+		// A double-quoted FTS5 string is a literal phrase; the quote itself is
+		// escaped by doubling. Everything else, including the query syntax's
+		// own operators, is inert inside it.
+		terms = append(terms, `"`+strings.ReplaceAll(kw, `"`, `""`)+`"`)
+	}
+	return strings.Join(terms, " AND ")
+}
+
+// sortByCreatedDesc orders a page newest-first, ties broken by info hash so
+// the order is stable across requests.
+func sortByCreatedDesc(items []Torrent) {
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].CreatedAt != items[j].CreatedAt {
+			return items[i].CreatedAt > items[j].CreatedAt
+		}
+		return items[i].InfoHash < items[j].InfoHash
+	})
 }
 
 // Latest returns a page of the newest torrents without counting the table.
@@ -309,8 +524,9 @@ func (s *Store) Latest(ctx context.Context, page, pageSize int) ([]Torrent, erro
 	if page < 1 {
 		page = 1
 	}
-	rows, err := s.db.QueryContext(ctx,
-		selectCols+` ORDER BY created_at DESC LIMIT ? OFFSET ?`, pageSize, (page-1)*pageSize)
+	rows, err := s.r.QueryContext(ctx,
+		selectFields+`torrents t ORDER BY t.created_at DESC LIMIT ? OFFSET ?`,
+		pageSize, (page-1)*pageSize)
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +561,7 @@ func (s *Store) Unreviewed(limit int) ([]Candidate, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.db.Query(
+	rows, err := s.r.Query(
 		`SELECT info_hash, name, total_size, file_count FROM torrents
 		 WHERE reviewed_at = 0 ORDER BY created_at LIMIT ?`, limit)
 	if err != nil {
@@ -373,7 +589,7 @@ func (s *Store) MarkReviewed(hashes []string, ts int64) error {
 	for _, h := range hashes {
 		args = append(args, h)
 	}
-	_, err := s.db.Exec(
+	_, err := s.w.Exec(
 		`UPDATE torrents SET reviewed_at = ? WHERE info_hash IN (`+placeholders(len(hashes))+`)`, args...)
 	return err
 }
@@ -385,7 +601,7 @@ func (s *Store) SetCleanNames(clean map[string]string) (int64, error) {
 	if len(clean) == 0 {
 		return 0, nil
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.w.Begin()
 	if err != nil {
 		return 0, err
 	}
@@ -422,7 +638,7 @@ func (s *Store) Block(hashes, names []string, reason string, ts int64) (int64, e
 	if len(names) != len(hashes) {
 		return 0, fmt.Errorf("block: %d hashes but %d names", len(hashes), len(names))
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.w.Begin()
 	if err != nil {
 		return 0, err
 	}
@@ -455,17 +671,35 @@ func (s *Store) Block(hashes, names []string, reason string, ts int64) (int64, e
 	return n, tx.Commit()
 }
 
+// Known reports whether an infohash is already indexed or has been rejected by
+// moderation.
+//
+// Both answers mean the same thing to the pipeline: fetching this torrent's
+// metadata would produce a row Upsert then discards. That fetch is the most
+// expensive step there is — tens of seconds of a worker slot — and the crawler
+// re-offers old hashes constantly, because its in-memory dedup ring holds only
+// a few hours of discovery while the database holds everything. Checking here
+// turns those wasted slots back into throughput. Both lookups are on a primary
+// key.
+func (s *Store) Known(ctx context.Context, hash string) (bool, error) {
+	var n int
+	err := s.r.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM torrents WHERE info_hash = ?)
+		     OR EXISTS(SELECT 1 FROM blocked  WHERE info_hash = ?)`, hash, hash).Scan(&n)
+	return n != 0, err
+}
+
 // BlockedCount returns the number of moderation-rejected infohashes.
 func (s *Store) BlockedCount(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM blocked`).Scan(&n)
+	err := s.r.QueryRowContext(ctx, `SELECT COUNT(*) FROM blocked`).Scan(&n)
 	return n, err
 }
 
 // PendingReviewCount returns how many stored torrents await moderation.
 func (s *Store) PendingReviewCount(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM torrents WHERE reviewed_at = 0`).Scan(&n)
+	err := s.r.QueryRowContext(ctx, `SELECT COUNT(*) FROM torrents WHERE reviewed_at = 0`).Scan(&n)
 	return n, err
 }
 
@@ -476,7 +710,7 @@ func placeholders(n int) string {
 
 // IncrStat atomically adds delta to the named counter.
 func (s *Store) IncrStat(key string, delta int64) error {
-	_, err := s.db.Exec(
+	_, err := s.w.Exec(
 		`INSERT INTO stats (key, value) VALUES (?, ?)
 		 ON CONFLICT(key) DO UPDATE SET value = value + excluded.value`, key, delta)
 	return err
@@ -484,7 +718,7 @@ func (s *Store) IncrStat(key string, delta int64) error {
 
 // Stats returns all pipeline counters.
 func (s *Store) Stats(ctx context.Context) (map[string]int64, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM stats`)
+	rows, err := s.r.QueryContext(ctx, `SELECT key, value FROM stats`)
 	if err != nil {
 		return nil, err
 	}
@@ -504,12 +738,17 @@ func (s *Store) Stats(ctx context.Context) (map[string]int64, error) {
 // Count returns the number of stored torrents.
 func (s *Store) Count(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM torrents`).Scan(&n)
+	err := s.r.QueryRowContext(ctx, `SELECT COUNT(*) FROM torrents`).Scan(&n)
 	return n, err
 }
 
 // Close closes the database.
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	if s.r != s.w {
+		s.r.Close()
+	}
+	return s.w.Close()
+}
 
 // escapeLike escapes LIKE wildcards and the escape char itself.
 func escapeLike(s string) string {

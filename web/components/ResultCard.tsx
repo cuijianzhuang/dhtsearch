@@ -23,15 +23,17 @@ export default function ResultCard({
   onToggleSelect: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  // The API already trims the list to what this card renders; slicing again is
+  // belt and braces in case that limit and MAX_FILES_SHOWN drift apart.
   const files = result.files ?? [];
   const shownFiles = files.slice(0, MAX_FILES_SHOWN);
-  // The crawler stores at most 50 file entries but records the real count, so
-  // count what's hidden against file_count — otherwise a 3136-file torrent
-  // claims only 40 files are missing.
+  // The crawler stores at most 50 file entries and the API sends far fewer,
+  // but file_count carries the real total — so count what's hidden against
+  // that, or a 3136-file torrent claims only a handful are missing.
   const totalFiles = Math.max(result.file_count ?? 0, files.length);
   const hiddenFiles = totalFiles - shownFiles.length;
-  // Computed over every file, not just the shown ones, so the prefix doesn't
-  // shift when the "+N more" tail is hidden.
+  // Computed over the delivered files, which are exactly the ones rendered, so
+  // the stripped prefix always matches what the rows below show.
   const root = commonDirPrefix(files.map((f) => f.path));
 
   return (

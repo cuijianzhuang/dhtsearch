@@ -39,7 +39,8 @@ func TestUpsertAndSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	items, total, err := s.Search(t.Context(), "", 1, 10)
+	res, err := s.Search(t.Context(), "", 1, 10)
+	items, total := res.Items, res.Total
 	if err != nil || total != 3 || len(items) != 3 {
 		t.Fatalf("empty search: items=%d total=%d err=%v", len(items), total, err)
 	}
@@ -47,7 +48,8 @@ func TestUpsertAndSearch(t *testing.T) {
 		t.Fatalf("expected newest first, got %q", items[0].InfoHash)
 	}
 
-	items, total, err = s.Search(t.Context(), "big bunny", 1, 10)
+	res, err = s.Search(t.Context(), "big bunny", 1, 10)
+	items, total = res.Items, res.Total
 	if err != nil || total != 1 || items[0].InfoHash != "aa" {
 		t.Fatalf("keyword search: items=%v total=%d err=%v", items, total, err)
 	}
@@ -56,13 +58,15 @@ func TestUpsertAndSearch(t *testing.T) {
 	}
 
 	// LIKE wildcards in the query must be literal.
-	_, total, err = s.Search(t.Context(), "100%", 1, 10)
+	res, err = s.Search(t.Context(), "100%", 1, 10)
+	total = res.Total
 	if err != nil || total != 0 {
 		t.Fatalf("wildcard query: total=%d err=%v", total, err)
 	}
 
 	// Pagination.
-	items, total, err = s.Search(t.Context(), "", 2, 2)
+	res, err = s.Search(t.Context(), "", 2, 2)
+	items, total = res.Items, res.Total
 	if err != nil || total != 3 || len(items) != 1 || items[0].InfoHash != "aa" {
 		t.Fatalf("pagination: items=%v total=%d err=%v", items, total, err)
 	}
@@ -231,7 +235,7 @@ func TestOpenMigratesFilesJSONToCompressedBlob(t *testing.T) {
 	defer s.Close()
 
 	var hasOld int
-	if err := s.db.QueryRow(
+	if err := s.w.QueryRow(
 		`SELECT COUNT(*) FROM pragma_table_info('torrents') WHERE name = 'files_json'`).Scan(&hasOld); err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +244,7 @@ func TestOpenMigratesFilesJSONToCompressedBlob(t *testing.T) {
 	}
 
 	var blobLen int
-	if err := s.db.QueryRow(
+	if err := s.w.QueryRow(
 		`SELECT length(files) FROM torrents WHERE info_hash = 'aa'`).Scan(&blobLen); err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +252,8 @@ func TestOpenMigratesFilesJSONToCompressedBlob(t *testing.T) {
 		t.Fatalf("stored blob is %d bytes, want (0, %d)", blobLen, len(fj))
 	}
 
-	items, total, err := s.Search(t.Context(), "", 1, 10)
+	res, err := s.Search(t.Context(), "", 1, 10)
+	items, total := res.Items, res.Total
 	if err != nil || total != 2 {
 		t.Fatalf("search after migration: total=%d err=%v", total, err)
 	}
@@ -298,7 +303,8 @@ func TestSetCleanNamesReplacesDisplayNameOnly(t *testing.T) {
 	}
 
 	// Search returns the cleaned title...
-	items, _, err := s.Search(t.Context(), "", 1, 10)
+	res, err := s.Search(t.Context(), "", 1, 10)
+	items := res.Items
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,15 +314,15 @@ func TestSetCleanNamesReplacesDisplayNameOnly(t *testing.T) {
 
 	// ...but the raw title is preserved in the row and still matches.
 	var stored string
-	if err := s.db.QueryRow(`SELECT name FROM torrents WHERE info_hash='aa'`).Scan(&stored); err != nil {
+	if err := s.w.QueryRow(`SELECT name FROM torrents WHERE info_hash='aa'`).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
 	if stored != raw {
 		t.Errorf("stored name = %q, want the raw title %q", stored, raw)
 	}
 	for _, q := range []string{"spam.net", "Blue Bloods", "Bloods 1080p"} {
-		if _, total, err := s.Search(t.Context(), q, 1, 10); err != nil || total != 1 {
-			t.Errorf("Search(%q) total = %d err = %v, want 1", q, total, err)
+		if res, err := s.Search(t.Context(), q, 1, 10); err != nil || res.Total != 1 {
+			t.Errorf("Search(%q) total = %d err = %v, want 1", q, res.Total, err)
 		}
 	}
 }

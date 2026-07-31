@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { fetchSearch, type SearchResponse } from "@/lib/api";
-import { formatCount } from "@/lib/format";
+import { formatCount, formatCountAtLeast } from "@/lib/format";
 import SearchBox from "@/components/SearchBox";
 import ResultList from "@/components/ResultList";
 import Pagination from "@/components/Pagination";
@@ -64,14 +64,20 @@ export default async function SearchPage({ searchParams }: PageProps) {
             {q ? (
               <>
                 「<span className="text-zinc-200">{q}</span>」共找到{" "}
-                {formatCount(data.total)} 条结果
+                {formatCountAtLeast(data.total, data.total_capped)} 条结果
               </>
             ) : (
               <>最新收录 · 共 {formatCount(data.total)} 条</>
             )}
           </p>
           <ResultList results={data.results} />
-          <Pagination q={q} page={data.page ?? page} total={data.total ?? 0} pageSize={data.page_size ?? pageSize} />
+          <Pagination
+            q={q}
+            page={data.page ?? page}
+            total={data.total ?? 0}
+            capped={data.total_capped}
+            pageSize={data.page_size ?? pageSize}
+          />
         </>
       ) : (
         <div className="mt-16 text-center">
