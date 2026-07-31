@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"dhtsearch/server/internal/admin"
 	"dhtsearch/server/internal/api"
 	"dhtsearch/server/internal/crawler"
 	"dhtsearch/server/internal/envfile"
@@ -21,6 +22,7 @@ import (
 	"dhtsearch/server/internal/metadata"
 	"dhtsearch/server/internal/moderator"
 	"dhtsearch/server/internal/scraper"
+	"dhtsearch/server/internal/settings"
 	"dhtsearch/server/internal/store"
 	"dhtsearch/server/internal/trending"
 )
@@ -135,6 +137,10 @@ func main() {
 		"skip torrents whose total size is below this many bytes")
 	filterAdult := flag.Bool("filter-adult", envBool("FILTER_ADULT", true),
 		"drop adult content (false: index it, and stop the LLM pass deleting it)")
+	adminPassword := flag.String("admin-password", os.Getenv("ADMIN_PASSWORD"),
+		"password for the /admin console (empty: console disabled)")
+	adminSecure := flag.Bool("admin-secure", envBool("ADMIN_SECURE", true),
+		"mark admin cookies Secure; only turn off to reach the console over plain HTTP")
 
 	// API DoS defenses. See internal/api.Options for what each knob bounds.
 	rateRPS := flag.Float64("rate-rps", envFloat("RATE_LIMIT_RPS", 3),
@@ -173,18 +179,30 @@ func main() {
 		"also strip advertising from torrent titles during the moderation pass")
 	flag.Parse()
 
-	filter.MinTotalSize = *minSize
-
-	if !*filterAdult {
-		logger.Printf("filter: adult filtering is OFF (FILTER_ADULT=false) — " +
-			"adult content will be indexed and the LLM pass will not remove it")
-	}
-
 	st, err := store.Open(*dbPath)
 	if err != nil {
 		logger.Fatalf("store: %v", err)
 	}
 	defer st.Close()
+
+	// Live configuration. The environment (and any flag overriding it) seeds
+	// keys the database has never held; after that the stored value wins, so
+	// a change made in the console survives the next restart.
+	live, err := settings.Load(st, map[string]string{
+		settings.FilterAdult:          strconv.FormatBool(*filterAdult),
+		settings.MinTorrentSize:       strconv.FormatInt(*minSize, 10),
+		settings.ModerationEnabled:    strconv.FormatBool(*modEnabled),
+		settings.ModerationDryRun:     strconv.FormatBool(*modDryRun),
+		settings.ModerationTrimTitles: strconv.FormatBool(*modTrim),
+	})
+	if err != nil {
+		logger.Fatalf("settings: %v", err)
+	}
+	filter.SetMinTotalSize(live.Int64(settings.MinTorrentSize))
+	if !live.Bool(settings.FilterAdult) {
+		logger.Printf("filter: adult filtering is OFF — " +
+			"adult content will be indexed and the LLM pass will not remove it")
+	}
 	if !st.FTSEnabled() {
 		logger.Printf("store: full-text index unavailable, keyword search falls back to scanning")
 	}
@@ -251,8 +269,9 @@ func main() {
 			requests = bareRequests(hashes)
 		}
 		fetcher.Run(ctx, requests, func(rec metadata.Record) {
+			filter.SetMinTotalSize(live.Int64(settings.MinTorrentSize))
 			res := filter.Check(rec.Name, rec.Files, rec.TotalSize)
-			if stat, drop := dropReason(res, *filterAdult); drop {
+			if stat, drop := dropReason(res, live.Bool(settings.FilterAdult)); drop {
 				st.IncrStat(stat, 1)
 				return
 			}
@@ -294,6 +313,9 @@ func main() {
 	}
 
 	// Periodic LLM moderation pass over rows the static filter admitted.
+	// sweepNow stays nil when the pass is not running, which the console shows
+	// rather than offering a button that cannot work.
+	var sweepNow func(context.Context) (int, int64, error)
 	if *modEnabled {
 		key := os.Getenv("OPENAI_API_KEY")
 		if key == "" {
@@ -308,15 +330,26 @@ func main() {
 				MaxBatches: *modMaxBatches,
 				DryRun:     *modDryRun,
 				TrimTitles: *modTrim,
-				// Without this the hourly pass would delete every night what
-				// the crawler indexed that day: the static filter admits the
-				// content, then the classifier removes it and blocklists the
-				// infohash so it can never come back.
-				AllowAdult: !*filterAdult,
-				Logger:     logger,
+				// Without AllowAdult the hourly pass would delete every night
+				// what the crawler indexed that day: the static filter admits
+				// the content, then the classifier removes it and blocklists
+				// the infohash so it can never come back.
+				Live: func() moderator.Live {
+					return moderator.Live{
+						Enabled:    live.Bool(settings.ModerationEnabled),
+						DryRun:     live.Bool(settings.ModerationDryRun),
+						TrimTitles: live.Bool(settings.ModerationTrimTitles),
+						AllowAdult: !live.Bool(settings.FilterAdult),
+					}
+				},
+				Logger: logger,
 			})
 			if err != nil {
 				logger.Fatalf("moderator: %v", err)
+			}
+			sweepNow = func(ctx context.Context) (int, int64, error) {
+				sum, err := mod.SweepOnce(ctx)
+				return sum.Reviewed, sum.Deleted, err
 			}
 			go mod.Run(ctx)
 		}
@@ -372,28 +405,52 @@ func main() {
 	// HTTP API. The timeouts close slow-read and slow-write (slowloris)
 	// connections instead of letting each one pin a goroutine and a socket;
 	// MaxHeaderBytes stops oversized header floods from ballooning memory.
+	apiSrv := api.New(st, func() api.CrawlerStatus {
+		cs := cr.Stats()
+		return api.CrawlerStatus{
+			Enabled:   cr.Enabled(),
+			Seen:      int64(cr.SeenCount()),
+			Nodes:     cs.Nodes,
+			Queued:    cs.Queued,
+			Sampled:   cs.Sampled,
+			SampleErr: cs.SampleErr,
+			Harvested: cs.Harvested,
+		}
+	}, logger, api.Options{
+		RateRPS:       *rateRPS,
+		RateBurst:     *rateBurst,
+		MaxInflight:   *searchInflight,
+		SearchTimeout: *searchTimeout,
+		ScraperStatus: scraperStatus(scr),
+		FilterAdult:   func() bool { return live.Bool(settings.FilterAdult) },
+		ConfigGen:     live.Gen,
+		Trending:      trendFn,
+	})
+
+	// The admin console is mounted outside the public handler on purpose. That
+	// handler answers every request with Access-Control-Allow-Origin: *, and a
+	// wildcard is incompatible with the credentialed requests the console
+	// makes — the browser would refuse to send the session cookie.
+	root := http.NewServeMux()
+	if adm := admin.New(st, admin.Config{
+		Password:    *adminPassword,
+		Secure:      *adminSecure,
+		Settings:    live,
+		Stats:       apiSrv.StatsJSON,
+		SweepNow:    sweepNow,
+		RestartOnly: restartOnly(*metaWorkers, *samplers, *metaTimeout, *scrapeEnabled, *rateRPS),
+		Logger:      logger,
+	}); adm != nil {
+		adm.Mount(root)
+		logger.Printf("admin: console enabled at /admin (secure-cookies=%v)", *adminSecure)
+	} else {
+		logger.Printf("admin: console disabled (ADMIN_PASSWORD not set)")
+	}
+	root.Handle("/", apiSrv.Handler())
+
 	srv := &http.Server{
-		Addr: *addr,
-		Handler: api.New(st, func() api.CrawlerStatus {
-			cs := cr.Stats()
-			return api.CrawlerStatus{
-				Enabled:   cr.Enabled(),
-				Seen:      int64(cr.SeenCount()),
-				Nodes:     cs.Nodes,
-				Queued:    cs.Queued,
-				Sampled:   cs.Sampled,
-				SampleErr: cs.SampleErr,
-				Harvested: cs.Harvested,
-			}
-		}, logger, api.Options{
-			RateRPS:       *rateRPS,
-			RateBurst:     *rateBurst,
-			MaxInflight:   *searchInflight,
-			SearchTimeout: *searchTimeout,
-			ScraperStatus: scraperStatus(scr),
-			FilterAdult:   *filterAdult,
-			Trending:      trendFn,
-		}).Handler(),
+		Addr:              *addr,
+		Handler:           root,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -412,6 +469,20 @@ func main() {
 		logger.Fatalf("http: %v", err)
 	}
 	logger.Printf("shutdown complete")
+}
+
+// restartOnly lists the configuration the console shows but cannot change.
+// These are read once when their component is built — a worker pool size, a
+// sampler count — so offering them as live controls would display a value the
+// pipeline is not actually using.
+func restartOnly(metaWorkers, samplers int, metaTimeout time.Duration, scrape bool, rateRPS float64) map[string]string {
+	return map[string]string{
+		"META_WORKERS":   strconv.Itoa(metaWorkers),
+		"DHT_SAMPLERS":   strconv.Itoa(samplers),
+		"META_TIMEOUT":   metaTimeout.String(),
+		"SCRAPE_ENABLED": strconv.FormatBool(scrape),
+		"RATE_LIMIT_RPS": strconv.FormatFloat(rateRPS, 'g', -1, 64),
+	}
 }
 
 // dropReason maps a filter result onto the counter it should be charged to,

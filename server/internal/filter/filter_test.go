@@ -200,9 +200,9 @@ func TestSizeFloor(t *testing.T) {
 }
 
 func TestSizeFloorIsConfigurable(t *testing.T) {
-	old := MinTotalSize
-	defer func() { MinTotalSize = old }()
-	MinTotalSize = 1 << 30
+	old := MinTotalSize()
+	defer func() { SetMinTotalSize(old) }()
+	SetMinTotalSize(1 << 30)
 	if r := Check("Movie 1080p", mkFiles("m.mkv"), 700<<20); !r.TooSmall {
 		t.Errorf("700MB should be too small when floor is 1GB: %+v", r)
 	}

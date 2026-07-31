@@ -57,12 +57,19 @@ type Options struct {
 	StatsTTL time.Duration
 	// ScraperStatus, when non-nil, adds a "scraper" section to /api/stats.
 	ScraperStatus func() ScraperStatus
+	// ConfigGen returns a counter that changes whenever live configuration
+	// changes. The stats body is cached, and it carries settings the admin
+	// console can flip — without this, a change stays invisible for a full
+	// TTL, and the frontend caches that stale answer for longer still, so the
+	// site would keep advertising filtering it had just stopped doing.
+	ConfigGen func() uint64
 	// FilterAdult reports whether adult content is being filtered, so the
 	// frontend can word its copy from the same switch that drives the
-	// pipeline instead of a second setting that can drift out of step. The
-	// zero value says "not filtering", which only ever hides a claim — it
-	// cannot make the UI promise filtering that is not happening.
-	FilterAdult bool
+	// pipeline instead of a second setting that can drift out of step. It is
+	// a func because the admin console can flip it while the server runs.
+	// Nil says "not filtering", which only ever hides a claim — it cannot
+	// make the UI promise filtering that is not happening.
+	FilterAdult func() bool
 	// Trending, when non-nil, backs /api/trending. Nil (feature disabled)
 	// makes the endpoint serve empty lists so the frontend degrades quietly.
 	Trending func() Trending
@@ -121,6 +128,7 @@ type Server struct {
 	statsMu   sync.Mutex
 	statsBody []byte
 	statsAt   time.Time
+	statsGen  uint64
 	countMu   sync.Mutex
 	countVal  int
 	countAt   time.Time
@@ -307,38 +315,46 @@ func (s *Server) cachedCount(ctx context.Context) (int, error) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	// Single-flight with a TTL: stats aggregate four queries (two of them
-	// full scans), so one refresh per TTL serves everyone. The lock being
-	// held across the refresh is what keeps a stats flood down to one
-	// query stream.
-	s.statsMu.Lock()
-	defer s.statsMu.Unlock()
-	if s.statsBody != nil && time.Since(s.statsAt) < s.opts.StatsTTL {
-		writeRawJSON(w, http.StatusOK, s.statsBody)
+	body, err := s.StatsJSON(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "stats failed")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), s.opts.SearchTimeout)
+	writeRawJSON(w, http.StatusOK, body)
+}
+
+// StatsJSON returns the /api/stats payload, at most StatsTTL stale. The admin
+// console renders the same bytes, so the dashboard and the public endpoint
+// cannot drift apart.
+//
+// Single-flight with a TTL: stats aggregate four queries (two of them full
+// scans), so one refresh per TTL serves everyone. The lock being held across
+// the refresh is what keeps a stats flood down to one query stream.
+func (s *Server) StatsJSON(reqCtx context.Context) ([]byte, error) {
+	gen := s.configGen()
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	if s.statsBody != nil && s.statsGen == gen && time.Since(s.statsAt) < s.opts.StatsTTL {
+		return s.statsBody, nil
+	}
+	ctx, cancel := context.WithTimeout(reqCtx, s.opts.SearchTimeout)
 	defer cancel()
 
 	total, err := s.st.Count(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stats failed")
-		return
+		return nil, err
 	}
 	counters, err := s.st.Stats(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stats failed")
-		return
+		return nil, err
 	}
 	blocked, err := s.st.BlockedCount(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stats failed")
-		return
+		return nil, err
 	}
 	pending, err := s.st.PendingReviewCount(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stats failed")
-		return
+		return nil, err
 	}
 	resp := map[string]any{
 		"torrents":       total,
@@ -349,7 +365,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		// default configuration, where they are dropped and counted above.
 		"adult_indexed": counters["adult_indexed"],
 		// The live setting, so the UI can say what is actually true.
-		"filter_adult":  s.opts.FilterAdult,
+		"filter_adult":  s.opts.FilterAdult != nil && s.opts.FilterAdult(),
 		"spam_filtered": counters["spam_filtered"],
 		"size_filtered": counters["size_filtered"],
 		// Metadata fetch outcomes. A timeout share near 100% means the
@@ -380,11 +396,19 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := json.Marshal(resp)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stats failed")
-		return
+		return nil, err
 	}
-	s.statsBody, s.statsAt = body, time.Now()
-	writeRawJSON(w, http.StatusOK, body)
+	s.statsBody, s.statsAt, s.statsGen = body, time.Now(), gen
+	return body, nil
+}
+
+// configGen is the current live-config generation, or 0 when nothing supplies
+// one (tests, and deployments without the console).
+func (s *Server) configGen() uint64 {
+	if s.opts.ConfigGen == nil {
+		return 0
+	}
+	return s.opts.ConfigGen()
 }
 
 func (s *Server) handleTrending(w http.ResponseWriter, r *http.Request) {

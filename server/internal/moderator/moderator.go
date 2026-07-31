@@ -45,8 +45,21 @@ type Config struct {
 	// Spam removal is unaffected. The zero value filters adult content, so
 	// forgetting to set this can never widen what the index keeps.
 	AllowAdult bool
+	// Live, when set, is consulted at the start of every sweep so the admin
+	// console can change these without a restart. It overrides the static
+	// fields above; nil leaves them in force.
+	Live       func() Live
 	Logger     *log.Logger
 	HTTPClient *http.Client // optional; for tests
+}
+
+// Live is the subset of the configuration that may change while the server is
+// running.
+type Live struct {
+	Enabled    bool
+	DryRun     bool
+	TrimTitles bool
+	AllowAdult bool
 }
 
 // Moderator runs the periodic classification pass.
@@ -54,6 +67,19 @@ type Moderator struct {
 	st  *store.Store
 	cfg Config
 	hc  *http.Client
+}
+
+// live returns the settings in force right now.
+func (m *Moderator) live() Live {
+	if m.cfg.Live != nil {
+		return m.cfg.Live()
+	}
+	return Live{
+		Enabled:    true,
+		DryRun:     m.cfg.DryRun,
+		TrimTitles: m.cfg.TrimTitles,
+		AllowAdult: m.cfg.AllowAdult,
+	}
 }
 
 // Summary reports what a single sweep did.
@@ -106,6 +132,9 @@ func (m *Moderator) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if !m.live().Enabled {
+				continue
+			}
 			s, err := m.SweepOnce(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -184,7 +213,7 @@ func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate) (S
 		m.cfg.Logger.Printf("moderator: trim %s %q -> %q", h, raw[h], clean)
 	}
 
-	if m.cfg.DryRun {
+	if m.live().DryRun {
 		for i, h := range adultH {
 			m.cfg.Logger.Printf("moderator: [dry-run] would remove adult %s %q", h, adultN[i])
 		}
@@ -312,6 +341,7 @@ type verdict struct {
 // classify returns a verdict per candidate, aligned by index. Entries the model
 // omits or labels unknown default to "ok" (fail-open: never delete on doubt).
 func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]verdict, error) {
+	live := m.live()
 	// The listing goes over as JSON so "title" is unambiguously delimited. With
 	// a "<title> [1.2GB, 3 files]" line the model intermittently copied the
 	// size suffix into the cleaned title, which validation then rejected.
@@ -330,7 +360,7 @@ func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]ve
 		Temperature:    0,
 		ResponseFormat: &responseFormat{Type: "json_object"},
 		Messages: []chatMessage{
-			{Role: "system", Content: systemPromptFor(m.cfg.TrimTitles)},
+			{Role: "system", Content: systemPromptFor(live.TrimTitles)},
 			{Role: "user", Content: string(listing)},
 		},
 	})
@@ -360,13 +390,13 @@ func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]ve
 			// Left as "ok" when adult content is allowed, which also lets the
 			// title trimming below apply to it — it is being kept, so it
 			// should be as clean as anything else on the page.
-			if !m.cfg.AllowAdult {
+			if !live.AllowAdult {
 				out[v.I-1].label = labelAdult
 			}
 		case labelSpam:
 			out[v.I-1].label = labelSpam
 		}
-		if m.cfg.TrimTitles {
+		if live.TrimTitles {
 			out[v.I-1].clean = cleanTitle(cands[v.I-1].Name, v.Clean)
 		}
 	}

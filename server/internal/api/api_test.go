@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"dhtsearch/server/internal/filter"
 	"dhtsearch/server/internal/store"
@@ -188,12 +189,12 @@ func TestSearchReportsUncappedTotal(t *testing.T) {
 // it has to report the live setting rather than a default.
 func TestStatsReportsAdultFilterSetting(t *testing.T) {
 	for _, on := range []bool{true, false} {
-		m := getJSON(t, testServerOpts(t, Options{FilterAdult: on}).URL+"/api/stats")
+		m := getJSON(t, testServerOpts(t, Options{FilterAdult: func() bool { return on }}).URL+"/api/stats")
 		if m["filter_adult"] != on {
 			t.Errorf("FilterAdult=%v: stats reported %v", on, m["filter_adult"])
 		}
 	}
-	// Zero value must read as "not filtering": that only ever hides the claim,
+	// A nil hook must read as "not filtering": that only ever hides the claim,
 	// it can never make the UI promise filtering that is not happening.
 	m := getJSON(t, testServer(t).URL+"/api/stats")
 	if m["filter_adult"] != false {
@@ -201,5 +202,32 @@ func TestStatsReportsAdultFilterSetting(t *testing.T) {
 	}
 	if _, ok := m["adult_indexed"]; !ok {
 		t.Error("adult_indexed missing from stats")
+	}
+}
+
+// The stats body carries live configuration, so a config change has to
+// invalidate it. Otherwise the setting stays invisible for a full TTL — and
+// the frontend caches that stale answer for minutes, leaving the site
+// advertising filtering it had just been told to stop.
+func TestStatsCacheInvalidatedByConfigChange(t *testing.T) {
+	var gen uint64
+	var filtering bool
+	srv := testServerOpts(t, Options{
+		FilterAdult: func() bool { return filtering },
+		ConfigGen:   func() uint64 { return gen },
+		StatsTTL:    time.Hour, // long enough that only the generation can bust it
+	})
+	if m := getJSON(t, srv.URL+"/api/stats"); m["filter_adult"] != false {
+		t.Fatalf("initial filter_adult = %v, want false", m["filter_adult"])
+	}
+	// Change the setting without bumping the generation: the cache legitimately
+	// still holds, which is what makes the next step meaningful.
+	filtering = true
+	if m := getJSON(t, srv.URL+"/api/stats"); m["filter_adult"] != false {
+		t.Errorf("cache did not hold within its TTL: %v", m["filter_adult"])
+	}
+	gen++
+	if m := getJSON(t, srv.URL+"/api/stats"); m["filter_adult"] != true {
+		t.Errorf("filter_adult = %v after a config change, want true", m["filter_adult"])
 	}
 }
