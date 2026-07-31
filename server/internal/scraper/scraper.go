@@ -75,6 +75,15 @@ type item struct {
 	seeders int32
 }
 
+// Ranked is a discovered infohash with the swarm size the scrape found for it.
+// The count travels with the hash rather than being dropped after sorting: the
+// fetcher spends it on how long to wait for peers, which is the same question
+// the seeder count already answered for ordering.
+type Ranked struct {
+	Hash    string
+	Seeders int32
+}
+
 // trackerConn owns the UDP client for one tracker, recreating it after a
 // failure (the conn client closes itself on read errors).
 type trackerConn struct {
@@ -90,7 +99,7 @@ type Scraper struct {
 	trackers []*trackerConn
 	logger   *log.Logger
 
-	out      chan string
+	out      chan Ranked
 	wake     chan struct{}
 	feedDone chan struct{} // closed once nothing can enqueue anymore
 
@@ -132,7 +141,7 @@ func New(cfg Config) (*Scraper, error) {
 	s := &Scraper{
 		cfg:           cfg,
 		logger:        logger,
-		out:           make(chan string),
+		out:           make(chan Ranked),
 		wake:          make(chan struct{}, 1),
 		feedDone:      make(chan struct{}),
 		scrapeTracker: realScrape,
@@ -191,7 +200,7 @@ func (s *Scraper) Run(ctx context.Context, in <-chan string) {
 }
 
 // Out returns the channel of prioritized hex infohashes.
-func (s *Scraper) Out() <-chan string { return s.out }
+func (s *Scraper) Out() <-chan Ranked { return s.out }
 
 // Stats returns a snapshot of the counters.
 func (s *Scraper) Stats() Stats {
@@ -377,10 +386,10 @@ func (s *Scraper) pushLoop(ctx context.Context) {
 	defer close(s.out)
 	for {
 		s.mu.Lock()
-		var next string
+		var next Ranked
 		ok := len(s.pending) > 0
 		if ok {
-			next = s.pending[0].hash
+			next = Ranked{Hash: s.pending[0].hash, Seeders: s.pending[0].seeders}
 			s.pending = s.pending[1:]
 		}
 		s.mu.Unlock()

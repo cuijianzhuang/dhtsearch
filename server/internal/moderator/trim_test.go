@@ -188,10 +188,11 @@ func TestSweepTrimsAdvertisingFromTitles(t *testing.T) {
 		t.Errorf("Trimmed = %d, want 1", s.Trimmed)
 	}
 
-	items, _, err := st.Search(t.Context(), "", 1, 10)
+	res, err := st.Search(t.Context(), "", 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := res.Items
 	names := map[string]bool{}
 	for _, it := range items {
 		names[it.Name] = true
@@ -222,10 +223,11 @@ func TestTrimmedTorrentIsStillFoundByRawText(t *testing.T) {
 	}
 
 	for _, q := range []string{"spam.net", "Blue Bloods"} {
-		items, total, err := st.Search(t.Context(), q, 1, 10)
+		res, err := st.Search(t.Context(), q, 1, 10)
 		if err != nil {
 			t.Fatal(err)
 		}
+		items, total := res.Items, res.Total
 		if total != 1 || len(items) != 1 {
 			t.Errorf("Search(%q) total = %d, want 1", q, total)
 		}
@@ -246,10 +248,11 @@ func TestTrimDisabledLeavesTitlesAlone(t *testing.T) {
 	if s.Trimmed != 0 {
 		t.Errorf("Trimmed = %d, want 0", s.Trimmed)
 	}
-	items, _, err := st.Search(t.Context(), "", 1, 10)
+	res, err := st.Search(t.Context(), "", 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := res.Items
 	if items[0].Name != adTitle {
 		t.Errorf("Name = %q, want the raw title %q", items[0].Name, adTitle)
 	}
@@ -265,10 +268,11 @@ func TestDryRunTrimsNothing(t *testing.T) {
 	if _, err := m.SweepOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	items, _, err := st.Search(t.Context(), "", 1, 10)
+	res, err := st.Search(t.Context(), "", 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := res.Items
 	if items[0].Name != adTitle {
 		t.Errorf("dry run modified the title: got %q", items[0].Name)
 	}
@@ -289,10 +293,11 @@ func TestSweepRejectsRewrittenTitles(t *testing.T) {
 	if s.Trimmed != 0 {
 		t.Errorf("Trimmed = %d, want 0", s.Trimmed)
 	}
-	items, _, err := st.Search(t.Context(), "", 1, 10)
+	res, err := st.Search(t.Context(), "", 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := res.Items
 	if items[0].Name != raw {
 		t.Errorf("Name = %q, want %q", items[0].Name, raw)
 	}

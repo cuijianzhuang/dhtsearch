@@ -69,7 +69,7 @@ export default async function Home() {
             已收录 {formatCount(stats.torrents)} 条 · 已过滤成人内容{" "}
             {formatCount(stats.adult_filtered)} 条 · 垃圾信息{" "}
             {formatCount(stats.spam_filtered)} 条
-            {stats.crawler_running === false && (
+            {stats.crawler?.enabled === false && (
               <span className="ml-2 text-amber-500">（爬虫暂停中）</span>
             )}
           </p>

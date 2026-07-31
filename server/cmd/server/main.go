@@ -178,6 +178,9 @@ func main() {
 		logger.Fatalf("store: %v", err)
 	}
 	defer st.Close()
+	if !st.FTSEnabled() {
+		logger.Printf("store: full-text index unavailable, keyword search falls back to scanning")
+	}
 
 	if *seedDemo {
 		seed(st, logger)
@@ -210,13 +213,21 @@ func main() {
 			Timeout:  *metaTimeout,
 			Trackers: trackerList,
 			Logger:   logger,
+			Known: func(hash string) bool {
+				known, err := st.Known(ctx, hash)
+				// On a lookup error, fetch. A needless re-fetch costs one slot;
+				// wrongly skipping would lose the torrent until the crawler
+				// happens to rediscover it.
+				return err == nil && known
+			},
 		})
 		if err != nil {
 			logger.Fatalf("metadata: %v", err)
 		}
 		defer fetcher.Close()
-		feed := cr.Infohashes()
-		if *scrapeEnabled && len(trackerList) > 0 && feed != nil {
+		hashes := cr.Infohashes()
+		var requests <-chan metadata.Request
+		if *scrapeEnabled && len(trackerList) > 0 && hashes != nil {
 			scr, err = scraper.New(scraper.Config{
 				Trackers: trackerList,
 				Logger:   logger,
@@ -225,11 +236,14 @@ func main() {
 				logger.Printf("scraper: disabled: %v", err)
 			} else {
 				defer scr.Close()
-				scr.Run(ctx, feed)
-				feed = scr.Out()
+				scr.Run(ctx, hashes)
+				requests = rankedRequests(scr.Out())
 			}
 		}
-		fetcher.Run(ctx, feed, func(rec metadata.Record) {
+		if requests == nil {
+			requests = bareRequests(hashes)
+		}
+		fetcher.Run(ctx, requests, func(rec metadata.Record) {
 			res := filter.Check(rec.Name, rec.Files, rec.TotalSize)
 			if res.Adult {
 				st.IncrStat("adult_filtered", 1)
@@ -257,7 +271,9 @@ func main() {
 			st.IncrStat("fetched", 1)
 		})
 	} else {
-		// Bare infohash collection: no metadata, no filter.
+		// Bare infohash collection: no metadata, no filter. The seen counter is
+		// not touched here — the stats mirror below already tracks it from the
+		// crawler, and incrementing in both places double-counted every hash.
 		go func() {
 			for hash := range cr.Infohashes() {
 				if err := st.Upsert(store.Torrent{
@@ -267,9 +283,7 @@ func main() {
 					CreatedAt: time.Now().Unix(),
 				}); err != nil {
 					logger.Printf("store upsert: %v", err)
-					continue
 				}
-				st.IncrStat("seen", 1)
 			}
 		}()
 	}
@@ -336,9 +350,10 @@ func main() {
 				seen := int64(cr.SeenCount())
 				st.IncrStat("seen", seen-prevSeen(&seen))
 				if fetcher != nil {
-					_, timedOut, failed := fetcher.Stats()
+					_, timedOut, failed, skipped := fetcher.Stats()
 					st.IncrStat("meta_timed_out", timedOut-prevTimedOut(&timedOut))
 					st.IncrStat("meta_failed", failed-prevFailed(&failed))
+					st.IncrStat("meta_skipped", skipped-prevSkipped(&skipped))
 				}
 			}
 		}
@@ -388,10 +403,41 @@ func main() {
 	logger.Printf("shutdown complete")
 }
 
+// rankedRequests converts the scraper's prioritized output into fetch
+// requests, carrying the seeder count through so the fetcher can size each
+// torrent's timeout by how healthy its swarm looked.
+func rankedRequests(in <-chan scraper.Ranked) <-chan metadata.Request {
+	out := make(chan metadata.Request)
+	go func() {
+		defer close(out)
+		for r := range in {
+			out <- metadata.Request{InfoHash: r.Hash, Seeders: r.Seeders}
+		}
+	}()
+	return out
+}
+
+// bareRequests wraps infohashes that never went through a scrape, so nothing
+// is known about their swarms and the baseline timeout applies.
+func bareRequests(in <-chan string) <-chan metadata.Request {
+	if in == nil {
+		return nil
+	}
+	out := make(chan metadata.Request)
+	go func() {
+		defer close(out)
+		for h := range in {
+			out <- metadata.Request{InfoHash: h, Seeders: metadata.SeedersUnknown}
+		}
+	}()
+	return out
+}
+
 var (
 	lastSeen     int64
 	lastTimedOut int64
 	lastFailed   int64
+	lastSkipped  int64
 )
 
 // prevSeen returns the previously reported seen count and records the new
@@ -412,6 +458,12 @@ func prevTimedOut(cur *int64) int64 {
 func prevFailed(cur *int64) int64 {
 	prev := lastFailed
 	lastFailed = *cur
+	return prev
+}
+
+func prevSkipped(cur *int64) int64 {
+	prev := lastSkipped
+	lastSkipped = *cur
 	return prev
 }
 

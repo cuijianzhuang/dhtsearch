@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -126,5 +127,59 @@ func TestOptionsPreflight(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("OPTIONS: status %d", resp.StatusCode)
+	}
+}
+
+// A page number large enough to overflow int64 when multiplied by page_size
+// must still clamp. Written the other way round — checking the product against
+// maxOffset — the multiplication wraps negative and slips straight past.
+func TestSearchClampsOverflowingPage(t *testing.T) {
+	base := testServer(t).URL
+	for _, page := range []string{"9223372036854775807", "1000000000000000000", "92233720368547758"} {
+		m := getJSON(t, base+"/api/search?q=&page_size=100&page="+page)
+		if got, want := m["page"].(float64), float64(maxOffset/100+1); got != want {
+			t.Errorf("page=%s: clamped to %v, want %v", page, got, want)
+		}
+	}
+}
+
+// The UI renders at most maxListedFiles entries and summarises the rest
+// against file_count, so the response must not carry the tail.
+func TestSearchTrimsFileList(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	const stored = 40
+	files := make([]filter.File, stored)
+	for i := range files {
+		files[i] = filter.File{Path: fmt.Sprintf("Show/ep%02d.mkv", i), Size: 1 << 20}
+	}
+	if err := st.Upsert(store.Torrent{
+		InfoHash: strings.Repeat("a", 40), Name: "Show Complete Series",
+		TotalSize: 1 << 30, FileCount: stored, Files: files, CreatedAt: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(st, nil, nil, Options{}).Handler())
+	t.Cleanup(srv.Close)
+
+	m := getJSON(t, srv.URL+"/api/search?q=Show")
+	first := m["results"].([]any)[0].(map[string]any)
+	if got := len(first["files"].([]any)); got != maxListedFiles {
+		t.Errorf("files in response = %d, want %d", got, maxListedFiles)
+	}
+	// The true count still travels, so the UI can say what it is hiding.
+	if got := first["file_count"].(float64); got != stored {
+		t.Errorf("file_count = %v, want %d", got, stored)
+	}
+}
+
+// total_capped tells the UI that total is a floor rather than a count.
+func TestSearchReportsUncappedTotal(t *testing.T) {
+	m := getJSON(t, testServer(t).URL+"/api/search?q=Bunny")
+	if m["total_capped"] != false {
+		t.Errorf("total_capped = %v, want false for a small result set", m["total_capped"])
 	}
 }

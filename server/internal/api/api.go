@@ -24,6 +24,11 @@ const (
 	// walk and discard n rows, so an unbounded page number turns one GET
 	// into a full-table scan. Nothing legitimate paginates 10k results deep.
 	maxOffset = 10_000
+	// maxListedFiles bounds the file entries carried in a search result. The
+	// store keeps up to 50 per torrent, but the UI renders at most 10 and
+	// summarises the rest against file_count, so sending more only costs a
+	// zstd decode and JSON for rows nobody will look at.
+	maxListedFiles = 10
 	// admissionWait is how long a search waits for an in-flight slot before
 	// being turned away. Long enough to absorb a burst, short enough that a
 	// flood fails fast instead of stacking goroutines.
@@ -196,8 +201,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if pageSize > maxPageSize {
 		pageSize = maxPageSize
 	}
-	if (page-1)*pageSize > maxOffset {
-		page = maxOffset/pageSize + 1
+	// Clamp before multiplying: page comes straight off the query string, and
+	// (page-1)*pageSize overflows into a negative offset for a large enough
+	// page, which would slip past a check written the other way round.
+	if maxPage := maxOffset/pageSize + 1; page > maxPage {
+		page = maxPage
 	}
 
 	// Admission gate: the store serializes queries on one connection, so
@@ -220,9 +228,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	var (
-		items []store.Torrent
-		total int
-		err   error
+		items  []store.Torrent
+		total  int
+		capped bool
+		err    error
 	)
 	if strings.TrimSpace(q) == "" {
 		// The landing page. Latest walks the created_at index instead of
@@ -232,7 +241,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			total, err = s.cachedCount(ctx)
 		}
 	} else {
-		items, total, err = s.st.Search(ctx, q, page, pageSize)
+		var p store.Page
+		p, err = s.st.Search(ctx, q, page, pageSize)
+		items, total, capped = p.Items, p.Total, p.Capped
 	}
 	if err != nil {
 		if ctx.Err() != nil {
@@ -246,21 +257,28 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]resultItem, 0, len(items))
 	for _, t := range items {
+		files := t.Files
+		if len(files) > maxListedFiles {
+			files = files[:maxListedFiles]
+		}
 		results = append(results, resultItem{
 			InfoHash:  t.InfoHash,
 			Name:      t.Name,
 			TotalSize: t.TotalSize,
 			FileCount: t.FileCount,
-			Files:     t.Files,
+			Files:     files,
 			Magnet:    magnetURI(t.InfoHash, t.Name),
 			CreatedAt: t.CreatedAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"total":     total,
-		"page":      page,
-		"page_size": pageSize,
-		"results":   results,
+		"total": total,
+		// total_capped says the count stopped early, so total is a floor. The
+		// UI renders "1,000+" rather than claiming a precision it does not have.
+		"total_capped": capped,
+		"page":         page,
+		"page_size":    pageSize,
+		"results":      results,
 	})
 }
 
@@ -329,6 +347,10 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			"fetched":   counters["fetched"],
 			"timed_out": counters["meta_timed_out"],
 			"failed":    counters["meta_failed"],
+			// Requests dropped before any network work because the infohash
+			// was already indexed or blocked. A large share here is the
+			// crawler rediscovering what the index already has.
+			"skipped": counters["meta_skipped"],
 		},
 		"moderation": map[string]any{
 			"reviewed":      counters["llm_reviewed"],

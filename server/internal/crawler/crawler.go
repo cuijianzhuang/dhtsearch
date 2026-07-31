@@ -76,10 +76,11 @@ type Crawler struct {
 	cancel   context.CancelFunc
 	logger   *log.Logger
 
-	mu    sync.Mutex
-	seen  map[[20]byte]struct{}
-	ring  [][20]byte // FIFO eviction order for seen
-	known [][20]byte // recent infohashes for active probing
+	mu     sync.Mutex
+	seen   map[[20]byte]struct{}
+	ring   [][20]byte // FIFO eviction order for seen
+	known  [][20]byte // recent infohashes for active probing
+	closed bool       // out has been closed; no further sends
 
 	// Sampling state. nodeQ carries nodes waiting to be sampled; nodeNext
 	// records the earliest time each address is worth sampling again, which
@@ -198,7 +199,8 @@ func (c *Crawler) Stats() Stats {
 	return st
 }
 
-// Close shuts the crawler down.
+// Close shuts the crawler down. Safe to call once; further pushes from
+// samplers still unwinding are dropped rather than sent on the closed channel.
 func (c *Crawler) Close() {
 	if c.cancel != nil {
 		c.cancel()
@@ -206,7 +208,14 @@ func (c *Crawler) Close() {
 	if c.server != nil {
 		c.server.Close()
 	}
-	if c.out != nil {
+	// Cancelling does not stop the samplers synchronously: one already inside
+	// sampleNode will push its results after Close returns. Flipping the flag
+	// under the same lock push sends under is what makes that a no-op instead
+	// of a send on a closed channel.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.out != nil && !c.closed {
+		c.closed = true
 		close(c.out)
 	}
 }
@@ -248,15 +257,16 @@ func (c *Crawler) push(ih [20]byte) {
 		c.known = c.known[1:]
 	}
 	c.known = append(c.known, ih)
-	out := c.out
-	c.mu.Unlock()
-
-	if out != nil {
+	// The send stays under the lock: it is non-blocking, so it cannot deadlock,
+	// and holding the lock is what makes "is the channel still open" and "send
+	// on it" one atomic step against a concurrent Close.
+	if c.out != nil && !c.closed {
 		select {
-		case out <- hex.EncodeToString(ih[:]):
+		case c.out <- hex.EncodeToString(ih[:]):
 		default: // downstream busy; drop rather than block the DHT handler
 		}
 	}
+	c.mu.Unlock()
 }
 
 // refillLoop keeps the sampler queue fed from the routing table. Nodes that

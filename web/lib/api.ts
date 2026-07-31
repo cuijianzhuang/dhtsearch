@@ -42,18 +42,54 @@ export interface SearchResult {
 
 export interface SearchResponse {
   total: number;
+  // The backend stops counting past a cap, so total can be a floor rather than
+  // an exact figure. Render it as "N+" when this is set.
+  total_capped?: boolean;
   page: number;
   page_size: number;
   results: SearchResult[];
 }
 
+// Mirrors the /api/stats payload. The nested sections are what the Go handler
+// actually emits — a flat shape here silently reads undefined off every field.
 export interface StatsResponse {
   torrents?: number;
   seen?: number;
   fetched?: number;
   adult_filtered?: number;
   spam_filtered?: number;
-  crawler_running?: boolean;
+  size_filtered?: number;
+  fetch?: {
+    fetched?: number;
+    timed_out?: number;
+    failed?: number;
+    skipped?: number;
+  };
+  moderation?: {
+    reviewed?: number;
+    adult_removed?: number;
+    spam_removed?: number;
+    errors?: number;
+    pending?: number;
+    blocked?: number;
+  };
+  crawler?: {
+    enabled?: boolean;
+    seen_infohashes?: number;
+    nodes?: number;
+    queued_nodes?: number;
+    sampled?: number;
+    sample_errors?: number;
+    harvested?: number;
+  };
+  scraper?: {
+    queue?: number;
+    scraped?: number;
+    seeded?: number;
+    scrape_errors?: number;
+    dropped?: number;
+    evicted?: number;
+  };
 }
 
 export async function fetchSearch(

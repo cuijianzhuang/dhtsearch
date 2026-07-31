@@ -13,7 +13,9 @@ flowchart TB
     DHT["Public BitTorrent DHT nodes"]
     Crawler["DHT crawler<br/>passive listen + BEP-51 sampling"]
     Scraper["Tracker scrape ranking<br/>BEP 15 batch scrape"]
-    Fetcher["Metadata fetch<br/>BEP-9 workers"]
+    Dedup{"Already indexed<br/>or blocked?"}
+    Skipped["Skip before any network work<br/>fetch slot goes to the next hash"]
+    Fetcher["Metadata fetch<br/>BEP-9 workers<br/>timeout scaled by seeders"]
     Filter{"Filter engine<br/>keywords + heuristics + size"}
     Discard["Drop and count<br/>adult / spam / too small"]
     DB[("SQLite")]
@@ -23,7 +25,9 @@ flowchart TB
 
     Crawler <-->|UDP| DHT
     Crawler -->|new infohashes| Scraper
-    Scraper -->|ranked by seeders| Fetcher
+    Scraper -->|ranked by seeders| Dedup
+    Dedup -->|yes| Skipped
+    Dedup -->|no| Fetcher
     Fetcher --> Filter
     Filter -->|hit| Discard
     Filter -->|pass| DB
@@ -34,7 +38,7 @@ flowchart TB
     Blocked -.->|rejected on insert, no resurrection| DB
 ```
 
-- `server/` — Go 后端：DHT 爬虫（anacrolix/dht/v2）、BEP-9 元数据获取（anacrolix/torrent）、过滤引擎（中英文成人词表 + 垃圾启发式）、SQLite 存储（modernc.org/sqlite，无 cgo）、REST API（标准库 net/http）
+- `server/` — Go 后端：DHT 爬虫（anacrolix/dht/v2）、BEP-9 元数据获取（anacrolix/torrent）、过滤引擎（中英文成人词表 + 垃圾启发式）、SQLite 存储（modernc.org/sqlite，无 cgo，FTS5 trigram 全文索引）、REST API（标准库 net/http）
 - `web/` — Next.js 前端（App Router + Tailwind，服务端渲染搜索结果）
 
 ### 发现速度
@@ -57,6 +61,17 @@ infohash 来自两条路径，**主动的那条决定吞吐**：
 | `META_TIMEOUT` 45s → 20s | 33/min → **2.4/min**（成功率塌到 0.35%） |
 
 最后一条最反直觉：找 peer 本身就占掉大部分等待时间，**能成功的获取本来就是慢的那些**，缩超时等于把它们全砍掉。换硬件请照着 `/api/stats` 重新测，别照抄。
+
+不过「一刀切地缩超时」之所以是灾难，是因为它分不清哪些等待值得。scraper 拿到的
+seeder 数正好提供了这个区分，所以 `META_TIMEOUT` 现在只是基准值，实际预算按 swarm
+大小缩放：0 seeder（几个大 tracker 都没听说过）拿 1/3，1–4 个拿 2/3，5 个以上拿
+4/3。没经过 scrape 的 infohash（`SCRAPE_ENABLED=false`）一律用原值，不做任何缩减。
+
+另外，取元数据前会先查一次库：爬虫的内存去重环只有 26 万条，按上面的发现速度约
+1.5 小时就轮空一遍，之后已入库的热门 hash 会被当成新发现重走一遍完整流水线；被
+moderation 删掉的 hash 更是每轮都要重新花 45 秒取一次，最后才在 `Upsert` 被
+`blocked` 表拒绝。一次主键查询就能把这些 worker 槽位换回吞吐，命中数见
+`/api/stats` 的 `fetch.skipped`。
 
 ### Tracker 刮削排序
 
@@ -101,7 +116,7 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | `DHT_PORT` | `0`（随机） | DHT UDP 端口 |
 | `DHT_SAMPLERS` | `8` | BEP-51 并发采样 worker 数（调大反而降低入库速度，见上） |
 | `META_WORKERS` | `128` | 元数据并发 worker 数（入库速度的主要旋钮） |
-| `META_TIMEOUT` | `45s` | 单个元数据获取超时 |
+| `META_TIMEOUT` | `45s` | 元数据获取超时基准值（按 seeder 数缩放，见上） |
 | `FETCH_METADATA` | `true` | 是否获取元数据（false 时只收 infohash） |
 | `MIN_TORRENT_SIZE` | `104857600`（100 MiB） | 低于此总体积的种子不入库 |
 | `ENV_FILE` | `.env` | .env 文件路径（相对工作目录） |
@@ -136,17 +151,54 @@ npm run dev                  # 开发
 
 ## API
 
-- `GET /api/search?q=xx&page=1&page_size=20` — 搜索（q 为空返回最新收录），结果含拼好的 magnet 链接
+- `GET /api/search?q=xx&page=1&page_size=20` — 搜索（q 为空返回最新收录），结果含拼好的 magnet 链接。`total_capped` 为真时 `total` 是下界；每条结果最多带 10 个文件条目，真实数量看 `file_count`
 - `GET /api/stats` — 收录数、成人/垃圾/体积过滤计数、LLM 审核统计、爬虫状态
 - `GET /api/healthz` — 健康检查
 
+## 搜索索引
+
+关键词搜索走 SQLite 的 FTS5 全文索引（`torrents_fts`，外部内容表，不复制正文），
+分词器用 **trigram**——它是唯一保住原有语义的选项：匹配标题里任意位置的子串，中文
+不需要分词。数据库首次打开时自动建表回填，三个触发器保证之后的增删改同步；建不出
+来（构建里没有 FTS5）就退回原来的扫表路径，结果完全一致，只是慢。
+
+两个要点：
+
+- **索引只负责缩小候选集，不负责定义什么算命中**。LIKE 条件照样叠在 MATCH 上执行，
+  所以有没有索引返回的结果逐条相同——这条有测试覆盖（`TestSearchFTSAgreesWithScan`）。
+- **trigram 索引 3 个字符的序列，看不见更短的词**，而且是静默返回 0 条而非报错。
+  「三体」「沙丘」「4K」这类两字查询在这里是家常便饭，所以短词不进 MATCH，交给
+  LIKE 过滤；全部关键词都短于 3 字符时整体退回扫表。
+
+排序用 `ORDER BY rowid DESC` 而不是 `created_at DESC`：rowid 按插入顺序递增而
+`created_at` 是插入时打的戳，两者本来就同序，但走 rowid 能让扫描填满一页就停，而不
+是把所有命中都物化出来再排序。代价是增量同步（`sync-to-remote.sh`）会把 `created_at`
+较早的行插在后面，让两个顺序略微脱节，所以取回的一页会在 Go 里按 `created_at` 重排
+一次——页内顺序精确，页边界仍是近似的，这本来也是 `created_at` 排序唯一承诺过的。
+
+300k 行实测（同机取三次最好成绩）：
+
+| 场景 | 扫表 | FTS5 + rowid DESC |
+| --- | ---: | ---: |
+| 常见词翻页（81k 命中） | 88µs | 702µs |
+| 罕见词（1 条命中，在最老的行） | 292ms | 347µs |
+| 零命中（拼错的片名） | 282ms | 237µs |
+
+扫表在命中密集时靠早退出赢，但**最坏情况是罕见词和零命中**——必须扫完全表才能确定
+「没有」，而且随索引线性增长。那恰好是攻击者会打的路径，也正是索引把它压到亚毫秒的
+理由。索引本身约占表体积的 79%。
+
+结果总数也不再精确统计：`COUNT(*)` 配 LIKE 在 300k 行要 141ms，而翻页深度上限只有
+10000 行，数到更远也没人看得到。现在数到 10100 就停，响应里的 `total_capped` 告诉
+前端这是下界，界面显示成「10,100+」。
+
 ## DoS 防护
 
-搜索是无鉴权接口，而每次关键词查询都是两遍全表扫描（SQLite 单连接），所以 API 层内置了四道闸门，全部可用环境变量调整（见上表）：
+搜索是无鉴权接口，所以 API 层内置了四道闸门，全部可用环境变量调整（见上表）：
 
 - **每 IP 限流**：令牌桶（默认持续 3 req/s、突发 30），超出返回 429 + `Retry-After`。真实客户端 IP 只信任来自回环/内网地址（反向代理或同机 Next SSR 进程）的 `X-Forwarded-For`，公网直连时伪造头无效；IPv6 按 /64 计桶，防止单机用整段地址刷新桶。`/api/healthz` 不限流，监控和部署健康检查不会被洪水挤掉。
-- **搜索准入**：并发搜索上限（默认 16），等不到槽位（1 秒）直接 503 甩负载——SQLite 只有一个连接，排队再深也只是白占内存。
-- **单查询预算**：每次搜索默认 10s 超时，客户端断开即取消，慢查询不会继续占着数据库；关键词最多取前 8 个（每个关键词都让每行多算两次 LIKE），翻页深度上限 10000 行（`OFFSET` 越深扫描越贵），查询串按 UTF-8 边界截断到 200 字节。
+- **搜索准入**：并发搜索上限（默认 16），等不到槽位（1 秒）直接 503 甩负载。读走独立的连接池（WAL 下读不阻塞写），写仍然是单连接，排队再深也只是白占内存。
+- **单查询预算**：每次搜索默认 10s 超时，客户端断开即取消，慢查询不会继续占着数据库；关键词最多取前 8 个（每个关键词都让每行多算两次 LIKE），翻页深度上限 10000 行（`OFFSET` 越深扫描越贵，页号在相乘前就钳住，避免溢出成负数绕过检查），查询串按 UTF-8 边界截断到 200 字节，结果总数最多数到 10100。
 - **HTTP 层**：Read/Write/Idle 超时加 16 KB 请求头上限，挡 slowloris 和超大头攻击。
 
 另外 `/api/stats` 和首页总数走 10 秒 TTL 的单飞缓存（并发未命中只有一个请求去查库），聚合扫描每周期最多一次；`created_at` 索引让空查询（首页默认请求）从全表排序变成走索引取前 20 行。
