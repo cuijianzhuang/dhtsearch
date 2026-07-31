@@ -57,6 +57,12 @@ type Options struct {
 	StatsTTL time.Duration
 	// ScraperStatus, when non-nil, adds a "scraper" section to /api/stats.
 	ScraperStatus func() ScraperStatus
+	// FilterAdult reports whether adult content is being filtered, so the
+	// frontend can word its copy from the same switch that drives the
+	// pipeline instead of a second setting that can drift out of step. The
+	// zero value says "not filtering", which only ever hides a claim — it
+	// cannot make the UI promise filtering that is not happening.
+	FilterAdult bool
 	// Trending, when non-nil, backs /api/trending. Nil (feature disabled)
 	// makes the endpoint serve empty lists so the frontend degrades quietly.
 	Trending func() Trending
@@ -342,6 +348,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		// Adult torrents admitted because FILTER_ADULT is off. Stays 0 in the
 		// default configuration, where they are dropped and counted above.
 		"adult_indexed": counters["adult_indexed"],
+		// The live setting, so the UI can say what is actually true.
+		"filter_adult":  s.opts.FilterAdult,
 		"spam_filtered": counters["spam_filtered"],
 		"size_filtered": counters["size_filtered"],
 		// Metadata fetch outcomes. A timeout share near 100% means the

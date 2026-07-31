@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { fetchSearch, type SearchResponse } from "@/lib/api";
+import { fetchAdultFilterEnabled, fetchSearch, type SearchResponse } from "@/lib/api";
 import { formatCount, formatCountAtLeast } from "@/lib/format";
 import SearchBox from "@/components/SearchBox";
 import ResultList from "@/components/ResultList";
@@ -14,11 +14,13 @@ interface PageProps {
 export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
   const { q } = await searchParams;
   const query = (q ?? "").trim();
+  const filtered = await fetchAdultFilterEnabled();
+  const what = filtered ? "成人内容与垃圾信息" : "垃圾信息";
   return {
     title: query ? `${query} 的搜索结果` : "最新收录",
     description: query
-      ? `在 DHTSearch 中搜索「${query}」的磁力链接，结果已过滤成人内容与垃圾信息。`
-      : "浏览 DHT 网络最新收录的磁力链接，已过滤成人内容与垃圾信息。",
+      ? `在 DHTSearch 中搜索「${query}」的磁力链接，结果已过滤${what}。`
+      : `浏览 DHT 网络最新收录的磁力链接，已过滤${what}。`,
   };
 }
 
@@ -35,6 +37,9 @@ export default async function SearchPage({ searchParams }: PageProps) {
   } catch (e) {
     error = e instanceof Error ? e.message : "unknown error";
   }
+  // Same switch that drives the pipeline, so this banner cannot outlive the
+  // filtering it advertises.
+  const adultFiltered = await fetchAdultFilterEnabled();
 
   return (
     <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 py-6">
@@ -53,7 +58,9 @@ export default async function SearchPage({ searchParams }: PageProps) {
       </header>
 
       <div className="mt-4 rounded-md border border-emerald-900/50 bg-emerald-950/30 px-3 py-2 text-xs text-emerald-300/80">
-        🛡️ 本站结果已自动过滤成人内容与垃圾信息，请放心使用。
+        {adultFiltered
+          ? "🛡️ 本站结果已自动过滤成人内容与垃圾信息，请放心使用。"
+          : "🛡️ 本站结果已自动过滤垃圾信息。"}
       </div>
 
       {error ? (

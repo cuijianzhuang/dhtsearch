@@ -391,6 +391,7 @@ func main() {
 			MaxInflight:   *searchInflight,
 			SearchTimeout: *searchTimeout,
 			ScraperStatus: scraperStatus(scr),
+			FilterAdult:   *filterAdult,
 			Trending:      trendFn,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
