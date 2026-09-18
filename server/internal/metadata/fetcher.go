@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"log"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
+	pp "github.com/anacrolix/torrent/peer_protocol"
+	"github.com/anacrolix/torrent/storage"
+	"github.com/anacrolix/torrent/storage/disabled"
 
 	"dhtsearch/server/internal/filter"
 )
@@ -48,7 +51,6 @@ type Config struct {
 type Fetcher struct {
 	cfg          Config
 	client       *torrent.Client
-	tmpDir       string
 	logger       *log.Logger
 	magnetSuffix string // pre-encoded &tr=... params, possibly empty
 
@@ -63,8 +65,7 @@ type Fetcher struct {
 }
 
 // NewFetcher creates a fetcher with its own torrent client. The client uses
-// a temporary data dir and data download is disallowed per torrent, so no
-// payload is persisted.
+// disabled storage and disallows payload transfers before adding each torrent.
 func NewFetcher(cfg Config) (*Fetcher, error) {
 	if cfg.Workers <= 0 {
 		cfg.Workers = 16
@@ -79,25 +80,14 @@ func NewFetcher(cfg Config) (*Fetcher, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
-	tmpDir, err := os.MkdirTemp("", "dhtsearch-meta-*")
-	if err != nil {
-		return nil, err
-	}
-	tc := torrent.NewDefaultClientConfig()
-	tc.DataDir = tmpDir
-	tc.ListenPort = 0
-	tc.NoUpload = true
-	tc.Seed = false
-	tc.NoDefaultPortForwarding = true
+	tc := metadataClientConfig()
 	client, err := torrent.NewClient(tc)
 	if err != nil {
-		os.RemoveAll(tmpDir)
 		return nil, fmt.Errorf("torrent client: %w", err)
 	}
 	return &Fetcher{
 		cfg:          cfg,
 		client:       client,
-		tmpDir:       tmpDir,
 		logger:       logger,
 		magnetSuffix: magnetTrackerParams(cfg.Trackers),
 	}, nil
@@ -157,13 +147,20 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 		f.count(&f.failed)
 		return rec, false
 	}
-	t, err := f.client.AddMagnet("magnet:?xt=urn:btih:" + hexHash + f.magnetSuffix)
+	spec, err := torrent.TorrentSpecFromMagnetUri("magnet:?xt=urn:btih:" + hexHash + f.magnetSuffix)
+	if err != nil {
+		f.count(&f.failed)
+		return rec, false
+	}
+	spec.DisallowDataDownload = true
+	spec.DisallowDataUpload = true
+	spec.DisableInitialPieceCheck = true
+	t, _, err := f.client.AddTorrentSpec(spec)
 	if err != nil {
 		f.count(&f.failed)
 		return rec, false
 	}
 	defer t.Drop()
-	t.DisallowDataDownload()
 
 	select {
 	case <-t.GotInfo():
@@ -237,5 +234,38 @@ func (f *Fetcher) Close() {
 	}
 	f.wg.Wait()
 	f.client.Close()
-	os.RemoveAll(f.tmpDir)
+}
+
+// metadataClientConfig never opens payload paths supplied by untrusted peers.
+func metadataClientConfig() *torrent.ClientConfig {
+	tc := torrent.NewDefaultClientConfig()
+	tc.ListenPort = 0
+	tc.NoUpload = true
+	tc.Seed = false
+	tc.NoDefaultPortForwarding = true
+	tc.DefaultStorage = metadataStorage{}
+	tc.Callbacks.ReadMessage = ignorePayloadAvailability
+	return tc
+}
+
+// v1.61.0 can count an out-of-range pre-metadata bitfield as a complete
+// peer, then truncate the bitfield without balancing relative availability.
+// Drop subsequently panics. Payload availability is irrelevant to BEP 9;
+// skip these messages before the library updates its piece counters. Leave
+// extension messages (including metadata and PEX) and connection control intact.
+func ignorePayloadAvailability(_ *torrent.PeerConn, msg *pp.Message) {
+	switch msg.Type {
+	case pp.Have, pp.Bitfield, pp.HaveAll, pp.HaveNone, pp.AllowedFast, pp.Suggest:
+		msg.Keepalive = true
+	}
+}
+
+// The dependency's disabled.Client has the old OpenTorrent signature. Adapt
+// its piece implementation without a filesystem or a piece-completion DB.
+type metadataStorage struct{}
+
+func (metadataStorage) OpenTorrent(context.Context, *metainfo.Info, metainfo.Hash) (storage.TorrentImpl, error) {
+	return storage.TorrentImpl{Piece: func(metainfo.Piece) storage.PieceImpl {
+		return disabled.Piece{}
+	}}, nil
 }

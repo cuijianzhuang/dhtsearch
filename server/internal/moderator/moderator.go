@@ -16,6 +16,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -363,7 +364,7 @@ func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]ve
 	return out, nil
 }
 
-// post sends one chat completion request, retrying on 429 and 5xx.
+// post retries transport failures, transient provider errors and empty completions.
 func (m *Moderator) post(ctx context.Context, body []byte) (string, error) {
 	url := strings.TrimSuffix(m.cfg.BaseURL, "/") + "/chat/completions"
 	const attempts = 3
@@ -410,10 +411,26 @@ func (m *Moderator) post(ctx context.Context, body []byte) (string, error) {
 		if err := json.Unmarshal(payload, &cr); err != nil {
 			return "", fmt.Errorf("decode response: %w", err)
 		}
-		if len(cr.Choices) == 0 {
-			return "", errors.New("chat completions: no choices in response")
+		// Some compatible providers report upstream failures in an HTTP 200
+		// error envelope. Preserve its code instead of hiding it as no choices.
+		if cr.Error != nil {
+			lastErr = fmt.Errorf("chat completions: provider error code=%.32s", cr.Error.Code)
+			code, _ := strconv.Atoi(strings.Trim(string(cr.Error.Code), "\""))
+			if code != 408 && code != 429 && (code < 500 || code > 599) {
+				return "", lastErr
+			}
+			continue
 		}
-		return cr.Choices[0].Message.Content, nil
+		if len(cr.Choices) == 0 {
+			lastErr = errors.New("chat completions: no choices in response")
+			continue
+		}
+		content := cr.Choices[0].Message.Content
+		if strings.TrimSpace(content) == "" {
+			lastErr = errors.New("chat completions: empty content in response")
+			continue
+		}
+		return content, nil
 	}
 	return "", fmt.Errorf("chat completions: %d attempts failed: %w", attempts, lastErr)
 }
@@ -541,6 +558,9 @@ type chatRequest struct {
 }
 
 type chatResponse struct {
+	Error *struct {
+		Code json.RawMessage `json:"code"`
+	} `json:"error"`
 	Choices []struct {
 		Message chatMessage `json:"message"`
 	} `json:"choices"`
