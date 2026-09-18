@@ -178,6 +178,8 @@ func main() {
 		"chat model used for moderation")
 	modInterval := flag.Duration("moderate-interval", envDuration("MODERATION_INTERVAL", time.Hour),
 		"how often to run the moderation pass")
+	modTimeout := flag.Duration("moderate-timeout", envDuration("MODERATION_TIMEOUT", 2*time.Minute),
+		"timeout per moderation request attempt")
 	modBatch := flag.Int("moderate-batch", envInt("MODERATION_BATCH_SIZE", 100),
 		"torrent titles per moderation request")
 	modMaxBatches := flag.Int("moderate-max-batches", envInt("MODERATION_MAX_BATCHES", 20),
@@ -304,6 +306,7 @@ func main() {
 				Interval:   *modInterval,
 				BatchSize:  *modBatch,
 				MaxBatches: *modMaxBatches,
+				Timeout:    *modTimeout,
 				DryRun:     *modDryRun,
 				TrimTitles: *modTrim,
 				Logger:     logger,

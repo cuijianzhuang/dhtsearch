@@ -3,6 +3,7 @@ package moderator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -284,5 +285,102 @@ func TestNewRejectsMissingConfig(t *testing.T) {
 		if _, err := New(st, c); err == nil {
 			t.Errorf("New(%+v) succeeded, want error", c)
 		}
+	}
+}
+
+func TestCompletionResponseFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name, payload, wantError string
+		recover                  bool
+		attempts                 int32
+	}{
+		{"no choices recovers", `{"choices":[]}`, "", true, 2},
+		{"empty content recovers", `{"choices":[{"message":{"content":"  "}}]}`, "", true, 2},
+		{"provider overload recovers", `{"error":{"code":503,"message":"unavailable"}}`, "", true, 2},
+		{"provider rate limit recovers", `{"error":{"code":"429"}}`, "", true, 2},
+		{"provider auth stops", `{"error":{"code":401,"message":"secret upstream detail"}}`, "provider error code=401", false, 1},
+		{"no choices exhausts", `{"choices":[]}`, "3 attempts failed: chat completions: no choices", false, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := newStore(t)
+			seed(t, st, "Sintel 2010")
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if calls.Add(1) == 1 || !tc.recover {
+					io.WriteString(w, tc.payload)
+					return
+				}
+				io.WriteString(w, `{"choices":[{"message":{"content":"{\"verdicts\":[{\"i\":1,\"label\":\"ok\"}]}"}}]}`)
+			}))
+			defer srv.Close()
+			summary, err := newMod(t, st, srv.URL, nil).SweepOnce(t.Context())
+			if tc.wantError == "" {
+				if err != nil || summary.Reviewed != 1 {
+					t.Fatalf("summary=%+v err=%v", summary, err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("error=%v", err)
+				}
+				if strings.Contains(err.Error(), "secret") {
+					t.Fatal("upstream details leaked")
+				}
+				if n, _ := st.PendingReviewCount(t.Context()); n != 1 {
+					t.Fatalf("pending=%d", n)
+				}
+			}
+			if calls.Load() != tc.attempts {
+				t.Fatalf("attempts=%d", calls.Load())
+			}
+		})
+	}
+}
+
+func TestCancelDuringEmptyCompletionRetry(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "Sintel 2010")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		io.WriteString(w, `{"choices":[]}`)
+		cancel()
+	}))
+	defer srv.Close()
+	_, err := newMod(t, st, srv.URL, nil).SweepOnce(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("attempts=%d", calls.Load())
+	}
+	if n, _ := st.PendingReviewCount(t.Context()); n != 1 {
+		t.Fatalf("pending=%d", n)
+	}
+}
+
+func TestRequestTimeoutRetriesAndRecovers(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "Sintel 2010")
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+		io.WriteString(w, `{"choices":[{"message":{"content":"{\"verdicts\":[{\"i\":1,\"label\":\"ok\"}]}"}}]}`)
+	}))
+	defer srv.Close()
+	m := newMod(t, st, srv.URL, func(cfg *Config) { cfg.Timeout = 100 * time.Millisecond })
+	s, err := m.SweepOnce(t.Context())
+	if err != nil || s.Reviewed != 1 {
+		t.Fatalf("summary=%+v err=%v", s, err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("attempts=%d", calls.Load())
 	}
 }
