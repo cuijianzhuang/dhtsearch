@@ -31,18 +31,28 @@ const (
 	// scrape
 	KeyScrapeEnabled = "SCRAPE_ENABLED"
 	KeyTrackers      = "TRACKERS"
-	// moderation & filtering
+	// static content filtering
+	KeyFilterEnabled            = "FILTER_ENABLED"
+	KeyFilterAdultEnabled       = "FILTER_ADULT_ENABLED"
+	KeyFilterSpamEnabled        = "FILTER_SPAM_ENABLED"
+	KeyFilterTooSmallEnabled    = "FILTER_TOO_SMALL_ENABLED"
+	KeyFilterMaxNameLen         = "FILTER_MAX_NAME_LEN"
+	KeyFilterStuffingMinRepeat  = "FILTER_STUFFING_MIN_REPEAT"
+	KeyFilterNonAlnumMaxRatio   = "FILTER_NON_ALNUM_MAX_RATIO"
+	KeyFilterRandomFileMaxRatio = "FILTER_RANDOM_FILE_MAX_RATIO"
+	KeyFilterBlockWords         = "FILTER_BLOCK_WORDS"
+	KeyFilterAllowWords         = "FILTER_ALLOW_WORDS"
+	// LLM moderation
 	KeyModerationEnabled    = "MODERATION_ENABLED"
 	KeyOpenAIAPIKey         = "OPENAI_API_KEY"
 	KeyOpenAIBaseURL        = "OPENAI_BASE_URL"
-	KeyOpenAIModel          = "OPENAI_MODEL"
+	KeyOpenAIModel           = "OPENAI_MODEL"
 	KeyModerationInterval   = "MODERATION_INTERVAL"
 	KeyModerationTimeout    = "MODERATION_TIMEOUT"
 	KeyModerationBatchSize  = "MODERATION_BATCH_SIZE"
 	KeyModerationMaxBatches = "MODERATION_MAX_BATCHES"
 	KeyModerationDryRun     = "MODERATION_DRY_RUN"
 	KeyModerationTrimTitles = "MODERATION_TRIM_TITLES"
-	KeyFilterBlockWords     = "FILTER_BLOCK_WORDS"
 	// trending
 	KeyTrendingEnabled  = "TRENDING_ENABLED"
 	KeyTrendingInterval = "TRENDING_INTERVAL"
@@ -72,7 +82,8 @@ var Groups = []Group{
 	{Key: "crawler", Label: "爬虫"},
 	{Key: "metadata", Label: "元数据抓取"},
 	{Key: "scrape", Label: "刮削排序"},
-	{Key: "moderation", Label: "审核与过滤"},
+	{Key: "filter", Label: "内容过滤"},
+	{Key: "moderation", Label: "LLM 审核"},
 	{Key: "trending", Label: "趋势"},
 	{Key: "feeds", Label: "订阅源"},
 	{Key: "ratelimit", Label: "限流与搜索"},
@@ -137,7 +148,30 @@ var Registry = []Item{
 	{Key: KeyTrackers, Group: "scrape", Label: "Tracker 列表", Type: TypeList, Default: "", Editable: true, Restart: true,
 		MaxItems: 64, Desc: "逗号分隔的 announce URL；同时用于刮削与磁力链接的 peer 提示"},
 
-	// --- moderation & filtering: all live (next sweep / next fetch) ---
+	// --- static content filtering: all live (next fetch) ---
+	{Key: KeyFilterEnabled, Group: "filter", Label: "启用静态过滤", Type: TypeBool, Default: "true", Editable: true,
+		Desc: "总开关：关后成人、垃圾、体积三类判定全部停用，新抓取的种子直接入库（LLM 审核不受影响）"},
+	{Key: KeyFilterAdultEnabled, Group: "filter", Label: "成人过滤", Type: TypeBool, Default: "true", Editable: true,
+		Desc: "内置词表、成人站域名、横幅词与 JAV 信号判定；关后这类种子不再被丢弃、也不再计数"},
+	{Key: KeyFilterSpamEnabled, Group: "filter", Label: "垃圾过滤", Type: TypeBool, Default: "true", Editable: true,
+		Desc: "结构性垃圾规则（空名、堆砌、符号占比、随机文件名等）与自定义屏蔽词；关后这类种子不再被丢弃、也不再计数"},
+	{Key: KeyFilterTooSmallEnabled, Group: "filter", Label: "体积过滤", Type: TypeBool, Default: "true", Editable: true,
+		Desc: "按「最小收录体积」丢弃过小种子（体积值在元数据抓取组）；关后不再丢弃、也不再计数"},
+	{Key: KeyFilterMaxNameLen, Group: "filter", Label: "名字最大长度（字符）", Type: TypeInt, Default: "300", Editable: true,
+		Min: f64(10), Max: f64(10000), Desc: "垃圾规则：名字超过该长度即丢弃"},
+	{Key: KeyFilterStuffingMinRepeat, Group: "filter", Label: "关键词堆砌阈值（次）", Type: TypeInt, Default: "4", Editable: true,
+		Min: f64(2), Max: f64(100), Desc: "垃圾规则：同一个词在名字里重复达到该次数即判为关键词堆砌"},
+	{Key: KeyFilterNonAlnumMaxRatio, Group: "filter", Label: "符号占比上限", Type: TypeFloat, Default: "0.5", Editable: true,
+		Min: f64(0), Max: f64(1), Desc: "垃圾规则：名字里非字母/数字/空格的字符占比超过该值即丢弃，0–1 之间"},
+	{Key: KeyFilterRandomFileMaxRatio, Group: "filter", Label: "随机文件名占比上限", Type: TypeFloat, Default: "0.3", Editable: true,
+		Min: f64(0), Max: f64(1), Desc: "垃圾规则：随机字符串式文件名占比超过该值即丢弃（文件数不少于 5 个时才判定），0–1 之间"},
+	{Key: KeyFilterBlockWords, Group: "filter", Label: "自定义屏蔽词", Type: TypeList, Default: "", Editable: true,
+		MaxItems: 500, MaxLen: 100, Desc: "标题或文件名命中任一词即按垃圾内容丢弃，对新抓取立即生效；受垃圾过滤开关控制"},
+	{Key: KeyFilterAllowWords, Group: "filter", Label: "例外短语", Type: TypeList, Default: "", Editable: true,
+		MaxItems: 500, MaxLen: 100, Desc: "先从标题和文件路径中移除这些短语再做成人判定，正经内容字面含敏感词时用；只豁免成人判定，不影响垃圾规则与自定义屏蔽词"},
+
+	// --- LLM moderation: all live (next sweep). Edited on the
+	// dedicated /admin/llm page; the settings page links there. ---
 	{Key: KeyModerationEnabled, Group: "moderation", Label: "启用 LLM 审核", Type: TypeBool, Default: "true", Editable: true,
 		Desc: "周期性用 LLM 清理静态过滤漏过的成人/垃圾内容；需要先填 API 密钥"},
 	{Key: KeyOpenAIAPIKey, Group: "moderation", Label: "LLM API 密钥", Type: TypeSecret, Sensitive: true, Default: "", Editable: true,
@@ -156,8 +190,6 @@ var Registry = []Item{
 		Desc: "开 = 只记录将删除什么，不真删"},
 	{Key: KeyModerationTrimTitles, Group: "moderation", Label: "标题去广告", Type: TypeBool, Default: "true", Editable: true,
 		Desc: "审核同一轮里顺带生成去广告的展示标题（原始标题保留且仍可搜）"},
-	{Key: KeyFilterBlockWords, Group: "moderation", Label: "自定义屏蔽词", Type: TypeList, Default: "", Editable: true,
-		MaxItems: 500, MaxLen: 100, Desc: "标题或文件名命中任一词即按垃圾内容丢弃，对新抓取立即生效"},
 
 	// --- trending: live ---
 	{Key: KeyTrendingEnabled, Group: "trending", Label: "启用豆瓣趋势", Type: TypeBool, Default: "true", Editable: true,

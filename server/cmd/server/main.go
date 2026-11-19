@@ -324,7 +324,16 @@ func main() {
 	reg(settings.KeyModerationMaxBatches, strconv.Itoa(*modMaxBatches))
 	reg(settings.KeyModerationDryRun, strconv.FormatBool(*modDryRun))
 	reg(settings.KeyModerationTrimTitles, strconv.FormatBool(*modTrim))
+	reg(settings.KeyFilterEnabled, strconv.FormatBool(envBool("FILTER_ENABLED", true)))
+	reg(settings.KeyFilterAdultEnabled, strconv.FormatBool(envBool("FILTER_ADULT_ENABLED", true)))
+	reg(settings.KeyFilterSpamEnabled, strconv.FormatBool(envBool("FILTER_SPAM_ENABLED", true)))
+	reg(settings.KeyFilterTooSmallEnabled, strconv.FormatBool(envBool("FILTER_TOO_SMALL_ENABLED", true)))
+	reg(settings.KeyFilterMaxNameLen, strconv.Itoa(envInt("FILTER_MAX_NAME_LEN", 300)))
+	reg(settings.KeyFilterStuffingMinRepeat, strconv.Itoa(envInt("FILTER_STUFFING_MIN_REPEAT", 4)))
+	reg(settings.KeyFilterNonAlnumMaxRatio, strconv.FormatFloat(envFloat("FILTER_NON_ALNUM_MAX_RATIO", 0.5), 'f', -1, 64))
+	reg(settings.KeyFilterRandomFileMaxRatio, strconv.FormatFloat(envFloat("FILTER_RANDOM_FILE_MAX_RATIO", 0.3), 'f', -1, 64))
 	reg(settings.KeyFilterBlockWords, envDefault("FILTER_BLOCK_WORDS", ""))
+	reg(settings.KeyFilterAllowWords, envDefault("FILTER_ALLOW_WORDS", ""))
 	reg(settings.KeyTrendingEnabled, strconv.FormatBool(*trendEnabled))
 	reg(settings.KeyTrendingInterval, trendInterval.String())
 	reg(settings.KeyTrendingLimit, strconv.Itoa(*trendLimit))
@@ -347,11 +356,22 @@ func main() {
 		logger.Fatalf("settings: %v", err)
 	}
 
-	// The content filter keeps package-level state; push its two live
+	// The content filter keeps package-level state; push its live
 	// settings now and on every accepted settings update.
 	applyFilter := func() {
 		filter.SetMinTotalSize(mgr.Int64(settings.KeyMinTorrentSize))
 		filter.SetBlockWords(mgr.List(settings.KeyFilterBlockWords))
+		filter.SetAllowWords(mgr.List(settings.KeyFilterAllowWords))
+		filter.SetConfig(filter.Config{
+			Enabled:            mgr.Bool(settings.KeyFilterEnabled),
+			AdultEnabled:       mgr.Bool(settings.KeyFilterAdultEnabled),
+			SpamEnabled:        mgr.Bool(settings.KeyFilterSpamEnabled),
+			TooSmallEnabled:    mgr.Bool(settings.KeyFilterTooSmallEnabled),
+			MaxNameLen:         mgr.Int(settings.KeyFilterMaxNameLen),
+			StuffingMinRepeat:  mgr.Int(settings.KeyFilterStuffingMinRepeat),
+			NonAlnumMaxRatio:   mgr.Float(settings.KeyFilterNonAlnumMaxRatio),
+			RandomFileMaxRatio: mgr.Float(settings.KeyFilterRandomFileMaxRatio),
+		})
 	}
 	applyFilter()
 	mgr.SetOnChange(func([]string) { applyFilter() })

@@ -13,6 +13,7 @@
 // secret field means "leave unchanged", never "clear").
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { AdminSettingItem, AdminSettingsGroup } from "@/lib/admin";
 import { THEME_PRESETS } from "@/lib/theme";
@@ -381,6 +382,19 @@ export default function SettingsForm({
               </span>
             )}
           </h2>
+          {group.key === "moderation" ? (
+            <div className="px-4 py-4">
+              <p className="text-sm leading-relaxed text-mute">
+                审核开关、模型、API Key、审核队列与最近记录已独立成专页，在那里统一修改，避免两处编辑同一批配置。
+              </p>
+              <Link
+                href="/admin/llm"
+                className="mt-3 inline-flex min-h-11 items-center rounded-lg bg-accent px-4 text-sm font-medium text-on-accent transition-colors hover:bg-accent-hover"
+              >
+                打开 LLM 审核页
+              </Link>
+            </div>
+          ) : (
           <div className="divide-y divide-line-2">
             {group.items.map((item) => (
               <div
@@ -425,6 +439,7 @@ export default function SettingsForm({
               </div>
             ))}
           </div>
+          )}
         </section>
       ))}
 

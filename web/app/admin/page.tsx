@@ -73,6 +73,27 @@ export default async function AdminOverviewPage() {
           <Row label="黑名单总数" value={o.moderation?.blocked} />
         </Section>
 
+        {o.filter && (
+          <Section title="内容过滤">
+            <TextRow label="总开关" value={o.filter.enabled ? "开" : "关"} />
+            <TextRow
+              label="成人过滤"
+              value={o.filter.adult_enabled ? "开" : "关"}
+            />
+            <TextRow
+              label="垃圾过滤"
+              value={o.filter.spam_enabled ? "开" : "关"}
+            />
+            <TextRow
+              label="太小过滤"
+              value={o.filter.too_small_enabled ? "开" : "关"}
+            />
+            <Row label="成人累计过滤" value={o.filter.adult_filtered} />
+            <Row label="垃圾累计过滤" value={o.filter.spam_filtered} />
+            <Row label="体积累计过滤" value={o.filter.size_filtered} />
+          </Section>
+        )}
+
         {o.crawler && (
           <Section title="爬虫状态">
             <div className="flex items-baseline justify-between gap-3 py-2">
@@ -159,6 +180,15 @@ function Row({ label, value }: { label: string; value?: number }) {
       <span className="text-sm font-medium tabular-nums text-ink-2">
         {formatCount(value)}
       </span>
+    </div>
+  );
+}
+
+function TextRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 py-2">
+      <span className="text-sm text-mute">{label}</span>
+      <span className="text-sm font-medium text-ink-2">{value}</span>
     </div>
   );
 }

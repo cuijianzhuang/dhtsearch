@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"dhtsearch/server/internal/settings"
 	"dhtsearch/server/internal/store"
 )
 
@@ -42,6 +43,8 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/api-tokens/{id}/disable", s.handleAdminAPITokenDisable)
 	mux.HandleFunc("PUT /api/admin/api-tokens/{id}/rate", s.handleAdminAPITokenRate)
 	mux.HandleFunc("DELETE /api/admin/api-tokens/{id}", s.handleAdminAPITokenDelete)
+	mux.HandleFunc("GET /api/admin/moderation", s.handleAdminModeration)
+	mux.HandleFunc("POST /api/admin/moderation/test", s.handleAdminModerationTest)
 }
 
 func (s *Server) adminEnabled() bool { return s.opts.AdminToken != "" }
@@ -160,6 +163,22 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.opts.MetaStatus != nil {
 		resp["fetch"].(map[string]any)["queue_depth"] = s.opts.MetaStatus().QueueDepth
+	}
+	// Static-filter state: the category switches as currently
+	// configured (a category that is off no longer increments its
+	// counter, so the counts below freeze where they were turned off)
+	// next to the cumulative counters themselves.
+	if s.opts.Settings != nil {
+		mgr := s.opts.Settings
+		resp["filter"] = map[string]any{
+			"enabled":           mgr.Bool(settings.KeyFilterEnabled),
+			"adult_enabled":     mgr.Bool(settings.KeyFilterAdultEnabled),
+			"spam_enabled":      mgr.Bool(settings.KeyFilterSpamEnabled),
+			"too_small_enabled": mgr.Bool(settings.KeyFilterTooSmallEnabled),
+			"adult_filtered":    counters["adult_filtered"],
+			"spam_filtered":     counters["spam_filtered"],
+			"size_filtered":     counters["size_filtered"],
+		}
 	}
 	if s.crawler != nil {
 		resp["crawler"] = s.crawler()

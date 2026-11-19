@@ -26,6 +26,11 @@ interface ActionBody {
   /** kind="create-api-token" / "rate-api-token": per-minute quota
    *  (0 = unlimited; omitted on create = settings default). */
   ratePerMin?: number;
+  /** kind="test-llm": probe overrides; empty fields mean "use the
+   *  effective setting" on the backend. */
+  base_url?: string;
+  model?: string;
+  api_key?: string;
 }
 
 export async function POST(request: Request) {
@@ -97,6 +102,14 @@ export async function POST(request: Request) {
       path = `/api/admin/api-tokens/${body.id}/rate`;
       payload = { rate_per_min: body.ratePerMin ?? 0 };
       break;
+    case "test-llm":
+      path = `/api/admin/moderation/test`;
+      payload = {
+        base_url: body.base_url ?? "",
+        model: body.model ?? "",
+        api_key: body.api_key ?? "",
+      };
+      break;
     default:
       return NextResponse.json({ error: "unknown action" }, { status: 400 });
   }
@@ -111,7 +124,12 @@ export async function POST(request: Request) {
     if (body.kind !== "create-api-token" && (!body.id || body.id < 1)) {
       return NextResponse.json({ error: "id required" }, { status: 400 });
     }
-  } else if (body.kind !== "batch" && body.kind !== "save-settings" && !body.hash) {
+  } else if (
+    body.kind !== "batch" &&
+    body.kind !== "save-settings" &&
+    body.kind !== "test-llm" &&
+    !body.hash
+  ) {
     return NextResponse.json({ error: "hash required" }, { status: 400 });
   }
 

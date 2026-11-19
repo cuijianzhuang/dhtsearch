@@ -144,6 +144,15 @@ export interface AdminOverview {
     pending: number;
     blocked: number;
   };
+  filter?: {
+    enabled: boolean;
+    adult_enabled: boolean;
+    spam_enabled: boolean;
+    too_small_enabled: boolean;
+    adult_filtered: number;
+    spam_filtered: number;
+    size_filtered: number;
+  };
   crawler?: AdminCrawler;
   scraper?: {
     queue: number;
@@ -324,4 +333,37 @@ export function fetchAdminAPITokens(
   token: string
 ): Promise<APITokenListResponse> {
   return adminFetch<APITokenListResponse>(token, "/api/admin/api-tokens");
+// --- LLM moderation console (mirror server/internal/api/moderation.go) ---
+
+export interface ModerationRecentItem {
+  info_hash: string;
+  name: string;
+  /** Verdict: ok | adult | spam. */
+  label: string;
+  /** Outcome: kept | deleted | would_delete (dry-run). */
+  action: string;
+  created_at: number;
+}
+
+export interface AdminModeration {
+  enabled: boolean;
+  key_set: boolean;
+  model: string;
+  base_url: string;
+  dry_run: boolean;
+  pending: number;
+  stats: {
+    reviewed: number;
+    adult_removed: number;
+    spam_removed: number;
+    errors: number;
+    titles_trimmed: number;
+  };
+  recent: ModerationRecentItem[];
+}
+
+export function fetchAdminModeration(
+  token: string
+): Promise<AdminModeration> {
+  return adminFetch<AdminModeration>(token, "/api/admin/moderation");
 }

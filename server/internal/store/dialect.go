@@ -173,6 +173,19 @@ func (d dialect) schemaStatements() []string {
 			last_used_at ` + intType + ` NOT NULL DEFAULT 0,
 			created_at   ` + intType + ` NOT NULL
 		)`,
+		// Audit trail of the LLM moderation pass: one row per
+		// classified torrent (kept, deleted, or would-be-deleted in
+		// dry-run), pruned to the newest moderationLogKeep rows by
+		// LogModeration. Backs the admin console's recent-activity
+		// list on the LLM page.
+		`CREATE TABLE IF NOT EXISTS moderation_log (
+			id         ` + idType + `,
+			info_hash  TEXT NOT NULL,
+			name       TEXT NOT NULL,
+			label      TEXT NOT NULL,
+			action     TEXT NOT NULL,
+			created_at ` + intType + ` NOT NULL
+		)`,
 	}
 }
 

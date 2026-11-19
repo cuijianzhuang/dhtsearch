@@ -160,6 +160,13 @@ type Server struct {
 	// guessed-token endpoint must not be brute-forceable at search speed.
 	loginLimiter *ipLimiter
 
+	// Connection-test debounce for /api/admin/moderation/test: one
+	// probe in flight at a time plus a cooldown between probes, so
+	// the button cannot be turned into a paid-request generator.
+	modTestMu   sync.Mutex
+	modTestBusy bool
+	modTestLast time.Time
+
 	// Cached /api/stats body and empty-query total, both refreshed at most
 	// once per StatsTTL. The mutexes double as single-flight: one request
 	// pays for the refresh while the rest wait for its result.
