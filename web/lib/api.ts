@@ -1,10 +1,28 @@
 // API client for the DHTSearch Go backend.
-// Base URL is configurable via NEXT_PUBLIC_API_BASE.
+//
+// Every runtime caller of this module runs on the server: the pages are
+// Server Components and the admin proxy is a route handler. Browser
+// components import only the types exported below (`import type`, erased
+// at build time), so no API request ever originates in the browser and
+// nothing here ships to the client bundle.
+//
+// Base URL resolution, first hit wins:
+//   API_BASE              plain runtime env, read by the Next server
+//                         process at startup — NOT inlined at build time.
+//                         install.sh sets this on the web service from
+//                         --api-port, so the API port can change on an
+//                         installed release package without a rebuild.
+//   NEXT_PUBLIC_API_BASE  build-time env, inlined into the bundle by
+//                         Next.js; the release workflow bakes
+//                         http://127.0.0.1:8080 here.
+//   default               http://localhost:8080 (local development).
 
 import { headers } from "next/headers";
 
 export const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
+  process.env.API_BASE ??
+  process.env.NEXT_PUBLIC_API_BASE ??
+  "http://localhost:8080";
 
 // Forward the caller's identity on server-side API requests. The Go backend
 // rate-limits per client IP; without these headers every SSR fetch would

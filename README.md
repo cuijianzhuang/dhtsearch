@@ -390,13 +390,13 @@ DEPLOY_HOST=user@example.com ./deploy.sh
 
 单机新装推荐这条路径：从 GitHub Release 下载预编译包（Go 二进制 + Next.js standalone 产物），**目标机不需要 Go / npm 工具链**，只需 systemd 和一个 Node.js 运行时（>= 18，跑前端 standalone 服务）：
 
-> 现状：仓库目前还没有任何 Release（自动发版已就绪，下一次业务代码合入 `main` 时会发首个 `v0.1.0`，见下文「发版」）。在此之前默认下载找不到包，请加 `--from-source` 从源码构建安装。
-
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main/scripts/install.sh) install
 ```
 
 子命令：`install` / `upgrade` / `status` / `uninstall`（无参在终端里运行给交互菜单）。常用选项：`--version vX.Y.Z` 指定版本（默认最新 Release）、`--file <tar.gz>` 用本地包安装、`--from-source` 无 Release 产物时从源码构建兜底（需要 git + Go + Node）、`uninstall --purge` 连配置和数据一起删（默认保留）。
+
+自定义端口：`install --api-port 18080 --web-port 13000`（也可预先设环境变量 `API_PORT` / `WEB_PORT`；优先级为 参数 > 环境变量 > 已有配置 > 默认 8080/3000）。API 端口写进配置文件的 `HTTP_ADDR`，同时生成给前端 unit 的 `API_BASE=http://127.0.0.1:<api-port>`——前端在服务端启动时读这个运行时变量（不写死在构建产物里），所以改后端端口不用重打 Release 包，前端会自动跟过去。upgrade 不带端口参数时保留已有端口不回退默认。启动服务前脚本会先检查两个端口：被其他进程占用会直接报出占用进程并退出，不会等到 120 秒健康检查超时（被本服务自己占着属正常，不误报）。
 
 装完的布局：
 
@@ -404,10 +404,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main
 | --- | --- |
 | `dhtsearch.service` / `dhtsearch-web.service` | API+爬虫 / 前端两个 systemd 单元，`enable --now` |
 | `/usr/local/bin/dhtsearch-server`、`/opt/dhtsearch/web/` | 二进制与前端产物 |
+| `/usr/local/bin/dhtsearch` | 管理脚本入口（install 时由 install.sh 自身复制），无参运行开交互菜单：安装 / 升级 / 状态 / 重启 / 日志 / 修改端口 / 卸载；与服务二进制 `dhtsearch-server` 是两个文件 |
 | `/etc/dhtsearch/dhtsearch.env` | 配置（端口、`DB_PATH` 默认 SQLite；Postgres 把 `DATABASE_URL` 那行取消注释填上即可），重复 install / upgrade 不覆盖 |
 | `/var/lib/dhtsearch/` | 数据库、`VERSION`、upgrade 的备份（`backups/`，健康检查失败自动回滚） |
 
-API 默认只听 `127.0.0.1:8080`、前端听 `127.0.0.1:3000`，公网访问请在前面加反向代理。日志：`journalctl -u dhtsearch -f`（前端 `-u dhtsearch-web`）；健康检查：`curl http://127.0.0.1:8080/api/healthz`（install/upgrade 会等它最多 120 秒，失败打印日志尾巴）。
+交互菜单里选「安装」会依次询问 API 端口和 Web 端口（带默认值、校验 1-65535），打印汇总确认后才执行；「修改端口」显示当前端口、询问新端口，保存后重启两个服务并跑健康检查；升级 / 重启 / 改端口 / 卸载在菜单里执行前都要二次确认，卸载可选择保留数据或 `--purge` 全删。
+
+API 默认只听 `127.0.0.1:8080`、前端听 `127.0.0.1:3000`，公网访问请在前面加反向代理。日志：`journalctl -u dhtsearch -f`（前端 `-u dhtsearch-web`）；健康检查：`curl http://127.0.0.1:8080/api/healthz`（install/upgrade 会等它最多 120 秒，失败打印日志尾巴；端口改过的话换成实际端口）。
 
 Release 产物由 `.github/workflows/release.yml` 构建：`dhtsearch-<version>-linux-<amd64|arm64>.tar.gz` + 对应 `.sha256`，install 时先验 sha256 再安装。本地等价打包用 `./scripts/package-release.sh --version vX.Y.Z --arch amd64`。
 
