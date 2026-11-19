@@ -6,6 +6,20 @@
 
 一个自建索引的磁力链接搜索网站：Go 后端通过 DHT 网络爬虫实时采集磁力链接元数据，自动过滤成人内容与垃圾信息，Next.js 前端提供干净的搜索界面。
 
+> 本仓库是 [madeye/dhtsearch](https://github.com/madeye/dhtsearch) 的 fork，在上游基础上改造：存储层支持 Postgres（默认仍为 SQLite）、新增令牌鉴权的管理端、前端样式统一、一键部署脚本与自动化发版。感谢上游作者的工作，许可证保持 MIT（见 [LICENSE](LICENSE)）。
+
+功能清单：
+
+- **DHT 爬虫**：被动监听 + BEP 51 `sample_infohashes` 主动采样发现 infohash，路由表自动维护
+- **元数据获取**：BEP 9 并发获取，获取前先用 BEP 15 tracker scrape 按 seeder 数排序，热门优先
+- **过滤与审核**：入库前静态过滤（成人词表 + 垃圾启发式 + 体积下限），入库后可每小时用 LLM 二次审核并顺带清理标题广告
+- **发布站 RSS**：定时拉动漫花园 / Nyaa 发布 RSS，发布页标题存为别名，罗马音种子也能按中文名搜到
+- **热门榜单**：每小时拉豆瓣热门榜单，首页提供快捷搜索词
+- **搜索前端**：Next.js 服务端渲染，匹配种子名、清理后标题与别名三列
+- **管理端**：`/admin` 概览、种子管理、未审核队列、黑名单，`ADMIN_TOKEN` 鉴权
+- **双数据库**：默认 SQLite 单文件零运维；设 `DATABASE_URL` 可切 Postgres
+- **部署与发版**：一键安装脚本（systemd 双服务）、合 main 自动发版、每小时备份到 Cloudflare R2（脚本自备）
+
 ## 架构
 
 ```mermaid
@@ -16,7 +30,7 @@ flowchart TB
     Fetcher["Metadata fetch<br/>BEP-9 workers"]
     Filter{"Filter engine<br/>keywords + heuristics + size"}
     Discard["Drop and count<br/>adult / spam / too small"]
-    DB[("SQLite")]
+    DB[("SQLite / Postgres")]
     Web["Next.js frontend"]
     Mod["LLM moderation<br/>OpenRouter free model"]
     Blocked[("blocked table")]
@@ -99,12 +113,13 @@ DHT 抽样碰到某个具体字幕组合集的概率很低；而且日剧种子�
 
 ## 快速开始
 
+前置：Go 版本以 `server/go.mod` 为准（当前 1.25.6）；前端开发用 Node 22（与 CI 一致）。
+
 ### 后端
 
 ```bash
-cp env.example .env           # 填入 OPENAI_API_KEY（.env 已 gitignore）
-
 cd server
+cp ../env.example .env         # 填入 OPENAI_API_KEY（.env 已 gitignore）
 
 # 完整模式：启动 DHT 爬虫（需要 UDP 出站，索引随时间增长）
 go run ./cmd/server
@@ -113,7 +128,9 @@ go run ./cmd/server
 CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 ```
 
-默认监听 `:8080`。配置项（环境变量或同名 flag）：
+注意 `.env` 按进程工作目录读取（可用 `ENV_FILE` 改路径）：上面的顺序把 `.env` 放在 `server/` 下，不要放在仓库根目录——根目录的那份不会被读到，缺文件也不报错，只会静默用默认值。真实环境变量优先于 `.env` 文件。
+
+默认监听 `:8080`。配置项（环境变量或同名 flag）按组列在本节各表里，核心项：
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -126,6 +143,8 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | `META_WORKERS` | `128` | 元数据并发 worker 数（入库速度的主要旋钮） |
 | `META_TIMEOUT` | `45s` | 单个元数据获取超时 |
 | `FETCH_METADATA` | `true` | 是否获取元数据（false 时只收 infohash） |
+| `SCRAPE_ENABLED` | `true` | 是否启用 tracker scrape 排序（见「Tracker 刮削排序」） |
+| `TRACKERS` | 内置列表 | 逗号分隔的 tracker announce URL，既作 scrape 目标也作获取的 peer 提示；完整默认列表见 `env.example` |
 | `MIN_TORRENT_SIZE` | `104857600`（100 MiB） | 低于此总体积的种子不入库 |
 | `ENV_FILE` | `.env` | .env 文件路径（相对工作目录） |
 | `RATE_LIMIT_RPS` | `3` | 每客户端 IP 的持续请求速率（令牌桶，0 = 关闭限流） |
@@ -154,6 +173,7 @@ DATABASE_URL='postgres://user:pass@127.0.0.1:5432/dhtsearch?sslmode=disable' go 
 - 连接池默认 10（SQLite 是单连接）；数据不自动从 SQLite 迁移，需要搬库
   请单独导数。
 - 集成测试：`DHTSEARCH_TEST_POSTGRES_URL=postgres://localhost/dhtsearch_test?sslmode=disable go test ./internal/store/ -run TestPostgresStore -v`（未设置该变量时自动跳过）。
+- 备份：SQLite 是单文件，停服拷贝或用 `VACUUM INTO` 做一致性快照即可，生产环境可直接用下文「每小时备份到 Cloudflare R2」的脚本（仅适用于 SQLite）；Postgres 用 `pg_dump`。
 
 LLM 审核相关（见下文「LLM 二次审核」）：
 
@@ -170,21 +190,69 @@ LLM 审核相关（见下文「LLM 二次审核」）：
 | `MODERATION_DRY_RUN` | `false` | 只打日志不删除 |
 | `MODERATION_TRIM_TITLES` | `true` | 顺带清理标题里的广告文字 |
 
+热门榜单（豆瓣，见 `server/internal/trending/`）：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `TRENDING_ENABLED` | `true` | 是否拉取豆瓣热门榜单（首页快捷搜索词） |
+| `TRENDING_INTERVAL` | `1h` | 拉取周期 |
+| `TRENDING_LIMIT` | `10` | 每类榜单条数 |
+
+发布站 RSS（见上文「发布站 RSS」）：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FEEDS_ENABLED` | `true` | 是否启用 RSS 拉取 |
+| `FEEDS` | 动漫花园日剧区 + Nyaa 真人区 | 逗号分隔的 RSS 地址，完整默认列表见 `env.example` |
+| `FEEDS_KEYWORD_URL` | 动漫花园关键词 RSS | 一个含 `%s` 的 URL，用热门榜单里的日剧/韩剧名逐个检索补老发布 |
+| `FEEDS_INTERVAL` | `30m` | 拉取周期 |
+| `FEEDS_WORKERS` | `16` | RSS 专用获取端并发（不与主获取端共用） |
+| `FEEDS_META_TIMEOUT` | `90s` | RSS 专用获取端单次超时 |
+
+以上全部变量均为可选（不配则用默认值）。只有两个例外是「配了才启用」：`OPENAI_API_KEY` 不配则 LLM 审核不启动，`ADMIN_TOKEN` 不配则管理端禁用。`env.example`（仓库根目录）是带注释的完整模板，服务端的每个变量在里面都有说明。
+
 ### 前端
 
 ```bash
 cd web
-cp .env.example .env.local   # NEXT_PUBLIC_API_BASE=http://localhost:8080
+cp env.example .env.local    # NEXT_PUBLIC_API_BASE=http://localhost:8080
 npm install
-npm run dev                  # 开发
+npm run dev                  # 开发，访问 http://localhost:3000
 # 或 npm run build && npm run start   # 生产
 ```
 
+前端环境变量（写在 `web/.env.local`，构建时内联）：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `NEXT_PUBLIC_API_BASE` | 无 | 后端 API 地址，如 `http://localhost:8080` |
+| `NEXT_PUBLIC_GA_ID` | 无 | Google Analytics 衡量 ID（`G-XXXXXXXXXX`），留空则不加载任何分析脚本 |
+
 ## API
 
-- `GET /api/search?q=xx&page=1&page_size=20` — 搜索（q 为空返回最新收录），结果含拼好的 magnet 链接
-- `GET /api/stats` — 收录数、成人/垃圾/体积过滤计数、LLM 审核统计、爬虫状态
-- `GET /api/healthz` — 健康检查
+公开接口（无鉴权，有限流，见「DoS 防护」）：
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `GET /api/search?q=xx&page=1&page_size=20` | 搜索（q 为空返回最新收录），结果含拼好的 magnet 链接 |
+| `GET /api/stats` | 收录数、成人/垃圾/体积过滤计数、LLM 审核统计、爬虫/刮削/RSS 状态 |
+| `GET /api/trending` | 豆瓣热门榜单（欧美电影、美剧、日剧、韩剧四类标题 + 更新时间），供首页快捷搜索词 |
+| `GET /api/healthz` | 健康检查，返回 `{"ok":true}`，不限流 |
+
+管理接口（全部需要 `Authorization: Bearer <ADMIN_TOKEN>`，未配置令牌时整体 503，见「管理端」）：
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `POST /api/admin/login` | 校验令牌（单独限流，每客户端 6 次/分钟） |
+| `GET /api/admin/overview` | 概览：总数/今日新增/未审核/已审核/已拉黑、管线与审核计数、爬虫/刮削/榜单状态、数据库后端 |
+| `GET /api/admin/torrents` | 种子列表（分页 + 关键词 + 审核状态过滤） |
+| `GET /api/admin/torrents/{hash}` | 种子详情（含文件列表） |
+| `POST /api/admin/torrents/{hash}/approve` | 标记已审核 |
+| `POST /api/admin/torrents/{hash}/block` | 拉黑（删除并记入黑名单，不再收录） |
+| `DELETE /api/admin/torrents/{hash}` | 只删记录（可被重新收录） |
+| `POST /api/admin/torrents/batch` | 批量通过/拉黑（单次 ≤100 条） |
+| `GET /api/admin/blocked` | 黑名单列表 |
+| `DELETE /api/admin/blocked/{hash}` | 取消拉黑 |
 
 ## 管理端
 
@@ -322,6 +390,8 @@ DEPLOY_HOST=user@example.com ./deploy.sh
 
 单机新装推荐这条路径：从 GitHub Release 下载预编译包（Go 二进制 + Next.js standalone 产物），**目标机不需要 Go / npm 工具链**，只需 systemd 和一个 Node.js 运行时（>= 18，跑前端 standalone 服务）：
 
+> 现状：仓库目前还没有任何 Release（自动发版已就绪，下一次业务代码合入 `main` 时会发首个 `v0.1.0`，见下文「发版」）。在此之前默认下载找不到包，请加 `--from-source` 从源码构建安装。
+
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main/scripts/install.sh) install
 ```
@@ -399,6 +469,45 @@ macOS 上可用 launchd 常驻/定时（安装后本地爬虫 API 在 `127.0.0.1
 > 这不是洁癖：launchd agent 对非系统卷（`/Volumes/...`）没有 TCC 权限，仓库放在外置盘时 agent **读写都会失败**——spawn 直接以 `EX_CONFIG (78)` 退出，或每次文件操作报 `Operation not permitted`。`$HOME` 下的路径不需要任何授权。
 
 本地爬虫固定使用 UDP `46881`（plist 里的 `DHT_PORT`），方便在路由器上做端口转发。索引全靠**入站** UDP：别的节点要能把 `get_peers` 查询发到这台机器，BEP-51 的响应也要回得来。家用 NAT 后面不转发这个端口，或者流量走了 VPN 隧道，`seen` 会一直是 0——进程活着、也在发包，但收不到任何东西。
+
+## 开发
+
+目录结构：
+
+| 路径 | 内容 |
+| --- | --- |
+| `server/cmd/server/` | 服务入口（flag/env 解析、各模块装配） |
+| `server/internal/crawler/` | DHT 爬虫（被动监听 + BEP 51 采样） |
+| `server/internal/scraper/` | BEP 15 tracker scrape 排序 |
+| `server/internal/metadata/` | BEP 9 元数据获取 |
+| `server/internal/filter/` | 入库前静态过滤（词表 + 启发式） |
+| `server/internal/moderator/` | LLM 二次审核与标题去广告 |
+| `server/internal/feeds/` | 发布站 RSS 拉取 |
+| `server/internal/trending/` | 豆瓣热门榜单 |
+| `server/internal/store/` | 存储层（SQLite / Postgres 双后端，方言在 `dialect.go`） |
+| `server/internal/api/` | 公开 API 与管理端 API |
+| `web/` | Next.js 前端（`app/` 页面含 `/admin`，`components/`、`lib/`） |
+| `scripts/` | 一键部署、打包、发版判定、R2 备份、本地同步脚本 |
+
+构建与测试（与 CI `.github/workflows/ci.yml` 一致，两个 job：Go server + Next.js web）：
+
+```bash
+cd server
+gofmt -l .          # 应无输出
+go vet ./...
+go test -race ./...
+
+cd ../web
+npm ci
+npm run lint
+npm run build
+```
+
+发版工具脚本的单测：`./scripts/test-release-tools.sh`。贡献流程：从 `main` 拉分支改，测试全过后开 PR，合并由维护者完成；合入 `main` 的业务代码会自动发版（见上文「发版」）。
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。本仓库 fork 自 [madeye/dhtsearch](https://github.com/madeye/dhtsearch)，版权与许可沿用上游。
 
 ## 注意
 
