@@ -175,6 +175,23 @@ func (d dialect) incrStat() string {
 		 ON CONFLICT(key) DO UPDATE SET value = value + excluded.value`
 }
 
+// insertOrIgnore builds a bulk-copy insert for Migrate: rows whose
+// primary key already exists in the target are skipped, never
+// overwritten. Table and column names come from a fixed list in
+// migrate.go, never from user input.
+func (d dialect) insertOrIgnore(table string, cols []string, conflictCol string) string {
+	ph := make([]string, len(cols))
+	for i := range ph {
+		ph[i] = "?"
+	}
+	joined := strings.Join(cols, ", ")
+	if d.isPostgres() {
+		return `INSERT INTO ` + table + ` (` + joined + `) VALUES (` + strings.Join(ph, ", ") + `)
+		 ON CONFLICT (` + conflictCol + `) DO NOTHING`
+	}
+	return `INSERT OR IGNORE INTO ` + table + ` (` + joined + `) VALUES (` + strings.Join(ph, ", ") + `)`
+}
+
 // hasColumnQuery counts occurrences of a column; args are (table, column)
 // for Postgres and (table, column) via pragma for SQLite — the SQLite
 // form takes the table name as a string literal argument to the pragma

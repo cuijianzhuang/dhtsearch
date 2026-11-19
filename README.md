@@ -170,8 +170,22 @@ DATABASE_URL='postgres://user:pass@127.0.0.1:5432/dhtsearch?sslmode=disable' go 
 - 启动时自动建表/补列（与 SQLite 同一套迁移逻辑）；若当前角色能建扩展，
   还会建 `pg_trgm` 扩展和 name/clean_name/alias 三列的 GIN 三元组索引，
   子串搜索可走索引；建不了扩展时自动退化为顺序扫描，不阻塞启动。
-- 连接池默认 10（SQLite 是单连接）；数据不自动从 SQLite 迁移，需要搬库
-  请单独导数。
+- 连接池默认 10（SQLite 是单连接）。
+- 数据迁移用服务二进制自带的 `migrate` 子命令（双向都支持，两端各是
+  SQLite 文件路径或 `postgres://` URL）：
+
+  ```bash
+  dhtsearch-server migrate --from /var/lib/dhtsearch/dhtsearch.db \
+      --to postgres://user:password@127.0.0.1:5432/dhtsearch?sslmode=disable
+  ```
+
+  按表批量拷贝 `torrents` / `stats` / `blocked`（表结构同构，字节原样
+  搬运）；目标里已有同 `info_hash`（或同 `key`）的行**跳过不覆盖**，所以
+  重复执行安全，也能合并进一个已有数据的库；迁完逐表核对行数、并逐个
+  校验源端主键在目标端存在，缺任何一行都报错且退出码非 0。迁移前请先
+  停服务——迁移中源库新增的行不会被带走。一键部署的机器也可以直接用
+  `dhtsearch` 菜单里的「数据库切换」，它把停服务、迁移、改配置、重启和
+  健康检查串成了一条流程（见下文「一键部署」）。
 - 集成测试：`DHTSEARCH_TEST_POSTGRES_URL=postgres://localhost/dhtsearch_test?sslmode=disable go test ./internal/store/ -run TestPostgresStore -v`（未设置该变量时自动跳过）。
 - 备份：SQLite 是单文件，停服拷贝或用 `VACUUM INTO` 做一致性快照即可，生产环境可直接用下文「每小时备份到 Cloudflare R2」的脚本（仅适用于 SQLite）；Postgres 用 `pg_dump`。
 
@@ -398,17 +412,21 @@ bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main
 
 自定义端口：`install --api-port 18080 --web-port 13000`（也可预先设环境变量 `API_PORT` / `WEB_PORT`；优先级为 参数 > 环境变量 > 已有配置 > 默认 8080/3000）。API 端口写进配置文件的 `HTTP_ADDR`，同时生成给前端 unit 的 `API_BASE=http://127.0.0.1:<api-port>`——前端在服务端启动时读这个运行时变量（不写死在构建产物里），所以改后端端口不用重打 Release 包，前端会自动跟过去。upgrade 不带端口参数时保留已有端口不回退默认。启动服务前脚本会先检查两个端口：被其他进程占用会直接报出占用进程并退出，不会等到 120 秒健康检查超时（被本服务自己占着属正常，不误报）。
 
+数据库选择：`install --db sqlite|postgres-local|postgres-url`（交互安装时在端口之后也会问）。默认 `sqlite`；`postgres-local` 在本机自动安装并配置 PostgreSQL（Debian/Ubuntu 走 apt，其他发行版会停下来给手动指引）：检测到已有可用的本机 PG 就复用，否则自动安装，建 `dhtsearch` 角色和同名库、生成随机密码，把 `DATABASE_URL` 写进配置文件，安装汇总里把完整连接地址（含密码）只打印一次请保存；`postgres-url --database-url postgres://...` 用已有 PG，写配置前先实测连通性（用发布包里的二进制跑一次空迁移），连不上直接中止、不写配置。已有配置的机器重复 install 时后端保持不变（除非显式给 `--db`），upgrade 永远不动数据库选择。配置文件因为可能带数据库密码，权限收紧为 600（root 专属；systemd 以 root 读 EnvironmentFile 后注入进程环境，服务不受影响）。
+
+装后切换数据库用 `dhtsearch` 菜单的「数据库切换」：显示当前后端（SQLite 给文件路径，PG 给脱敏后的 URL），选目标（切 PG 同样有本机自动装 / 已有地址两条路），确认后严格按 停服务 → `dhtsearch-server migrate` 迁数据并核对行数 → 改 `DATABASE_URL` → 启服务 → 健康检查 的顺序执行；迁移失败或行数对不上就不改配置、按原配置把服务拉回来，新后端健康检查不过同样回滚。切回 SQLite 时数据从 PG 迁回 `DB_PATH` 文件（文件里已有的同 hash 旧行不覆盖）。
+
 装完的布局：
 
 | 路径 | 内容 |
 | --- | --- |
 | `dhtsearch.service` / `dhtsearch-web.service` | API+爬虫 / 前端两个 systemd 单元，`enable --now` |
 | `/usr/local/bin/dhtsearch-server`、`/opt/dhtsearch/web/` | 二进制与前端产物 |
-| `/usr/local/bin/dhtsearch` | 管理脚本入口（install 时由 install.sh 自身复制），无参运行开交互菜单：安装 / 升级 / 状态 / 重启 / 日志 / 修改端口 / 卸载；与服务二进制 `dhtsearch-server` 是两个文件 |
-| `/etc/dhtsearch/dhtsearch.env` | 配置（端口、`DB_PATH` 默认 SQLite；Postgres 把 `DATABASE_URL` 那行取消注释填上即可），重复 install / upgrade 不覆盖 |
+| `/usr/local/bin/dhtsearch` | 管理脚本入口（install 时由 install.sh 自身复制），无参运行开交互菜单：安装 / 升级 / 状态 / 重启 / 日志 / 修改端口 / 数据库切换 / 卸载；与服务二进制 `dhtsearch-server` 是两个文件 |
+| `/etc/dhtsearch/dhtsearch.env` | 配置（端口、数据库：默认 SQLite 的 `DB_PATH`，或 `--db` 写入的 `DATABASE_URL`），权限 600，重复 install / upgrade 不覆盖 |
 | `/var/lib/dhtsearch/` | 数据库、`VERSION`、upgrade 的备份（`backups/`，健康检查失败自动回滚） |
 
-交互菜单里选「安装」会依次询问 API 端口和 Web 端口（带默认值、校验 1-65535），打印汇总确认后才执行；「修改端口」显示当前端口、询问新端口，保存后重启两个服务并跑健康检查；升级 / 重启 / 改端口 / 卸载在菜单里执行前都要二次确认，卸载可选择保留数据或 `--purge` 全删。
+交互菜单里选「安装」会依次询问 API 端口和 Web 端口（带默认值、校验 1-65535），新装时还会问数据库（SQLite / PostgreSQL 本机自动装 / PostgreSQL 已有地址），打印汇总确认后才执行；「修改端口」显示当前端口、询问新端口，保存后重启两个服务并跑健康检查；「数据库切换」显示当前后端、选目标、二次确认并提示短暂停机后执行带数据迁移的切换；升级 / 重启 / 改端口 / 切库 / 卸载在菜单里执行前都要二次确认，卸载可选择保留数据或 `--purge` 全删。
 
 API 默认只听 `127.0.0.1:8080`、前端听 `127.0.0.1:3000`，公网访问请在前面加反向代理。日志：`journalctl -u dhtsearch -f`（前端 `-u dhtsearch-web`）；健康检查：`curl http://127.0.0.1:8080/api/healthz`（install/upgrade 会等它最多 120 秒，失败打印日志尾巴；端口改过的话换成实际端口）。
 

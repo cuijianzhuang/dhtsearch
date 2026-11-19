@@ -171,6 +171,14 @@ func envFloat(key string, fallback float64) float64 {
 }
 
 func main() {
+	// Subcommands run before any env loading or server flag parsing:
+	// `dhtsearch-server migrate --from ... --to ...` copies the
+	// database between backends and exits (see migrate.go). With no
+	// subcommand the process is the server, exactly as before.
+	if migrateRequested() {
+		os.Exit(runMigrate(os.Args[2:]))
+	}
+
 	logger := log.Default()
 
 	// Load .env before reading any env-backed default. Real environment
