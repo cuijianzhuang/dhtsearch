@@ -268,6 +268,8 @@ func TestAdminBatchApproveCountsOnlyExisting(t *testing.T) {
 		map[string]any{"hashes": mixed, "action": "approve"})
 	if code != 200 || m["affected"].(float64) != 1 {
 		t.Fatalf("batch approve mixed: %d %v, want affected 1", code, m)
+	}
+}
 
 func TestAdminTrends(t *testing.T) {
 	st, err := store.Open(":memory:")

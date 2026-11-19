@@ -222,15 +222,15 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 		opts.StatsTTL = defaultStatsTTL
 	}
 	s := &Server{
-		st:           st,
-		crawler:      crawlerStatus,
-		logger:       logger,
-		opts:         opts,
-		searchSem:    make(chan struct{}, opts.MaxInflight),
-		loginLimiter: newIPLimiter(adminLoginRate, adminLoginBurst),
-		tokenLimiter: newTokenLimiter(),
+		st:            st,
+		crawler:       crawlerStatus,
+		logger:        logger,
+		opts:          opts,
+		searchSem:     make(chan struct{}, opts.MaxInflight),
+		loginLimiter:  newIPLimiter(adminLoginRate, adminLoginBurst),
+		tokenLimiter:  newTokenLimiter(),
 		reportLimiter: newIPLimiter(reportRate, reportBurst),
-		authHTTP:     &http.Client{Timeout: 15 * time.Second},
+		authHTTP:      &http.Client{Timeout: 15 * time.Second},
 	}
 	if opts.RateRPS > 0 {
 		burst := opts.RateBurst
