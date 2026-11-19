@@ -154,6 +154,9 @@ export interface AdminOverview {
     tv_jp: number;
     tv_kr: number;
     updated_at: number;
+    failing?: boolean;
+    fail_streak?: number;
+    last_success?: number;
   };
 }
 

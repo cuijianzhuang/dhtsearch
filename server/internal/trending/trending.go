@@ -10,6 +10,14 @@
 // entered the charts. Every failure mode degrades to "keep serving the last
 // good list", and an empty snapshot just means the homepage renders no
 // trending section.
+//
+// The last good state is also persisted (see StateStore): the snapshot
+// used to live only in memory, so a restart onto a machine that cannot
+// currently reach Douban served an empty homepage section until the
+// first successful fetch — potentially forever, at one attempt per
+// interval. Now Restore loads the persisted state at startup, and the
+// refresh loop retries failures with exponential backoff instead of
+// waiting a full interval between attempts.
 package trending
 
 import (
@@ -44,6 +52,14 @@ const (
 		"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
+// retryBase is the first retry delay after a refresh cycle in which
+// any chart failed; the delay doubles per consecutive failed cycle
+// and is capped at the configured interval, so a post-restart outage
+// is retried within a minute while a persistent one backs off to the
+// normal cadence instead of hammering Douban. A var so tests can
+// shrink it.
+var retryBase = time.Minute
+
 // Config tunes the fetcher. Zero values pick the defaults above.
 type Config struct {
 	// Interval between refreshes.
@@ -62,15 +78,36 @@ type Config struct {
 	// fetch entirely (the last snapshot stays, and callers that check
 	// the same gate serve empty lists). Nil means always enabled.
 	EnabledFunc func() bool
+	// Store, when non-nil, persists the last good state across
+	// restarts: Restore loads it at startup and every refresh that
+	// updates a chart writes it back. Nil keeps the historical
+	// in-memory-only behavior (tests, tools).
+	Store StateStore
+}
+
+// StateStore is the persistence the service needs: one opaque blob,
+// written whole. *store.Store satisfies it.
+type StateStore interface {
+	LoadTrendingState(ctx context.Context) ([]byte, error)
+	SaveTrendingState(ctx context.Context, data []byte) error
 }
 
 // Snapshot is the current trending state.
 type Snapshot struct {
-	Movies    []string // 欧美 movies
-	TV        []string // 美剧
-	TVJP      []string // 日剧
-	TVKR      []string // 韩剧
-	UpdatedAt time.Time
+	Movies    []string  `json:"movies"` // 欧美 movies
+	TV        []string  `json:"tv"`     // 美剧
+	TVJP      []string  `json:"tv_jp"`  // 日剧
+	TVKR      []string  `json:"tv_kr"`  // 韩剧
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Status reports refresh health for the admin overview: whether the
+// latest cycles are failing and when a fetch last fully succeeded.
+type Status struct {
+	UpdatedAt   time.Time // last snapshot change (zero: never populated)
+	LastSuccess time.Time // last cycle in which every chart fetched
+	FailStreak  int       // consecutive cycles with at least one failed chart
+	Failing     bool      // FailStreak > 0
 }
 
 // Service fetches and caches the trending lists.
@@ -85,6 +122,15 @@ type Service struct {
 
 	mu   sync.RWMutex
 	snap Snapshot
+
+	// Refresh health, guarded by mu: when the last cycle completed
+	// with every chart fetched, and how many cycles in a row have
+	// had at least one failure since.
+	lastSuccess time.Time
+	failStreak  int
+
+	// store persists snap+names across restarts; nil disables it.
+	store StateStore
 
 	// names caches subject ID -> resolved English title so refreshes only
 	// pay the subject_abstract call for subjects new to the charts. Only
@@ -118,6 +164,66 @@ func New(cfg Config) *Service {
 		ready:     make(chan struct{}),
 		cfgFn:     cfg.ConfigFunc,
 		enabledFn: cfg.EnabledFunc,
+		store:     cfg.Store,
+	}
+}
+
+// persistedState is the JSON document written through StateStore:
+// the last good snapshot plus the resolved-name cache, so a restart
+// neither blanks the homepage nor repays the subject_abstract calls.
+type persistedState struct {
+	Snapshot Snapshot          `json:"snapshot"`
+	Names    map[string]string `json:"names"`
+}
+
+// Restore loads the persisted state, if any, into memory. Call it
+// once before Run. A missing or corrupt state is not an error: the
+// service simply starts empty, as it always did.
+func (s *Service) Restore(ctx context.Context) {
+	if s.store == nil {
+		return
+	}
+	data, err := s.store.LoadTrendingState(ctx)
+	if err != nil {
+		s.cfg.Logger.Printf("trending: load persisted state: %v (starting empty)", err)
+		return
+	}
+	if len(data) == 0 {
+		return
+	}
+	var st persistedState
+	if err := json.Unmarshal(data, &st); err != nil {
+		s.cfg.Logger.Printf("trending: persisted state corrupt: %v (starting empty)", err)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap = st.Snapshot
+	if st.Names != nil {
+		s.names = st.Names
+	}
+	if !st.Snapshot.UpdatedAt.IsZero() {
+		s.cfg.Logger.Printf("trending: restored snapshot from store (updated %s); serving it until the next successful fetch",
+			st.Snapshot.UpdatedAt.Format(time.RFC3339))
+	}
+}
+
+// persist writes the current snapshot and name cache through the
+// store. Best-effort: a failed write is logged, never fatal — the
+// in-memory state stays authoritative for this process.
+func (s *Service) persist(ctx context.Context) {
+	if s.store == nil {
+		return
+	}
+	s.mu.RLock()
+	data, err := json.Marshal(persistedState{Snapshot: s.snap, Names: s.names})
+	s.mu.RUnlock()
+	if err != nil {
+		s.cfg.Logger.Printf("trending: encode persisted state: %v", err)
+		return
+	}
+	if err := s.store.SaveTrendingState(ctx, data); err != nil {
+		s.cfg.Logger.Printf("trending: persist state: %v", err)
 	}
 }
 
@@ -153,16 +259,71 @@ func (s *Service) Get() Snapshot {
 	return s.snap
 }
 
+// Status returns the refresh health for the admin overview.
+func (s *Service) Status() Status {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return Status{
+		UpdatedAt:   s.snap.UpdatedAt,
+		LastSuccess: s.lastSuccess,
+		FailStreak:  s.failStreak,
+		Failing:     s.failStreak > 0,
+	}
+}
+
+// retryDelay is how long to wait before the next cycle after
+// failStreak consecutive cycles with at least one failed chart: the
+// base delay doubling per streak, capped at the regular interval.
+func retryDelay(failStreak int, interval time.Duration) time.Duration {
+	if failStreak <= 0 {
+		return interval
+	}
+	d := retryBase
+	for i := 1; i < failStreak && d < interval; i++ {
+		d *= 2
+	}
+	if d > interval {
+		d = interval
+	}
+	return d
+}
+
 // Run refreshes immediately and then every Interval until ctx is
 // done. The interval is re-read each cycle, and a disabled gate skips
-// the fetch, so settings changes apply without a restart.
+// the fetch, so settings changes apply without a restart. A cycle in
+// which any chart failed is retried on the retryDelay backoff rather
+// than after a full interval, so a transient outage right after a
+// restart heals in minutes; the last good snapshot keeps serving
+// throughout either way.
 func (s *Service) Run(ctx context.Context) {
 	for {
+		wait := s.cfgNow().Interval
 		if s.enabled() {
-			s.refresh(ctx)
+			ok, failed := s.refresh(ctx)
+			s.mu.Lock()
+			prevStreak := s.failStreak
+			if failed == 0 {
+				s.failStreak = 0
+				s.lastSuccess = time.Now()
+			} else {
+				s.failStreak++
+			}
+			streak := s.failStreak
+			s.mu.Unlock()
+			wait = retryDelay(streak, wait)
+			switch {
+			case failed == 0 && prevStreak > 0:
+				s.cfg.Logger.Printf("trending: recovered after %d failed cycle(s)", prevStreak)
+			case failed > 0 && ok == 0:
+				s.cfg.Logger.Printf("trending: all %d charts failed (streak %d); serving last good snapshot, next retry in %s",
+					failed, streak, wait)
+			case failed > 0:
+				s.cfg.Logger.Printf("trending: %d of %d charts failed (streak %d); next retry in %s",
+					failed, ok+failed, streak, wait)
+			}
 		}
 		s.readyOnce.Do(func() { close(s.ready) })
-		t := time.NewTimer(s.cfgNow().Interval)
+		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			t.Stop()
@@ -187,9 +348,11 @@ var charts = []struct {
 	{"tv", "韩剧", false, func(sn *Snapshot, t []string) { sn.TVKR = t }},
 }
 
-// refresh fetches every chart. A chart that fails keeps its previous value,
-// so one bad response never blanks a homepage row.
-func (s *Service) refresh(ctx context.Context) {
+// refresh fetches every chart and reports how many succeeded and
+// how many failed. A chart that fails keeps its previous value, so
+// one bad response never blanks a homepage row. When at least one
+// chart updated, the new state is persisted for the next restart.
+func (s *Service) refresh(ctx context.Context) (succeeded, failed int) {
 	cfg := s.cfgNow()
 	type result struct {
 		apply  func(*Snapshot, []string)
@@ -200,19 +363,22 @@ func (s *Service) refresh(ctx context.Context) {
 		titles, err := s.fetchList(ctx, cfg, c.typ, c.tag, c.english)
 		if err != nil {
 			cfg.Logger.Printf("trending: %s/%s fetch: %v", c.typ, c.tag, err)
+			failed++
 			continue
 		}
 		ok = append(ok, result{c.apply, titles})
 	}
 	if len(ok) == 0 {
-		return
+		return 0, failed
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, r := range ok {
 		r.apply(&s.snap, r.titles)
 	}
 	s.snap.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	s.persist(ctx)
+	return len(ok), failed
 }
 
 type subject struct {
@@ -266,7 +432,11 @@ func (s *Service) englishTitle(ctx context.Context, sub subject) string {
 	if ok {
 		return cached
 	}
-	time.Sleep(abstractDelay)
+	select {
+	case <-ctx.Done():
+		return sub.Title
+	case <-time.After(abstractDelay):
+	}
 	u := fmt.Sprintf("%s/j/subject_abstract?subject_id=%s", s.cfg.BaseURL, url.QueryEscape(sub.ID))
 	body, err := s.get(ctx, u)
 	if err != nil {

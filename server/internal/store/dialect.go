@@ -146,6 +146,14 @@ func (d dialect) schemaStatements() []string {
 			value      TEXT NOT NULL,
 			updated_at ` + intType + ` NOT NULL
 		)`,
+		// The trending service's last good state (one JSON blob under
+		// a single key), so a restart serves the previous Douban
+		// charts immediately instead of an empty homepage section
+		// until the first successful refetch. See internal/trending.
+		`CREATE TABLE IF NOT EXISTS trending_cache (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)`,
 	}
 }
 

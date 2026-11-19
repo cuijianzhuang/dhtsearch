@@ -371,6 +371,7 @@ func main() {
 		Interval: *trendInterval,
 		Limit:    *trendLimit,
 		Logger:   logger,
+		Store:    st,
 		ConfigFunc: func() trending.Config {
 			return trending.Config{
 				Interval: mgr.Duration(settings.KeyTrendingInterval),
@@ -543,7 +544,10 @@ func main() {
 	// Douban trending fetcher for the homepage quick-search chips.
 	// The enable gate is consulted per request: disabled means the
 	// endpoint serves empty lists even though the service keeps its
-	// last snapshot.
+	// last snapshot. Restore first: the persisted last good charts
+	// serve from the first request, even if Douban is unreachable
+	// right now.
+	trendSvc.Restore(ctx)
 	go trendSvc.Run(ctx)
 	trendFn := func() api.Trending {
 		t := api.Trending{Movies: []string{}, TV: []string{}, TVJP: []string{}, TVKR: []string{}}
@@ -604,8 +608,16 @@ func main() {
 			ScraperStatus: scraperStatus(scr),
 			FeedsStatus:   feedsStatus(feedSvc, feedFetch),
 			Trending:      trendFn,
-			AdminToken:    *adminToken,
-			Settings:      mgr,
+			TrendingStatus: func() api.TrendingStatus {
+				ts := trendSvc.Status()
+				out := api.TrendingStatus{Failing: ts.Failing, FailStreak: ts.FailStreak}
+				if !ts.LastSuccess.IsZero() {
+					out.LastSuccess = ts.LastSuccess.Unix()
+				}
+				return out
+			},
+			AdminToken: *adminToken,
+			Settings:   mgr,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,

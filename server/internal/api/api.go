@@ -60,6 +60,11 @@ type Options struct {
 	// Trending, when non-nil, backs /api/trending. Nil (feature disabled)
 	// makes the endpoint serve empty lists so the frontend degrades quietly.
 	Trending func() Trending
+	// TrendingStatus, when non-nil, adds refresh-health fields to
+	// the admin overview's trending section, so a fetcher stuck
+	// failing (e.g. Douban unreachable since a restart) is visible
+	// instead of silently serving stale or empty lists.
+	TrendingStatus func() TrendingStatus
 	// AdminToken is the bearer token guarding /api/admin/*. Empty (the
 	// default) disables the admin API entirely: every admin route answers
 	// 503 and the startup log says so. The token comes from the
@@ -82,6 +87,14 @@ type Trending struct {
 	TVJP      []string `json:"tv_jp"`  // 日剧, Chinese names
 	TVKR      []string `json:"tv_kr"`  // 韩剧, Chinese names
 	UpdatedAt int64    `json:"updated_at"`
+}
+
+// TrendingStatus is the trending fetcher's refresh health, surfaced
+// in the admin overview.
+type TrendingStatus struct {
+	Failing     bool  `json:"failing"`      // latest refresh cycles are failing
+	FailStreak  int   `json:"fail_streak"`  // consecutive failed cycles
+	LastSuccess int64 `json:"last_success"` // unix time of last fully successful cycle, 0 if none this run
 }
 
 // CrawlerStatus describes the crawler for the stats endpoint. The sampler

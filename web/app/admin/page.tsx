@@ -111,6 +111,14 @@ export default async function AdminOverviewPage() {
                 {o.trending.updated_at ? formatDate(o.trending.updated_at) : "-"}
               </span>
             </div>
+            {o.trending.failing && (
+              <div className="flex items-baseline justify-between gap-3 py-2">
+                <span className="text-sm text-mute">抓取状态</span>
+                <span className="text-sm font-medium text-red-500">
+                  抓取失败中（已连续 {o.trending.fail_streak ?? 0} 轮，正在展示上次榜单）
+                </span>
+              </div>
+            )}
           </Section>
         )}
 

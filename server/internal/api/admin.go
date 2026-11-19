@@ -162,13 +162,20 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.opts.Trending != nil {
 		t := s.opts.Trending()
-		resp["trending"] = map[string]any{
+		sec := map[string]any{
 			"movies":     len(t.Movies),
 			"tv":         len(t.TV),
 			"tv_jp":      len(t.TVJP),
 			"tv_kr":      len(t.TVKR),
 			"updated_at": t.UpdatedAt,
 		}
+		if s.opts.TrendingStatus != nil {
+			ts := s.opts.TrendingStatus()
+			sec["failing"] = ts.Failing
+			sec["fail_streak"] = ts.FailStreak
+			sec["last_success"] = ts.LastSuccess
+		}
+		resp["trending"] = sec
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
