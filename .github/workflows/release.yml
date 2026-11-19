@@ -86,10 +86,24 @@ jobs:
           cp -R web/.next/static web-dist/web/.next/static
           cp -R web/public web-dist/web/public
           test -f web-dist/web/server.js
+          # The standalone server cannot start without these; fail here
+          # rather than shipping a package whose web frontend crash-loops.
+          test -f web-dist/web/.next/BUILD_ID
+          test -f web-dist/web/.next/required-server-files.json
+      - name: Pack web dist as tarball
+        working-directory: ${{ github.workspace }}
+        # actions/upload-artifact >= 4.4 silently drops hidden files
+        # (anything under a dot-directory) unless include-hidden-files
+        # is set — that is how web/.next vanished from the v0.1.0 and
+        # v0.1.1 packages. Hand the artifact layer a single tar file
+        # instead: tar does not filter dotfiles. include-hidden-files
+        # stays on as a second line of defence.
+        run: tar -czf web-dist.tar.gz -C web-dist web
       - uses: actions/upload-artifact@v4
         with:
           name: web-dist
-          path: web-dist
+          path: web-dist.tar.gz
+          include-hidden-files: true
 
   server:
     name: Build server (${{ matrix.arch }})
@@ -136,10 +150,21 @@ jobs:
         with:
           name: web-dist
           path: web-dist
+      - name: Unpack web dist tarball
+        # The web job ships web/ as a tarball so the artifact layer
+        # cannot filter out the .next directory (see the web job).
+        run: |
+          tar -xzf web-dist/web-dist.tar.gz -C web-dist
+          test -f web-dist/web/server.js
+          test -f web-dist/web/.next/BUILD_ID
+          test -f web-dist/web/.next/required-server-files.json
       - uses: actions/download-artifact@v4
         with:
           name: server-${{ matrix.arch }}
           path: server-dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Resolve version
         id: version
         run: |
@@ -163,6 +188,10 @@ jobs:
           mkdir -p "$stage"
           install -m 0755 "server-dist/dhtsearch-server-${{ matrix.arch }}" "$stage/dhtsearch-server"
           cp -R web-dist/web "$stage/web"
+          # Hard fail on an incomplete web build: without .next the
+          # installed frontend crash-loops (this shipped in v0.1.0/v0.1.1).
+          test -f "$stage/web/.next/BUILD_ID" || { echo "web/.next/BUILD_ID missing from package" >&2; exit 1; }
+          test -f "$stage/web/.next/required-server-files.json" || { echo "web/.next/required-server-files.json missing from package" >&2; exit 1; }
           cp env.example "$stage/env.example"
           cp scripts/install.sh "$stage/install.sh"
           chmod 755 "$stage/install.sh"
@@ -171,6 +200,36 @@ jobs:
           tar -czf "dist/$pkg.tar.gz" -C "$RUNNER_TEMP" "$pkg"
           (cd dist && sha256sum "$pkg.tar.gz" > "$pkg.tar.gz.sha256")
           ls -lh dist
+      - name: Smoke test the packaged web frontend
+        # Unpack the exact tarball that is about to be published and
+        # prove the bundled Next.js server starts and serves the
+        # homepage. The API is not running here; the homepage renders
+        # with empty stats in that case, so a 200 still proves the
+        # standalone build (including .next) is intact.
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          pkg="dhtsearch-${version}-linux-${{ matrix.arch }}"
+          smoke="$RUNNER_TEMP/smoke"
+          mkdir -p "$smoke"
+          tar -xzf "dist/$pkg.tar.gz" -C "$smoke"
+          test -f "$smoke/$pkg/web/.next/BUILD_ID"
+          test -f "$smoke/$pkg/web/.next/required-server-files.json"
+          cd "$smoke/$pkg/web"
+          PORT=3100 HOSTNAME=127.0.0.1 node server.js > "$RUNNER_TEMP/web-smoke.log" 2>&1 &
+          web_pid=$!
+          trap 'kill "$web_pid" 2>/dev/null || true' EXIT
+          ok=""
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null "http://127.0.0.1:3100/"; then ok=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "packaged web frontend did not answer on /; server log:" >&2
+            cat "$RUNNER_TEMP/web-smoke.log" >&2
+            exit 1
+          fi
+          echo "smoke OK: packaged web frontend serves / with HTTP 200"
       - uses: actions/upload-artifact@v4
         with:
           name: package-${{ matrix.arch }}
