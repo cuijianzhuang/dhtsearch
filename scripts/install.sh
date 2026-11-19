@@ -45,7 +45,10 @@
 #
 # Testing hooks (not needed on a real server):
 #   DHTSEARCH_ROOT=/tmp/root   prefix every install path (unit *contents*
-#                              still point at the real paths)
+#                              still point at the real paths). Test mode
+#                              needs no root: the service user, the chown
+#                              pass and systemctl are all skipped, and
+#                              copies do not preserve ownership.
 #   DHTSEARCH_SKIP_SYSTEMD=1   write unit files but never call systemctl
 #   DHTSEARCH_DRY_RUN=1        same as --dry-run
 set -euo pipefail
@@ -79,6 +82,20 @@ WEB_UNIT="dhtsearch-web.service"
 UPDATE_UNIT="dhtsearch-update.service"
 UPDATE_TIMER="dhtsearch-update.timer"
 AUTOUPDATE_FILE="${DATA_DIR}/autoupdate"
+
+# Archive copies (package extraction, web tree, upgrade backups). In
+# DHTSEARCH_ROOT test mode the tree belongs to whoever runs the test,
+# while the release tarball's entries belong to the build user: asking
+# tar/cp to preserve ownership there fails noisily ("failed to preserve
+# ownership") and can abort the install halfway, so test-mode copies
+# keep modes and timestamps but not ownership. A real install is
+# unaffected — fix_permissions assigns the service user afterwards.
+CP_A=(cp -a)
+TAR_EXTRACT=(tar -xzf)
+if [ -n "$PREFIX" ]; then
+    CP_A=(cp -a --no-preserve=ownership)
+    TAR_EXTRACT=(tar --no-same-owner -xzf)
+fi
 
 VERSION=""
 API_PORT_OPT=""
@@ -190,7 +207,8 @@ Options (uninstall):
 Environment:
   API_PORT / WEB_PORT    default ports when the matching --*-port flag
                          is not given (same priority rules as above)
-  DHTSEARCH_ROOT         prefix all install paths (testing)
+  DHTSEARCH_ROOT         prefix all install paths (testing; the run
+                         then needs no root and preserves no ownership)
   DHTSEARCH_SKIP_SYSTEMD=1
                          write units without calling systemctl (testing)
 
@@ -204,6 +222,11 @@ EOF
 # ---------------------------------------------------------------- checks
 
 require_root() {
+    # DHTSEARCH_ROOT test mode (local testing / CI) never touches real
+    # system state — every path is prefixed, the service user and the
+    # chown pass are skipped, and systemctl is not called — so it must
+    # not demand root; requiring it would defeat the hook.
+    if [ -n "$PREFIX" ]; then return 0; fi
     if [ "$(id -u)" -ne 0 ]; then
         die "must run as root (try: sudo bash install.sh ...)"
     fi
@@ -473,7 +496,7 @@ resolve_database() {
 probe_pg_url() {
     local url="$1" tmp bin
     tmp="$(mktemp -d)"
-    if ! tar -xzf "$PKG_TARBALL" -C "$tmp" --wildcards --no-anchored 'dhtsearch-server' 2>/dev/null; then
+    if ! "${TAR_EXTRACT[@]}" "$PKG_TARBALL" -C "$tmp" --wildcards --no-anchored 'dhtsearch-server' 2>/dev/null; then
         rm -rf "$tmp"
         die "could not extract dhtsearch-server from the package to test the database connection"
     fi
@@ -822,7 +845,7 @@ install_package_files() {
     local tarball="$1"
     local extract_dir
     extract_dir="$(mktemp -d)"
-    tar -xzf "$tarball" -C "$extract_dir"
+    "${TAR_EXTRACT[@]}" "$tarball" -C "$extract_dir"
     local pkg_dir
     pkg_dir="$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d | head -1)"
     if [ -z "$pkg_dir" ] || [ ! -f "$pkg_dir/dhtsearch-server" ]; then
@@ -851,7 +874,7 @@ install_package_files() {
     install -m 0755 "$pkg_dir/dhtsearch-server" "$BIN_FILE"
     rm -rf "$WEB_DIR"
     mkdir -p "$APP_DIR"
-    cp -a "$pkg_dir/web" "$WEB_DIR"
+    "${CP_A[@]}" "$pkg_dir/web" "$WEB_DIR"
     rm -rf "$extract_dir"
     log "Installed binary -> $BIN_FILE, web -> $WEB_DIR"
 }
@@ -947,6 +970,55 @@ install_manager() {
     fi
 }
 
+# FILE_VERSION — the version read out of a --file tarball (see
+# validate_local_file); empty when the package name carries none.
+FILE_VERSION=""
+
+# validate_local_file — check the --file package before anything on
+# the system is touched, and read the release version out of it: the
+# package's top-level directory is dhtsearch-<version>-linux-<arch>,
+# so a local install records the real version instead of "local". A
+# tarball that does not follow the layout still installs (the layout
+# checks in install_package_files apply); it just keeps "local".
+validate_local_file() {
+    [ -n "$LOCAL_FILE" ] || return 0
+    [ -f "$LOCAL_FILE" ] || die "--file not found: $LOCAL_FILE"
+    local listing top v
+    listing="$(tar -tzf "$LOCAL_FILE" 2>/dev/null)" \
+        || die "--file is not a readable .tar.gz package: $LOCAL_FILE"
+    top="${listing%%$'\n'*}"
+    top="${top%%/*}"
+    case "$top" in
+        dhtsearch-*-linux-*)
+            v="${top#dhtsearch-}"
+            FILE_VERSION="${v%-linux-*}"
+            ;;
+    esac
+}
+
+# validate_inputs — every parameter and package check that can be done
+# up front, run by install/upgrade before any system state changes
+# (no directories, no service user, no downloads yet). The full
+# database resolution still happens later in resolve_database; this is
+# its cheap parameter-shape half, mirrored so a malformed --db /
+# --database-url fails here instead of after the system was touched.
+validate_inputs() {
+    validate_local_file
+    if [ "$FROM_SOURCE" -eq 1 ]; then
+        local tool
+        for tool in git go npm node; do
+            command -v "$tool" >/dev/null 2>&1 || die "--from-source needs $tool on this machine"
+        done
+    fi
+    local db="$DB_OPT"
+    if [ -n "$DATABASE_URL_OPT" ] && [ -z "$db" ]; then db="postgres-url"; fi
+    if [ "$db" = "postgres-url" ]; then
+        [ -n "$DATABASE_URL_OPT" ] || die "--db postgres-url needs --database-url"
+        valid_pg_url "$DATABASE_URL_OPT" \
+            || die "invalid --database-url: must start with postgres:// or postgresql://"
+    fi
+}
+
 # obtain_package <arch> <workdir>; sets PKG_TARBALL and RESOLVED_VERSION.
 PKG_TARBALL=""
 RESOLVED_VERSION=""
@@ -954,7 +1026,7 @@ obtain_package() {
     local arch="$1" workdir="$2"
     if [ -n "$LOCAL_FILE" ]; then
         [ -f "$LOCAL_FILE" ] || die "--file not found: $LOCAL_FILE"
-        RESOLVED_VERSION="${VERSION:-local}"
+        RESOLVED_VERSION="${VERSION:-${FILE_VERSION:-local}}"
         cp "$LOCAL_FILE" "${workdir}/package.tar.gz"
         PKG_TARBALL="${workdir}/package.tar.gz"
     elif [ "$FROM_SOURCE" -eq 1 ]; then
@@ -1160,7 +1232,11 @@ do_install() {
     workdir="$(mktemp -d)"
     CLEANUP_DIR="$workdir"
 
-    prepare_dirs_and_user
+    # All parameter and package validation happens before any system
+    # state changes: a bad --file / --database-url / --from-source
+    # environment fails here, not after the service user and the
+    # directory tree have been created.
+    validate_inputs
     obtain_package "$arch" "$workdir"
     tarball="$PKG_TARBALL"
     # A bare --database-url (no --db) means postgres-url.
@@ -1177,6 +1253,7 @@ do_install() {
             || die "cannot connect to PostgreSQL at $(mask_pg_url "$RESOLVED_DATABASE_URL") (server unreachable or credentials rejected); config not written, nothing installed"
         log "PostgreSQL connection verified: $(mask_pg_url "$RESOLVED_DATABASE_URL")"
     fi
+    prepare_dirs_and_user
     install_package_files "$tarball"
     write_env_file
     write_units
@@ -1227,14 +1304,15 @@ do_upgrade() {
     ts="$(date +%Y%m%d%H%M%S)"
     old_version="$(installed_version)"
 
+    validate_inputs
     obtain_package "$arch" "$workdir"
     tarball="$PKG_TARBALL"
 
     prepare_dirs_and_user
     log "Backing up current install ($old_version) to $BACKUP_DIR ($ts)"
-    cp -a "$BIN_FILE" "${BACKUP_DIR}/dhtsearch-server.${ts}.bak"
-    [ -f "$ENV_FILE" ] && cp -a "$ENV_FILE" "${BACKUP_DIR}/dhtsearch.env.${ts}.bak"
-    [ -d "$WEB_DIR" ] && cp -a "$WEB_DIR" "${BACKUP_DIR}/web.${ts}.bak"
+    "${CP_A[@]}" "$BIN_FILE" "${BACKUP_DIR}/dhtsearch-server.${ts}.bak"
+    [ -f "$ENV_FILE" ] && "${CP_A[@]}" "$ENV_FILE" "${BACKUP_DIR}/dhtsearch.env.${ts}.bak"
+    [ -d "$WEB_DIR" ] && "${CP_A[@]}" "$WEB_DIR" "${BACKUP_DIR}/web.${ts}.bak"
 
     install_package_files "$tarball"
     write_env_file
@@ -1256,7 +1334,7 @@ do_upgrade() {
     install -m 0755 "${BACKUP_DIR}/dhtsearch-server.${ts}.bak" "$BIN_FILE"
     if [ -d "${BACKUP_DIR}/web.${ts}.bak" ]; then
         rm -rf "$WEB_DIR"
-        cp -a "${BACKUP_DIR}/web.${ts}.bak" "$WEB_DIR"
+        "${CP_A[@]}" "${BACKUP_DIR}/web.${ts}.bak" "$WEB_DIR"
     fi
     restart_services
     if wait_health; then
