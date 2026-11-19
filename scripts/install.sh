@@ -522,6 +522,12 @@ install_package_files() {
     if [ ! -f "$pkg_dir/web/server.js" ]; then
         die "package layout unexpected: no web/server.js in $tarball"
     fi
+    # The Next.js standalone server cannot start without its .next build
+    # output; a package missing it (as v0.1.0/v0.1.1 were) installs fine
+    # but the web service then crash-loops. Refuse it up front instead.
+    if [ ! -f "$pkg_dir/web/.next/BUILD_ID" ] || [ ! -f "$pkg_dir/web/.next/required-server-files.json" ]; then
+        die "package is corrupt: web/.next build output (BUILD_ID / required-server-files.json) missing in $tarball; the web frontend cannot start from this package — re-download it, or install a fixed release"
+    fi
 
     install -m 0755 "$pkg_dir/dhtsearch-server" "$BIN_FILE"
     rm -rf "$WEB_DIR"

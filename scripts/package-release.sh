@@ -97,6 +97,13 @@ if [ -d "$ROOT_DIR/web/public" ]; then
     cp -R "$ROOT_DIR/web/public" "$STAGE_DIR/web/public"
 fi
 test -f "$STAGE_DIR/web/server.js" || { echo "web/server.js missing in standalone build" >&2; exit 1; }
+# The standalone server refuses to start without its .next build output
+# ("Could not find a production build in the './.next' directory"). A
+# package missing it installs fine but the web service crash-loops, so
+# treat it as a build failure here, never as a shippable package.
+for f in .next/BUILD_ID .next/required-server-files.json; do
+    test -f "$STAGE_DIR/web/$f" || { echo "release package would be broken: web/$f missing from standalone build" >&2; exit 1; }
+done
 
 cp "$ROOT_DIR/env.example" "$STAGE_DIR/env.example"
 cp "$ROOT_DIR/scripts/install.sh" "$STAGE_DIR/install.sh"
