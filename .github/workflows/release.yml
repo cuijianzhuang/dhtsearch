@@ -12,6 +12,13 @@ name: Release
 #
 # The web build is arch-independent, so it is built once and combined with
 # each per-arch server binary in the package job.
+#
+# This workflow is also reusable (workflow_call): the Auto Release
+# workflow (.github/workflows/auto-release.yml) calls it after pushing a
+# version tag for a business-code push to main, because a tag pushed with
+# GITHUB_TOKEN would not trigger this workflow on its own. Callers pass
+# the version explicitly and set publish=true to attach the packages to
+# that tag's GitHub Release.
 
 on:
   push:
@@ -22,6 +29,17 @@ on:
         description: "Version label for the packages (default: dev-<short sha>)"
         required: false
         type: string
+  workflow_call:
+    inputs:
+      version:
+        description: "Version label for the packages"
+        required: true
+        type: string
+      publish:
+        description: "Attach the packages to a GitHub Release for the version tag"
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -137,9 +155,13 @@ jobs:
           name: package-${{ matrix.arch }}
           path: dist
       - name: Attach to GitHub Release
-        if: github.ref_type == 'tag'
+        # Tag pushes publish as before. Reusable-workflow calls run on a
+        # branch ref, so they publish via the explicit publish input and
+        # pin tag_name to the resolved version instead of the ref name.
+        if: github.ref_type == 'tag' || inputs.publish
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.version }}
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
