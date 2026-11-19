@@ -73,6 +73,11 @@ type Options struct {
 	// 503 and the startup log says so. The token comes from the
 	// environment only — never stored, never logged.
 	AdminToken string
+	// Trackers, when non-nil, returns the announce URLs magnets are
+	// stamped with (the same list the pipeline uses as peer hints) and
+	// that search responses publish for the detail view. Nil means
+	// magnets carry no tr= parameters, as before.
+	Trackers func() []string
 	// Settings, when non-nil, is the live configuration registry: it
 	// backs /api/site and /api/admin/settings, and the DoS knobs above
 	// (RateRPS, RateBurst, MaxInflight, SearchTimeout) are re-read
@@ -166,6 +171,10 @@ type Server struct {
 	modTestMu   sync.Mutex
 	modTestBusy bool
 	modTestLast time.Time
+	// reportLimiter throttles POST /api/report per client+torrent: a
+	// report is a write into the operator's queue, so one visitor must
+	// not be able to flood it with duplicates of the same complaint.
+	reportLimiter *ipLimiter
 
 	// Cached /api/stats body and empty-query total, both refreshed at most
 	// once per StatsTTL. The mutexes double as single-flight: one request
@@ -176,6 +185,13 @@ type Server struct {
 	countMu   sync.Mutex
 	countVal  int
 	countAt   time.Time
+
+	// Cached whole-table category counts for the no-keyword browse
+	// path: classifying the whole table per request would defeat the
+	// Latest fast path, so the counts ride the same TTL as the total.
+	catMu     sync.Mutex
+	catCounts map[string]int
+	catAt     time.Time
 }
 
 // New builds the HTTP handler. crawlerStatus may be nil.
@@ -200,6 +216,7 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 		searchSem:    make(chan struct{}, opts.MaxInflight),
 		loginLimiter: newIPLimiter(adminLoginRate, adminLoginBurst),
 		tokenLimiter: newTokenLimiter(),
+		reportLimiter: newIPLimiter(reportRate, reportBurst),
 	}
 	if opts.RateRPS > 0 {
 		burst := opts.RateBurst
@@ -220,6 +237,9 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 	mux.HandleFunc("GET /api/trending", s.handleTrending)
 	mux.HandleFunc("GET /api/healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/site", s.handleSite)
+	mux.HandleFunc("GET /api/torrents/{hash}/similar", s.handleSimilar)
+	mux.HandleFunc("GET /rss", s.handleRSS)
+	mux.HandleFunc("POST /api/report", s.handleReport)
 	s.registerAdminRoutes(mux)
 	s.mux = mux
 	return s
@@ -325,6 +345,61 @@ type resultItem struct {
 	Files     any    `json:"files"`
 	Magnet    string `json:"magnet"`
 	CreatedAt int64  `json:"created_at"`
+	Category  string `json:"category"`
+}
+
+func (s *Server) toResultItem(t store.Torrent, trackers []string) resultItem {
+	return resultItem{
+		InfoHash:  t.InfoHash,
+		Name:      t.Name,
+		Alias:     t.Alias,
+		TotalSize: t.TotalSize,
+		FileCount: t.FileCount,
+		Files:     t.Files,
+		Magnet:    magnetURI(t.InfoHash, t.Name, trackers),
+		CreatedAt: t.CreatedAt,
+		Category:  t.Category,
+	}
+}
+
+// trackers returns the announce URLs magnets are stamped with (nil
+// when the deployment configured none).
+func (s *Server) trackers() []string {
+	if s.opts.Trackers == nil {
+		return nil
+	}
+	return s.opts.Trackers()
+}
+
+// gate takes an admission slot for a search-class query (search, RSS,
+// similar), answering 503 itself when the wait exceeds admissionWait.
+// The returned release function must be called exactly once when it
+// reports true.
+func (s *Server) gate(w http.ResponseWriter, r *http.Request) (func(), bool) {
+	s.syncSettings()
+	sem := s.searchSemaphore()
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, true
+	case <-r.Context().Done():
+		return nil, false
+	case <-time.After(admissionWait):
+		w.Header().Set("Retry-After", "2")
+		writeError(w, http.StatusServiceUnavailable, "server busy")
+		return nil, false
+	}
+}
+
+// searchError answers a failed store query the way handleSearch always
+// has: a blown context is a 503 (client may retry), anything else 500.
+func (s *Server) searchError(w http.ResponseWriter, ctx context.Context, err error, what string) {
+	if ctx.Err() != nil {
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "search timed out")
+	} else {
+		writeError(w, http.StatusInternalServerError, "search failed")
+	}
+	s.logger.Printf("api: %s: %v", what, err)
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -343,72 +418,101 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if (page-1)*pageSize > maxOffset {
 		page = maxOffset/pageSize + 1
 	}
+	category := r.URL.Query().Get("category")
+	if category != "" && !store.ValidCategory(category) {
+		writeError(w, http.StatusBadRequest, "invalid category")
+		return
+	}
+	sortOrder := r.URL.Query().Get("sort")
+	switch sortOrder {
+	case "", store.SortRelevance:
+		sortOrder = store.SortRelevance
+	case store.SortNewest, store.SortSize:
+		// ok
+	default:
+		writeError(w, http.StatusBadRequest, "invalid sort")
+		return
+	}
 
 	// Admission gate: the store serializes queries on one connection, so
 	// when all slots are busy piling on more requests only grows the queue.
 	// Wait briefly for a slot, then shed load instead of stacking up.
-	s.syncSettings()
-	sem := s.searchSemaphore()
-	select {
-	case sem <- struct{}{}:
-		defer func() { <-sem }()
-	case <-r.Context().Done():
-		return
-	case <-time.After(admissionWait):
-		w.Header().Set("Retry-After", "2")
-		writeError(w, http.StatusServiceUnavailable, "server busy")
+	release, ok := s.gate(w, r)
+	if !ok {
 		return
 	}
+	defer release()
 
 	// The context bounds database time and dies with the client connection,
 	// so queries for hung-up clients stop consuming the SQLite handle.
 	ctx, cancel := context.WithTimeout(r.Context(), s.searchTimeout())
 	defer cancel()
 
+	trackers := s.trackers()
 	var (
-		items []store.Torrent
-		total int
-		err   error
+		items  []store.Torrent
+		total  int
+		counts map[string]int
+		err    error
 	)
-	if strings.TrimSpace(q) == "" {
-		// The landing page. Latest walks the created_at index instead of
-		// counting matches, and the total comes from the shared cache.
+	if strings.TrimSpace(q) == "" && category == "" && sortOrder != store.SortSize {
+		// The no-keyword browse path. Latest walks the created_at index
+		// instead of counting matches, the total comes from the shared
+		// cache, and the category counts ride their own TTL cache (they
+		// cost a full classification pass, see cachedCategoryCounts).
 		items, err = s.st.Latest(ctx, page, pageSize)
 		if err == nil {
 			total, err = s.cachedCount(ctx)
 		}
+		if err == nil {
+			counts, err = s.cachedCategoryCounts(ctx)
+		}
 	} else {
-		items, total, err = s.st.Search(ctx, q, page, pageSize)
+		items, total, counts, err = s.st.SearchEx(ctx, store.SearchParams{
+			Query:    q,
+			Category: category,
+			Sort:     sortOrder,
+			Page:     page,
+			PageSize: pageSize,
+		})
 	}
 	if err != nil {
-		if ctx.Err() != nil {
-			w.Header().Set("Retry-After", "5")
-			writeError(w, http.StatusServiceUnavailable, "search timed out")
-		} else {
-			writeError(w, http.StatusInternalServerError, "search failed")
-		}
-		s.logger.Printf("api: search: %v", err)
+		s.searchError(w, ctx, err, "search")
 		return
 	}
 	results := make([]resultItem, 0, len(items))
 	for _, t := range items {
-		results = append(results, resultItem{
-			InfoHash:  t.InfoHash,
-			Name:      t.Name,
-			Alias:     t.Alias,
-			TotalSize: t.TotalSize,
-			FileCount: t.FileCount,
-			Files:     t.Files,
-			Magnet:    magnetURI(t.InfoHash, t.Name),
-			CreatedAt: t.CreatedAt,
-		})
+		results = append(results, s.toResultItem(t, trackers))
+	}
+	if trackers == nil {
+		trackers = []string{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"total":     total,
-		"page":      page,
-		"page_size": pageSize,
-		"results":   results,
+		"total":      total,
+		"page":       page,
+		"page_size":  pageSize,
+		"results":    results,
+		"category":   category,
+		"sort":       sortOrder,
+		"categories": counts,
+		"trackers":   trackers,
 	})
+}
+
+// cachedCategoryCounts returns the whole-table per-category counts, at
+// most StatsTTL stale, single-flight like cachedCount.
+func (s *Server) cachedCategoryCounts(ctx context.Context) (map[string]int, error) {
+	s.catMu.Lock()
+	defer s.catMu.Unlock()
+	if s.catCounts != nil && time.Since(s.catAt) < s.opts.StatsTTL {
+		return s.catCounts, nil
+	}
+	_, _, counts, err := s.st.SearchEx(ctx, store.SearchParams{Page: 1, PageSize: 1})
+	if err != nil {
+		return nil, err
+	}
+	s.catCounts, s.catAt = counts, time.Now()
+	return counts, nil
 }
 
 // cachedCount returns the total torrent count, at most StatsTTL stale.
@@ -531,8 +635,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func magnetURI(hash, name string) string {
-	return "magnet:?xt=urn:btih:" + hash + "&dn=" + url.QueryEscape(name)
+// magnetURI builds the magnet link for a torrent, stamping the
+// configured trackers as tr= parameters so clients find peers even
+// after the originating swarm's DHT presence fades.
+func magnetURI(hash, name string, trackers []string) string {
+	var b strings.Builder
+	b.WriteString("magnet:?xt=urn:btih:")
+	b.WriteString(hash)
+	b.WriteString("&dn=")
+	b.WriteString(url.QueryEscape(name))
+	for _, tr := range trackers {
+		b.WriteString("&tr=")
+		b.WriteString(url.QueryEscape(tr))
+	}
+	return b.String()
 }
 
 func atoiDefault(s string, def int) int {

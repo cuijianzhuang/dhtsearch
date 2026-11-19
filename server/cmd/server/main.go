@@ -707,6 +707,7 @@ func main() {
 			},
 			AdminToken: *adminToken,
 			Settings:   mgr,
+			Trackers:      func() []string { return mgr.List(settings.KeyTrackers) },
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,

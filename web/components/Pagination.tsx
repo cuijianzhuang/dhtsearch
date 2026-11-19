@@ -8,12 +8,19 @@ interface PaginationProps {
   page: number;
   total: number;
   pageSize: number;
+  /** Active category filter and sort, preserved across pages. */
+  category?: string;
+  sort?: string;
 }
 
-export default function Pagination({ q, page, total, pageSize }: PaginationProps) {
+export default function Pagination({ q, page, total, pageSize, category = "", sort = "" }: PaginationProps) {
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const mkHref = (p: number) =>
-    `/search?q=${encodeURIComponent(q)}&page=${p}`;
+  const mkHref = (p: number) => {
+    const params = new URLSearchParams({ q, page: String(p) });
+    if (category) params.set("category", category);
+    if (sort && sort !== "relevance") params.set("sort", sort);
+    return `/search?${params.toString()}`;
+  };
 
   const btnCls =
     "inline-flex min-h-11 items-center rounded-lg border border-input bg-soft px-4 text-sm text-ink-2 transition-colors hover:border-accent hover:text-accent-ink";

@@ -186,7 +186,28 @@ func (d dialect) schemaStatements() []string {
 			action     TEXT NOT NULL,
 			created_at ` + intType + ` NOT NULL
 		)`,
+		// Visitor reports against indexed torrents (see reports.go),
+		// worked from the admin console's report queue.
+		`CREATE TABLE IF NOT EXISTS reports (
+			id         ` + d.autoID() + `,
+			info_hash  TEXT NOT NULL,
+			reason     TEXT NOT NULL,
+			note       TEXT NOT NULL DEFAULT '',
+			reporter   TEXT NOT NULL DEFAULT '',
+			status     INTEGER NOT NULL DEFAULT 0,
+			created_at ` + intType + ` NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, created_at DESC)`,
 	}
+}
+
+// autoID is the auto-incrementing primary key column definition; the
+// two backends spell it completely differently.
+func (d dialect) autoID() string {
+	if d.isPostgres() {
+		return "BIGSERIAL PRIMARY KEY"
+	}
+	return "INTEGER PRIMARY KEY AUTOINCREMENT"
 }
 
 // upsertSetting writes one settings row. The right-hand side references

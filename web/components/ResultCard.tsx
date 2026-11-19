@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { SearchResult } from "@/lib/api";
+import type { SearchResult, SimilarItem } from "@/lib/api";
 import {
   commonDirPrefix,
   formatCount,
@@ -10,19 +10,42 @@ import {
   shortenDir,
 } from "@/lib/format";
 import CopyMagnetButton from "./CopyMagnetButton";
+import ReportForm from "./ReportForm";
 
 const MAX_FILES_SHOWN = 10;
 
 export default function ResultCard({
   result,
+  trackers,
   selected,
   onToggleSelect,
 }: {
   result: SearchResult;
+  /** Announce URLs stamped into this result's magnet (site-wide list
+   *  from the search response), shown in the detail area. */
+  trackers: string[];
   selected: boolean;
   onToggleSelect: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  // Similar torrents load lazily on first expand: null = not asked yet.
+  const [similar, setSimilar] = useState<SimilarItem[] | null>(null);
+  const [similarLoading, setSimilarLoading] = useState(false);
+
+  function toggleExpanded() {
+    const next = !expanded;
+    setExpanded(next);
+    if (next && similar === null && !similarLoading) {
+      setSimilarLoading(true);
+      fetch(`/api/similar?hash=${encodeURIComponent(result.info_hash)}`)
+        .then((res) => (res.ok ? res.json() : { results: [] }))
+        .then((data: { results?: SimilarItem[] }) =>
+          setSimilar(data.results ?? [])
+        )
+        .catch(() => setSimilar([]))
+        .finally(() => setSimilarLoading(false));
+    }
+  }
   const files = result.files ?? [];
   const shownFiles = files.slice(0, MAX_FILES_SHOWN);
   // The crawler stores at most 50 file entries but records the real count, so
@@ -57,7 +80,7 @@ export default function ResultCard({
           />
         </label>
         <button
-          onClick={() => setExpanded((v) => !v)}
+          onClick={toggleExpanded}
           className="min-w-0 flex-1 text-left"
           title={result.name}
         >
@@ -147,6 +170,46 @@ export default function ResultCard({
           >
             {result.magnet}
           </p>
+
+          {trackers.length > 0 && (
+            <div className="mt-3 border-t border-line-2 pt-2">
+              <p className="text-[11px] font-medium text-mute">
+                Tracker（{trackers.length}，已写入磁力链接）
+              </p>
+              <ul className="mt-1 max-h-28 space-y-1 overflow-y-auto font-mono text-[11px] break-all text-faint">
+                {trackers.map((tr) => (
+                  <li key={tr}>{tr}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="mt-3 border-t border-line-2 pt-2">
+            <p className="text-[11px] font-medium text-mute">相似资源</p>
+            {similarLoading ? (
+              <p className="mt-1 text-xs text-faint">正在查找相似资源…</p>
+            ) : similar && similar.length > 0 ? (
+              <ul className="mt-1 space-y-2">
+                {similar.map((s) => (
+                  <li key={s.info_hash} className="flex items-baseline justify-between gap-3 text-xs">
+                    <a
+                      href={`/search?q=${encodeURIComponent(s.name)}`}
+                      className="min-w-0 wrap-anywhere text-accent-ink hover:underline"
+                    >
+                      {s.name || "(未命名)"}
+                    </a>
+                    <span className="shrink-0 tabular-nums text-mute">
+                      {formatSize(s.total_size)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-1 text-xs text-faint">暂无相似资源</p>
+            )}
+          </div>
+
+          <ReportForm infoHash={result.info_hash} name={result.name} />
         </div>
       )}
     </div>

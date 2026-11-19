@@ -127,6 +127,8 @@ export interface AdminOverview {
   pending_review: number;
   reviewed: number;
   blocked: number;
+  /** Visitor reports awaiting handling (front-features). */
+  reports_pending?: number;
   dialect: string;
   stats: Record<string, number>;
   fetch: {
@@ -211,6 +213,37 @@ export interface BlockedListResponse {
   page: number;
   page_size: number;
   results: BlockedItem[];
+}
+
+export interface ReportItem {
+  id: number;
+  info_hash: string;
+  reason: "adult" | "spam" | "infringement" | "other" | string;
+  note: string;
+  reporter_ip: string;
+  status: number; // 0 pending, 1 resolved, 2 dismissed
+  created_at: number;
+  /** Current display name of the reported torrent; "" if deleted. */
+  name: string;
+}
+
+export interface ReportsListResponse {
+  total: number;
+  page: number;
+  page_size: number;
+  results: ReportItem[];
+}
+
+export function fetchAdminReports(
+  token: string,
+  opts: { status?: string; page?: number; pageSize?: number }
+): Promise<ReportsListResponse> {
+  const params = new URLSearchParams({
+    status: opts.status ?? "pending",
+    page: String(opts.page ?? 1),
+    page_size: String(opts.pageSize ?? 20),
+  });
+  return adminFetch<ReportsListResponse>(token, `/api/admin/reports?${params}`);
 }
 
 export function fetchAdminOverview(token: string): Promise<AdminOverview> {

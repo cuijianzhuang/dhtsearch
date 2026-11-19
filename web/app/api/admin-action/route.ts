@@ -16,11 +16,11 @@ interface ActionBody {
   hashes?: string[];
   action?: string;
   reason?: string;
+  /** kind="report-*" / "*-api-token": the target row id. */
+  id?: number;
   /** kind="save-settings": settings key -> new value (null deletes
    *  the DB override, reverting to env/default). */
   values?: Record<string, string | null>;
-  /** kind="*-api-token": the api_tokens row id. */
-  id?: number;
   /** kind="create-api-token": display name for the new token. */
   name?: string;
   /** kind="create-api-token" / "rate-api-token": per-minute quota
@@ -110,6 +110,16 @@ export async function POST(request: Request) {
         api_key: body.api_key ?? "",
       };
       break;
+    case "report-resolve":
+    case "report-dismiss":
+    case "report-block": {
+      if (!body.id || body.id <= 0) {
+        return NextResponse.json({ error: "id required" }, { status: 400 });
+      }
+      const verb = body.kind.replace("report-", "");
+      path = `/api/admin/reports/${body.id}/${verb}`;
+      break;
+    }
     default:
       return NextResponse.json({ error: "unknown action" }, { status: 400 });
   }
@@ -128,6 +138,7 @@ export async function POST(request: Request) {
     body.kind !== "batch" &&
     body.kind !== "save-settings" &&
     body.kind !== "test-llm" &&
+    !body.kind?.startsWith("report-") &&
     !body.hash
   ) {
     return NextResponse.json({ error: "hash required" }, { status: 400 });

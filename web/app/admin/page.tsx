@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import AdminShell, {
   AdminBackendErrorNotice,
   AdminDisabledNotice,
@@ -21,34 +22,44 @@ export default async function AdminOverviewPage() {
   const o = outcome.data;
   const s = o.stats ?? {};
 
-  const cards = [
+  const cards: { label: string; value: number; href?: string }[] = [
     { label: "种子总数", value: o.torrents },
     { label: "今日新增", value: o.today },
     { label: "未审核", value: o.pending_review },
     { label: "已审核", value: o.reviewed },
     { label: "已拉黑", value: o.blocked },
+    // Front-features: pending visitor reports, linking to the queue.
+    { label: "待处理举报", value: o.reports_pending ?? 0, href: "/admin/reports" },
   ];
 
   return (
     <AdminShell active="overview">
-      {/* Five stat cards, the same shape as the Polaris dashboard row. */}
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
-        {cards.map((c) => (
-          <div
-            key={c.label}
-            className="rounded-xl border border-line bg-surface p-4 shadow-card"
-          >
-            <p className="text-xs text-mute">{c.label}</p>
-            <p className="mt-2 text-2xl font-semibold tabular-nums text-ink">
-              {formatCount(c.value)}
-            </p>
-          </div>
-        ))}
-        {/* Sixth cell on md (3-col) keeps the grid rectangular: DB info. */}
-        <div className="rounded-xl border border-line bg-surface p-4 shadow-card md:block xl:hidden">
-          <p className="text-xs text-mute">数据库</p>
-          <p className="mt-2 text-2xl font-semibold text-ink">{o.dialect}</p>
-        </div>
+      {/* Stat cards, the same shape as the Polaris dashboard row. Six
+          cards: 2 rows of 3 on md, one row of 6 on xl — rectangular at
+          every width without a filler cell (DB info has its own
+          section below). */}
+      <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+        {cards.map((c) => {
+          const inner = (
+            <>
+              <p className="text-xs text-mute">{c.label}</p>
+              <p className="mt-2 text-2xl font-semibold tabular-nums text-ink">
+                {formatCount(c.value)}
+              </p>
+            </>
+          );
+          const cls =
+            "rounded-xl border border-line bg-surface p-4 shadow-card";
+          return c.href ? (
+            <Link key={c.label} href={c.href} className={`${cls} transition-colors hover:border-accent`}>
+              {inner}
+            </Link>
+          ) : (
+            <div key={c.label} className={cls}>
+              {inner}
+            </div>
+          );
+        })}
       </section>
 
       <div className="mt-6 grid gap-4 lg:grid-cols-2">

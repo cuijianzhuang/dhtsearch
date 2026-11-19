@@ -10,6 +10,7 @@ const TABS = [
   { key: "review", href: "/admin/review", label: "未审核队列" },
   { key: "blocked", href: "/admin/blocked", label: "黑名单" },
   { key: "llm", href: "/admin/llm", label: "LLM 审核" },
+  { key: "reports", href: "/admin/reports", label: "举报队列" },
   { key: "settings", href: "/admin/settings", label: "设置" },
   { key: "api-tokens", href: "/admin/api-tokens", label: "API 令牌" },
 ] as const;

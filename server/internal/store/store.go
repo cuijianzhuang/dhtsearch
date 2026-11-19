@@ -33,6 +33,9 @@ type Torrent struct {
 	// dmhy page title carrying the Chinese and Japanese names), where the
 	// torrent's own name is often romaji only. Searched alongside the name.
 	Alias string `json:"alias,omitempty"`
+	// Category is computed at read time from the file list (see
+	// CategoryOf); it is never stored.
+	Category string `json:"category,omitempty"`
 }
 
 // Candidate is the slim projection of a torrent handed to the moderation
@@ -447,6 +450,7 @@ func scanTorrents(rows *sql.Rows) (items []Torrent, err error) {
 		if err := json.Unmarshal(fj, &t.Files); err != nil {
 			return nil, err
 		}
+		t.Category = CategoryOf(t.Files, t.Name)
 		items = append(items, t)
 	}
 	return items, rows.Err()
