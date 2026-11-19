@@ -132,6 +132,7 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | `RATE_LIMIT_BURST` | `30` | 令牌桶突发容量 |
 | `SEARCH_MAX_INFLIGHT` | `16` | 并发搜索上限，超出直接 503 甩负载 |
 | `SEARCH_TIMEOUT` | `10s` | 单次搜索的数据库时间预算 |
+| `ADMIN_TOKEN` | 无 | 管理端令牌，未设置则 `/api/admin/*` 整体禁用（见下文「管理端」） |
 
 ### Postgres（可选，`DATABASE_URL`）
 
@@ -184,6 +185,30 @@ npm run dev                  # 开发
 - `GET /api/search?q=xx&page=1&page_size=20` — 搜索（q 为空返回最新收录），结果含拼好的 magnet 链接
 - `GET /api/stats` — 收录数、成人/垃圾/体积过滤计数、LLM 审核统计、爬虫状态
 - `GET /api/healthz` — 健康检查
+
+## 管理端
+
+入口：前端 `/admin`（概览 `/admin`、种子管理 `/admin/torrents`、未审核队列
+`/admin/review`、黑名单 `/admin/blocked`）。默认关闭：后端设置环境变量
+`ADMIN_TOKEN`（足够长的随机串，如 `openssl rand -hex 32`）并重启后启用；
+未设置时后端在启动日志里打印 `admin: disabled`，所有 `/api/admin/*`
+返回 503，前端显示「管理端未启用」提示。
+
+功能：
+
+- **概览**：种子总数 / 今日新增 / 未审核 / 已审核 / 已拉黑五卡，外加收录
+  管线计数、LLM 审核统计、爬虫 / 刮削 / 热门榜单状态、数据库后端。
+- **种子管理**：分页列表（关键词 + 审核状态过滤）、详情（文件列表），
+  单条通过（标记已审核）/ 拉黑（删除并记入黑名单，不再收录）/ 删除
+  （只删记录，可被重新收录）。
+- **未审核队列**：只看未审核，支持多选批量通过 / 批量拉黑。
+- **黑名单**：查看 blocked 表，逐条取消拉黑。
+
+鉴权：所有 `/api/admin/*` 都要 `Authorization: Bearer <ADMIN_TOKEN>`
+（常量时间比较）。登录走 `POST /api/admin/login` 校验，单独限流
+（每客户端 6 次/分钟），令牌只从环境变量读，不落库、不打日志。前端
+校验通过后把令牌存进 httpOnly cookie（24 小时），页面脚本读不到，
+浏览器端操作经 Next 的 `/api/admin-action` 代理转发。
 
 ## DoS 防护
 

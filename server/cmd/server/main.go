@@ -207,6 +207,8 @@ func main() {
 	feedsTimeout := flag.Duration("feeds-meta-timeout", envDuration("FEEDS_META_TIMEOUT", 90*time.Second),
 		"metadata fetch timeout per feed torrent")
 	seedDemo := flag.Bool("seed-demo", false, "insert demo records at startup")
+	adminToken := flag.String("admin-token", envDefault("ADMIN_TOKEN", ""),
+		"bearer token for the /api/admin/* console API (empty = admin API disabled; the token is read from the environment only and never logged)")
 	minSize := flag.Int64("min-size", envInt64("MIN_TORRENT_SIZE", 100<<20),
 		"skip torrents whose total size is below this many bytes")
 
@@ -510,6 +512,7 @@ func main() {
 			ScraperStatus: scraperStatus(scr),
 			FeedsStatus:   feedsStatus(feedSvc, feedFetch),
 			Trending:      trendFn,
+			AdminToken:    *adminToken,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -527,6 +530,11 @@ func main() {
 	if *databaseURL != "" {
 		// Never log the URL itself: it carries the password.
 		dbDesc = st.Dialect()
+	}
+	if *adminToken == "" {
+		logger.Printf("admin: disabled (ADMIN_TOKEN not set; /api/admin/* answers 503, see env.example)")
+	} else {
+		logger.Printf("admin: enabled (console API at /api/admin/*, UI at the web app's /admin)")
 	}
 	logger.Printf("http: listening on %s (db=%s crawl=%v fetch-metadata=%v)",
 		*addr, dbDesc, *crawlEnabled, *fetchMetadata)
