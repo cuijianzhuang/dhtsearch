@@ -484,6 +484,8 @@ export function fetchAdminAPITokens(
   token: string
 ): Promise<APITokenListResponse> {
   return adminFetch<APITokenListResponse>(token, "/api/admin/api-tokens");
+}
+
 // --- LLM moderation console (mirror server/internal/api/moderation.go) ---
 
 export interface ModerationRecentItem {
