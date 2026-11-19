@@ -177,9 +177,9 @@ var Registry = []Item{
 
 	// --- rate limiting & search: live ---
 	{Key: KeyRateLimitRPS, Group: "ratelimit", Label: "每 IP 请求速率（/秒）", Type: TypeFloat, Default: "3", Editable: true,
-		Min: f64(0), Max: f64(100000), Desc: "令牌桶持续速率；0 = 关闭限流。保存后立即生效"},
+		Min: f64(0), Max: f64(100000), Desc: "令牌桶持续速率；0 = 关闭限流，正数最低 0.1。只限公开接口，管理端不受此限。保存后立即生效"},
 	{Key: KeyRateLimitBurst, Group: "ratelimit", Label: "每 IP 突发上限", Type: TypeInt, Default: "30", Editable: true,
-		Min: f64(0), Max: f64(1000000), Desc: "令牌桶容量；0 = 按速率自动取 10 秒量"},
+		Min: f64(0), Max: f64(1000000), Desc: "令牌桶容量；0 = 按速率自动取 10 秒量，正数最低 10"},
 	{Key: KeySearchMaxInflight, Group: "ratelimit", Label: "搜索最大并发", Type: TypeInt, Default: "16", Editable: true,
 		Min: f64(1), Max: f64(4096), Desc: "超出的搜索请求排队 1 秒后返回 503"},
 	{Key: KeySearchTimeout, Group: "ratelimit", Label: "搜索数据库超时", Type: TypeDuration, Default: "10s", Editable: true,

@@ -350,7 +350,7 @@ func (s *Server) handleAdminApprove(w http.ResponseWriter, r *http.Request) {
 	if t == nil {
 		return
 	}
-	if err := s.st.MarkReviewed([]string{t.InfoHash}, time.Now().Unix()); err != nil {
+	if _, err := s.st.MarkReviewed([]string{t.InfoHash}, time.Now().Unix()); err != nil {
 		writeError(w, http.StatusInternalServerError, "approve failed")
 		return
 	}
@@ -396,11 +396,12 @@ func (s *Server) handleAdminBatch(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	switch body.Action {
 	case "approve":
-		if err := s.st.MarkReviewed(body.Hashes, time.Now().Unix()); err != nil {
+		n, err := s.st.MarkReviewed(body.Hashes, time.Now().Unix())
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "approve failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "affected": len(body.Hashes)})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "affected": n})
 	case "block":
 		reason := body.Reason
 		if reason == "" {

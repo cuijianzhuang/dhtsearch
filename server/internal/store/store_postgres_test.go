@@ -157,8 +157,8 @@ func TestPostgresStore(t *testing.T) {
 	if total, _ := s.Count(t.Context()); total != 2 {
 		t.Fatalf("count=%d, want 2 (blocked hash was re-added)", total)
 	}
-	if err := s.MarkReviewed([]string{"aa"}, 500); err != nil {
-		t.Fatal(err)
+	if n, err := s.MarkReviewed([]string{"aa"}, 500); err != nil || n != 1 {
+		t.Fatalf("mark reviewed: n=%d err=%v", n, err)
 	}
 	if pending, _ := s.PendingReviewCount(t.Context()); pending != 1 {
 		t.Fatalf("pending=%d, want 1", pending)

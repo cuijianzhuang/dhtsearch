@@ -477,18 +477,24 @@ func (s *Store) Unreviewed(limit int) ([]Candidate, error) {
 }
 
 // MarkReviewed stamps hashes as classified so later sweeps skip them.
-func (s *Store) MarkReviewed(hashes []string, ts int64) error {
+// Returns the number of rows actually stamped; hashes that are not in
+// the table match nothing, so callers reporting an "affected" count
+// stay truthful (same convention as Block).
+func (s *Store) MarkReviewed(hashes []string, ts int64) (int64, error) {
 	if len(hashes) == 0 {
-		return nil
+		return 0, nil
 	}
 	args := make([]interface{}, 0, len(hashes)+1)
 	args = append(args, ts)
 	for _, h := range hashes {
 		args = append(args, h)
 	}
-	_, err := s.exec(
+	res, err := s.exec(
 		`UPDATE torrents SET reviewed_at = ? WHERE info_hash IN (`+placeholders(len(hashes))+`)`, args...)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // SetCleanNames records trimmed titles. clean is keyed by info hash and holds

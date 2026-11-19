@@ -164,18 +164,21 @@ func TestAdminSettingsPutValidationAndApply(t *testing.T) {
 func TestAdminSettingsRateLimitHotSwap(t *testing.T) {
 	base, _, _ := settingsFixture(t)
 
-	// Squeeze the limiter to a single-token bucket at a crawl rate.
+	// Squeeze the limiter to the tightest bucket the settings floors
+	// allow. (The 0.01/1 pair this test originally used is the exact
+	// combination that locked an operator out in the field; validation
+	// rejects it now — see TestAdminSettingsRateLimitLockoutRecovery.)
 	code, _ := putSettings(t, base, testAdminToken, map[string]*string{
-		settings.KeyRateLimitRPS:   strp("0.01"),
-		settings.KeyRateLimitBurst: strp("1"),
+		settings.KeyRateLimitRPS:   strp("0.1"),
+		settings.KeyRateLimitBurst: strp("10"),
 	})
 	if code != http.StatusOK {
 		t.Fatalf("PUT = %d", code)
 	}
-	// The rebuild happens on the next request: the first search takes
-	// the only token, the second is rejected — no restart involved.
+	// The rebuild happens on the next request: the burst covers the
+	// first ten searches, the eleventh is rejected — no restart involved.
 	statuses := []int{}
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 11; i++ {
 		resp, err := http.Get(base + "/api/search?q=bunny")
 		if err != nil {
 			t.Fatal(err)
@@ -184,8 +187,13 @@ func TestAdminSettingsRateLimitHotSwap(t *testing.T) {
 		resp.Body.Close()
 		statuses = append(statuses, resp.StatusCode)
 	}
-	if statuses[0] != http.StatusOK || statuses[1] != http.StatusTooManyRequests {
-		t.Fatalf("statuses = %v, want [200 429] after hot swap", statuses)
+	for i, got := range statuses[:10] {
+		if got != http.StatusOK {
+			t.Fatalf("statuses = %v, search #%d = %d, want 200 within burst", statuses, i, got)
+		}
+	}
+	if statuses[10] != http.StatusTooManyRequests {
+		t.Fatalf("statuses = %v, want last = 429 after hot swap", statuses)
 	}
 }
 
@@ -219,5 +227,62 @@ func TestAdminSettingsDisabledWithoutToken(t *testing.T) {
 	json.NewDecoder(resp2.Body).Decode(&site)
 	if site["name"] != "DHTSearch" {
 		t.Fatalf("/api/site = %v", site)
+	}
+}
+
+// TestAdminSettingsRateLimitLockoutRecovery replays the QA lockout:
+// an operator saves a near-zero public rate limit and then cannot save
+// anything else because the recovery PUT is itself throttled. The
+// floors now reject the poison values, and the admin API is exempt
+// from the public limiter, so even the tightest legal values leave
+// the recovery path open.
+func TestAdminSettingsRateLimitLockoutRecovery(t *testing.T) {
+	base, _, _ := settingsFixture(t)
+
+	// The exact values from the QA report are refused by validation.
+	if code, body := putSettings(t, base, testAdminToken, map[string]*string{
+		settings.KeyRateLimitRPS: strp("0.01"),
+	}); code != http.StatusBadRequest {
+		t.Fatalf("RPS below floor: %d %v, want 400", code, body)
+	}
+	if code, body := putSettings(t, base, testAdminToken, map[string]*string{
+		settings.KeyRateLimitBurst: strp("1"),
+	}); code != http.StatusBadRequest {
+		t.Fatalf("burst below floor: %d %v, want 400", code, body)
+	}
+
+	// Save the tightest values the floors allow; the live limiter is
+	// rebuilt from them on the next request.
+	if code, body := putSettings(t, base, testAdminToken, map[string]*string{
+		settings.KeyRateLimitRPS:   strp("0.1"),
+		settings.KeyRateLimitBurst: strp("10"),
+	}); code != http.StatusOK {
+		t.Fatalf("save extreme-but-legal limits: %d %v", code, body)
+	}
+
+	// The public API really is throttled now (burst 10, refill 0.1/s).
+	throttled := false
+	for i := 0; i < 15; i++ {
+		resp, err := http.Get(base + "/api/search?q=bbb")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusTooManyRequests {
+			throttled = true
+			break
+		}
+	}
+	if !throttled {
+		t.Fatal("public API never throttled under the saved limits")
+	}
+
+	// The recovery write goes through immediately — this is the
+	// request that used to come back 429.
+	if code, body := putSettings(t, base, testAdminToken, map[string]*string{
+		settings.KeyRateLimitRPS:   strp("3"),
+		settings.KeyRateLimitBurst: strp("30"),
+	}); code != http.StatusOK {
+		t.Fatalf("recovery PUT while throttled: %d %v, want 200", code, body)
 	}
 }

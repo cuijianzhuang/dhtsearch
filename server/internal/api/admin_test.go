@@ -249,3 +249,23 @@ func TestAdminBatch(t *testing.T) {
 		t.Fatalf("batch without token: %d", code)
 	}
 }
+func TestAdminBatchApproveCountsOnlyExisting(t *testing.T) {
+	base, _ := adminFixture(t, testAdminToken)
+	ghosts := []string{strings.Repeat("d", 40), strings.Repeat("e", 40), strings.Repeat("f", 40)}
+
+	// Approving hashes that are not in the table must report 0, not
+	// len(hashes) — the count used to be fabricated from the request.
+	code, m := adminReq(t, "POST", base+"/api/admin/torrents/batch", testAdminToken,
+		map[string]any{"hashes": ghosts, "action": "approve"})
+	if code != 200 || m["affected"].(float64) != 0 {
+		t.Fatalf("batch approve ghosts: %d %v, want affected 0", code, m)
+	}
+
+	// Mixed input reports only the rows actually stamped.
+	mixed := append([]string{strings.Repeat("a", 40)}, ghosts...)
+	code, m = adminReq(t, "POST", base+"/api/admin/torrents/batch", testAdminToken,
+		map[string]any{"hashes": mixed, "action": "approve"})
+	if code != 200 || m["affected"].(float64) != 1 {
+		t.Fatalf("batch approve mixed: %d %v, want affected 1", code, m)
+	}
+}

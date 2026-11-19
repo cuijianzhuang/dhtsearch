@@ -579,6 +579,24 @@ func checkRange(it Item, f float64) error {
 	if it.Max != nil && f > *it.Max {
 		return fmt.Errorf("must be <= %v", *it.Max)
 	}
+	// Per-key floors for the rate-limit knobs, whose zero is a sentinel
+	// (RPS 0 = limiter off, burst 0 = auto-size) that a plain Min cannot
+	// express. A positive value must still leave the token bucket usable:
+	// with anything smaller an operator could save a limit so tight that
+	// even the admin UI starves — defense in depth alongside the admin
+	// API's exemption from the public limiter. A stored override that
+	// predates these floors fails validation on load and is ignored, so
+	// an already-poisoned database heals itself on restart.
+	switch it.Key {
+	case KeyRateLimitRPS:
+		if f > 0 && f < 0.1 {
+			return fmt.Errorf("must be 0 (off) or >= 0.1")
+		}
+	case KeyRateLimitBurst:
+		if f > 0 && f < 10 {
+			return fmt.Errorf("must be 0 (auto) or >= 10")
+		}
+	}
 	return nil
 }
 

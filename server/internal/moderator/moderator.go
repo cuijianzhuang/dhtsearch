@@ -304,7 +304,7 @@ func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate, cf
 	for i, c := range cands {
 		hashes[i] = c.InfoHash
 	}
-	if err := m.st.MarkReviewed(hashes, now); err != nil {
+	if _, err := m.st.MarkReviewed(hashes, now); err != nil {
 		return s, fmt.Errorf("mark reviewed: %w", err)
 	}
 	m.st.IncrStat("llm_reviewed", int64(len(cands)))

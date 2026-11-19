@@ -128,3 +128,46 @@ func TestTruncateUTF8(t *testing.T) {
 		t.Fatal("short strings must pass through")
 	}
 }
+func TestAdminExemptFromPublicLimiter(t *testing.T) {
+	base := testServerOpts(t, Options{RateRPS: 0.001, RateBurst: 1, AdminToken: testAdminToken})
+
+	get := func(path, token string) int {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, base.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// Drain the single-token bucket through the public API.
+	if got := get("/api/search?q=", ""); got != http.StatusOK {
+		t.Fatalf("first public request: status %d", got)
+	}
+	if got := get("/api/search?q=", ""); got != http.StatusTooManyRequests {
+		t.Fatalf("second public request: status %d, want 429", got)
+	}
+	// Admin paths bypass the public limiter entirely, so an operator
+	// can always reach the settings page that undoes a bad limit.
+	for i := 0; i < 5; i++ {
+		if got := get("/api/admin/overview", testAdminToken); got != http.StatusOK {
+			t.Fatalf("admin overview #%d while public throttled: status %d, want 200", i, got)
+		}
+	}
+	// Exemption is not an auth bypass.
+	if got := get("/api/admin/overview", ""); got != http.StatusUnauthorized {
+		t.Fatalf("admin overview without token: status %d, want 401", got)
+	}
+	// The public API is still throttled afterwards.
+	if got := get("/api/search?q=", ""); got != http.StatusTooManyRequests {
+		t.Fatalf("public request after admin calls: status %d, want 429", got)
+	}
+}

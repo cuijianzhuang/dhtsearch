@@ -266,9 +266,22 @@ func (s *Server) searchTimeout() time.Duration {
 	return s.opts.SearchTimeout
 }
 
+// rateLimitExempt reports whether a path bypasses the public per-client
+// limiter: the health check (monitoring and the deploy script must never
+// be throttled behind a flood) and the admin API. Admin paths sit behind
+// the admin token — and the login endpoint has its own, stricter
+// limiter — so the public limiter buys nothing there; worse, it once let
+// an operator lock themselves out by saving an extreme RATE_LIMIT_*
+// value, because the settings write that would undo it was itself
+// rejected with 429 (and the value persists in the DB across restarts).
+func rateLimitExempt(path string) bool {
+	return path == "/api/healthz" || path == "/api/admin" ||
+		strings.HasPrefix(path, "/api/admin/")
+}
+
 // Handler returns the root handler with CORS/OPTIONS support and per-client
-// rate limiting. The health check is exempt so monitoring and the deploy
-// script never get throttled behind a flood.
+// rate limiting for the public API (see rateLimitExempt for the paths that
+// bypass it).
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -279,7 +292,7 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		s.syncSettings()
-		if lim := s.rateLimiter(); lim != nil && r.URL.Path != "/api/healthz" && !lim.allow(clientKey(r)) {
+		if lim := s.rateLimiter(); lim != nil && !rateLimitExempt(r.URL.Path) && !lim.allow(clientKey(r)) {
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return

@@ -41,8 +41,8 @@ func TestAdminListFilters(t *testing.T) {
 	}
 
 	// Review-status filter.
-	if err := s.MarkReviewed([]string{"aa"}, 500); err != nil {
-		t.Fatal(err)
+	if n, err := s.MarkReviewed([]string{"aa"}, 500); err != nil || n != 1 {
+		t.Fatalf("mark reviewed: n=%d err=%v", n, err)
 	}
 	items, total, err = s.AdminList(ctx, "", AdminStatusUnreviewed, 1, 10)
 	if err != nil || total != 2 {
