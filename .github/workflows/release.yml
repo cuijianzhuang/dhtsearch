@@ -1,0 +1,145 @@
+name: Release
+
+# Build release packages on v* tags (or manually) so target machines can
+# install prebuilt artifacts with scripts/install.sh instead of compiling
+# Go / Node on the box. Each package is assembled by
+# scripts/package-release.sh — the same script used for local builds:
+#
+#   dhtsearch-<version>-linux-<arch>.tar.gz        (+ .sha256)
+#     dhtsearch-server   Go binary for that arch
+#     web/               Next.js standalone build (arch-independent)
+#     env.example, install.sh, LICENSE, README.md
+#
+# The web build is arch-independent, so it is built once and combined with
+# each per-arch server binary in the package job.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label for the packages (default: dev-<short sha>)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  web:
+    name: Build web (standalone)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        # Baked into the bundle; the Next server fetches the API
+        # server-side, and install.sh runs the API on 127.0.0.1:8080.
+        env:
+          NEXT_PUBLIC_API_BASE: http://127.0.0.1:8080
+        run: npm run build
+      - name: Stage standalone output
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p web-dist/web
+          cp -R web/.next/standalone/. web-dist/web/
+          mkdir -p web-dist/web/.next
+          cp -R web/.next/static web-dist/web/.next/static
+          cp -R web/public web-dist/web/public
+          test -f web-dist/web/server.js
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web-dist
+
+  server:
+    name: Build server (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Build binary
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: go build -trimpath -ldflags "-s -w" -o "${{ github.workspace }}/server-dist/dhtsearch-server-${{ matrix.arch }}" ./cmd/server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.arch }}
+          path: server-dist
+
+  package:
+    name: Package (${{ matrix.arch }})
+    needs: [web, server]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web-dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: server-${{ matrix.arch }}
+          path: server-dist
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Assemble tarball + sha256
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          pkg="dhtsearch-${version}-linux-${{ matrix.arch }}"
+          stage="$RUNNER_TEMP/$pkg"
+          mkdir -p "$stage"
+          install -m 0755 "server-dist/dhtsearch-server-${{ matrix.arch }}" "$stage/dhtsearch-server"
+          cp -R web-dist/web "$stage/web"
+          cp env.example "$stage/env.example"
+          cp scripts/install.sh "$stage/install.sh"
+          chmod 755 "$stage/install.sh"
+          cp LICENSE README.md "$stage/"
+          mkdir -p dist
+          tar -czf "dist/$pkg.tar.gz" -C "$RUNNER_TEMP" "$pkg"
+          (cd dist && sha256sum "$pkg.tar.gz" > "$pkg.tar.gz.sha256")
+          ls -lh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.arch }}
+          path: dist
+      - name: Attach to GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
