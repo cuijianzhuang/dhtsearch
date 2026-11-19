@@ -20,7 +20,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN" className="h-full">
-      <body className="flex min-h-full flex-col bg-zinc-950 text-zinc-100 antialiased">
+      <body className="flex min-h-full flex-col bg-canvas text-ink antialiased">
         {children}
         {gaId && (
           <>

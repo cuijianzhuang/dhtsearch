@@ -16,9 +16,9 @@ export default function Pagination({ q, page, total, pageSize }: PaginationProps
     `/search?q=${encodeURIComponent(q)}&page=${p}`;
 
   const btnCls =
-    "rounded-md border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm text-zinc-300 transition-colors hover:border-emerald-600 hover:text-emerald-400";
+    "inline-flex min-h-11 items-center rounded-lg border border-input bg-soft px-4 text-sm text-ink-2 transition-colors hover:border-accent hover:text-accent-ink";
   const disabledCls =
-    "cursor-not-allowed rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-sm text-zinc-600";
+    "inline-flex min-h-11 cursor-not-allowed items-center rounded-lg border border-line bg-surface px-4 text-sm text-faint";
   const navigate = (event: MouseEvent<HTMLAnchorElement>, href: string) => {
     event.preventDefault();
     window.location.assign(href);
@@ -38,7 +38,7 @@ export default function Pagination({ q, page, total, pageSize }: PaginationProps
       ) : (
         <span className={disabledCls}>← 上一页</span>
       )}
-      <span className="text-sm text-zinc-400">
+      <span className="text-sm text-mute">
         第 {page} / {totalPages} 页
       </span>
       {page < totalPages ? (

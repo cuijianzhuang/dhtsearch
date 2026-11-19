@@ -1,7 +1,7 @@
 import Image from "next/image";
 
 export default function DigitalOceanBadge({
-  className = "",
+  className = "inline-block",
 }: {
   className?: string;
 }) {
@@ -10,7 +10,10 @@ export default function DigitalOceanBadge({
       href="https://www.digitalocean.com/?refcode=b7f5848a6ce2&utm_campaign=Referral_Invite&utm_medium=Referral_Program&utm_source=badge"
       target="_blank"
       rel="noopener noreferrer"
-      className={`inline-block ${className}`}
+      // The caller's classes replace the default wholesale: hardcoding
+      // `inline-block` here would sit next to a caller's `hidden` and win
+      // by stylesheet order, so the badge could never actually be hidden.
+      className={className}
     >
       <Image
         src="/digitalocean-badge.svg"
