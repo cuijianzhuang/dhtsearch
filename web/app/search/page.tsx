@@ -101,7 +101,7 @@ function BackendError({ q, detail }: { q: string; detail: string }) {
       <p className="mt-2 text-sm text-mute">
         后端服务似乎未启动或暂时不可达，请确认 Go 后端已在运行
         （默认 <code className="rounded-md bg-soft px-2 py-1 font-mono text-xs">http://localhost:8080</code>
-        ，可通过 <code className="rounded-md bg-soft px-2 py-1 font-mono text-xs">NEXT_PUBLIC_API_BASE</code> 修改）。
+        ，可通过环境变量 <code className="rounded-md bg-soft px-2 py-1 font-mono text-xs">API_BASE</code> 修改）。
       </p>
       <p className="mt-1 font-mono text-xs text-faint">{detail}</p>
       <Link
