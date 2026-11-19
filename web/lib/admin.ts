@@ -233,3 +233,49 @@ export function fetchAdminBlocked(
   });
   return adminFetch<BlockedListResponse>(token, `/api/admin/blocked?${params}`);
 }
+
+// --- Settings (mirror server/internal/api/settings.go) ---
+
+export type AdminSettingType =
+  | "bool"
+  | "int"
+  | "int64"
+  | "float"
+  | "duration"
+  | "string"
+  | "list"
+  | "secret"
+  | "enum";
+
+export interface AdminSettingItem {
+  key: string;
+  label: string;
+  desc?: string;
+  type: AdminSettingType;
+  /** Effective value in canonical string form; always "" for secrets. */
+  value: string;
+  /** Secrets only: whether a value is set at all. */
+  set?: boolean;
+  /** Which layer supplies the value: db (override) | env | default. */
+  source: "db" | "env" | "default";
+  editable: boolean;
+  restart: boolean;
+  sensitive: boolean;
+  options?: string[];
+}
+
+export interface AdminSettingsGroup {
+  key: string;
+  label: string;
+  items: AdminSettingItem[];
+}
+
+export interface AdminSettingsResponse {
+  groups: AdminSettingsGroup[];
+}
+
+export function fetchAdminSettings(
+  token: string
+): Promise<AdminSettingsResponse> {
+  return adminFetch<AdminSettingsResponse>(token, "/api/admin/settings");
+}

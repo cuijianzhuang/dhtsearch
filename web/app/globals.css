@@ -1,10 +1,20 @@
 @import "tailwindcss";
 
 /* Design tokens, aligned with Polaris: neutral semantic surfaces plus one
-   teal accent. Light values are Polaris's default palette (accent #0E7490);
-   in dark mode the surfaces switch to Polaris's dark palette and the accent
-   ink brightens to #2DD4BF so accent text/links stay legible, while filled
-   accent surfaces keep #0E7490 so white label text keeps its contrast.
+   primary accent. The accent is a preset chosen in the admin settings
+   (THEME_COLOR): the root layout inlines the preset's values as
+   --pri-base / --pri-hover-base / --pri-ink-light / --pri-ink-dark on
+   <html>, and everything below derives from them, so no component ever
+   names a raw color. The default preset (no inline values) is Polaris
+   teal: primary #0E7490, dark-mode ink brightened to #2DD4BF so accent
+   text stays legible while filled accent surfaces keep the primary
+   and white label text keeps its contrast.
+   Appearance (light/dark) is driven by the data-appearance attribute
+   on <html>: "dark" forces the dark palette, "light" forces light,
+   "system" (the default) follows prefers-color-scheme. The attribute
+   is rendered server-side from the admin default and corrected from
+   the visitor's localStorage choice by an inline script before first
+   paint.
    Components must use these semantic tokens (bg-canvas, text-mute,
    border-line, bg-accent, …) — never raw zinc/emerald palette classes.
    (The page background token is `canvas`, not `base`: a `--color-base`
@@ -20,11 +30,11 @@
   --line-2: #f0f0f3;
   --input: #dce0e6;
   --soft: #f4f4f6;
-  --pri: #0e7490;
-  --pri-hover: #155e75;
-  --pri-ink: #155e75;
-  --pri-soft: #ecf8fa;
-  --pri-line: #cde9ef;
+  --pri: var(--pri-base, #0e7490);
+  --pri-hover: var(--pri-hover-base, #155e75);
+  --pri-ink: var(--pri-ink-light, #155e75);
+  --pri-soft: color-mix(in srgb, var(--pri) 7%, var(--card));
+  --pri-line: color-mix(in srgb, var(--pri) 26%, var(--card));
   --on-pri: #ffffff;
   --warn: #d97706;
   --warn-ink: #92400e;
@@ -34,8 +44,35 @@
   color-scheme: light;
 }
 
+/* Dark palette. Applied for data-appearance="dark" unconditionally,
+   and for "system" (or a missing attribute, i.e. pre-script) under a
+   dark OS preference. The two blocks must stay identical. */
+:root[data-appearance="dark"] {
+  --bg: #0a0d11;
+  --card: #11151b;
+  --ink: #e8ebef;
+  --ink-2: #c5cbd3;
+  --mute: #9199a4;
+  --faint: #6b7480;
+  --line: #222830;
+  --line-2: #1a1f26;
+  --input: #2e353e;
+  --soft: #161b21;
+  --pri-hover: color-mix(in srgb, var(--pri) 85%, #fff);
+  --pri-ink: var(--pri-ink-dark, #2dd4bf);
+  --pri-soft: color-mix(in srgb, var(--pri) 14%, var(--card));
+  --pri-line: color-mix(in srgb, var(--pri) 40%, var(--card));
+  --warn: #f59e0b;
+  --warn-ink: #fcd34d;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2:
+    0 8px 24px -8px rgba(0, 0, 0, 0.65), 0 2px 6px -2px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
+}
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root[data-appearance="system"],
+  :root:not([data-appearance]) {
     --bg: #0a0d11;
     --card: #11151b;
     --ink: #e8ebef;
@@ -47,7 +84,7 @@
     --input: #2e353e;
     --soft: #161b21;
     --pri-hover: color-mix(in srgb, var(--pri) 85%, #fff);
-    --pri-ink: #2dd4bf;
+    --pri-ink: var(--pri-ink-dark, #2dd4bf);
     --pri-soft: color-mix(in srgb, var(--pri) 14%, var(--card));
     --pri-line: color-mix(in srgb, var(--pri) 40%, var(--card));
     --warn: #f59e0b;

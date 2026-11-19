@@ -34,6 +34,8 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/admin/torrents/{hash}", s.handleAdminDelete)
 	mux.HandleFunc("GET /api/admin/blocked", s.handleAdminBlockedList)
 	mux.HandleFunc("DELETE /api/admin/blocked/{hash}", s.handleAdminUnblock)
+	mux.HandleFunc("GET /api/admin/settings", s.handleAdminSettingsGet)
+	mux.HandleFunc("PUT /api/admin/settings", s.handleAdminSettingsPut)
 }
 
 func (s *Server) adminEnabled() bool { return s.opts.AdminToken != "" }
@@ -86,7 +88,7 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminCtx(r *http.Request) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(r.Context(), s.opts.SearchTimeout)
+	return context.WithTimeout(r.Context(), s.searchTimeout())
 }
 
 // handleAdminOverview serves the console's landing numbers: library

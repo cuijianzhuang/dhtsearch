@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"unicode"
 )
 
@@ -27,10 +28,35 @@ type Result struct {
 // indexed.
 func (r Result) Rejected() bool { return r.Adult || r.Spam || r.TooSmall }
 
-// MinTotalSize is the smallest torrent worth indexing. Anything below it is
-// dropped as junk (fake stubs, single images, link/readme-only torrents).
-// Overridable at startup from MIN_TORRENT_SIZE.
-var MinTotalSize int64 = 100 << 20 // 100 MiB
+// minTotalSize is the smallest torrent worth indexing. Anything below
+// it is dropped as junk (fake stubs, single images, link/readme-only
+// torrents). It is runtime-adjustable (MIN_TORRENT_SIZE via the
+// settings system), so it lives behind atomic accessors: Check runs on
+// fetch workers while the admin API may rewrite it.
+var minTotalSize atomic.Int64
+
+func init() { minTotalSize.Store(100 << 20) } // 100 MiB
+
+// MinTotalSize returns the current size floor in bytes.
+func MinTotalSize() int64 { return minTotalSize.Load() }
+
+// SetMinTotalSize replaces the size floor; it applies to the next
+// Check call.
+func SetMinTotalSize(v int64) { minTotalSize.Store(v) }
+
+// blockWords holds the operator-defined extra block list
+// (FILTER_BLOCK_WORDS via the settings system): a matcher rebuilt on
+// every update, swapped atomically so Check never sees a half-built
+// one. The zero value is an empty matcher, which matches nothing.
+var blockWords atomic.Pointer[matcher]
+
+// SetBlockWords replaces the operator block list; it applies to the
+// next Check call. Matching reuses the built-in keyword machinery
+// (substring for CJK/long tokens, word boundaries for short ASCII).
+func SetBlockWords(words []string) {
+	m := newMatcher(words)
+	blockWords.Store(&m)
+}
 
 const (
 	maxNameLen        = 300
@@ -189,11 +215,30 @@ func Check(name string, files []File, totalSize int64) Result {
 		r.Spam = true
 	}
 
+	// --- Operator block words ---
+	// The admin-defined list (FILTER_BLOCK_WORDS): a hit in the name or
+	// any file path drops the torrent as spam. Checked before the size
+	// floor so the reason names the actual cause.
+	if bw := blockWords.Load(); bw != nil {
+		if kw := bw.find(lowerName); kw != "" {
+			add("block word %q in name", kw)
+			r.Spam = true
+		} else {
+			for _, f := range files {
+				if kw := bw.find(strings.ToLower(f.Path)); kw != "" {
+					add("block word %q in file", kw)
+					r.Spam = true
+					break
+				}
+			}
+		}
+	}
+
 	// --- Size floor ---
 	// Distinct from spam: the torrent may be perfectly legitimate, just too
 	// small to be worth indexing.
-	if totalSize > 0 && totalSize < MinTotalSize {
-		add("total size %d below minimum %d", totalSize, MinTotalSize)
+	if floor := MinTotalSize(); totalSize > 0 && totalSize < floor {
+		add("total size %d below minimum %d", totalSize, floor)
 		r.TooSmall = true
 	}
 	if len(files) > maxFileCount {

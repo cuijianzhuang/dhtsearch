@@ -16,7 +16,7 @@
 - **发布站 RSS**：定时拉动漫花园 / Nyaa 发布 RSS，发布页标题存为别名，罗马音种子也能按中文名搜到
 - **热门榜单**：每小时拉豆瓣热门榜单，首页提供快捷搜索词
 - **搜索前端**：Next.js 服务端渲染，匹配种子名、清理后标题与别名三列
-- **管理端**：`/admin` 概览、种子管理、未审核队列、黑名单，`ADMIN_TOKEN` 鉴权
+- **管理端**：`/admin` 概览、种子管理、未审核队列、黑名单、全量配置设置页（含主题），`ADMIN_TOKEN` 鉴权
 - **双数据库**：默认 SQLite 单文件零运维；设 `DATABASE_URL` 可切 Postgres
 - **部署与发版**：一键安装脚本（systemd 双服务）、合 main 自动发版、每小时备份到 Cloudflare R2（脚本自备）
 
@@ -130,7 +130,7 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 
 注意 `.env` 按进程工作目录读取（可用 `ENV_FILE` 改路径）：上面的顺序把 `.env` 放在 `server/` 下，不要放在仓库根目录——根目录的那份不会被读到，缺文件也不报错，只会静默用默认值。真实环境变量优先于 `.env` 文件。
 
-默认监听 `:8080`。配置项（环境变量或同名 flag）按组列在本节各表里，核心项：
+默认监听 `:8080`。配置项（环境变量或同名 flag）按组列在本节各表里。运行期还可在管理端设置页改：数据库里保存的覆盖值优先于环境变量（数据库 > 环境变量 > 默认值），见「管理端」的设置说明。核心项：
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -152,6 +152,10 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | `SEARCH_MAX_INFLIGHT` | `16` | 并发搜索上限，超出直接 503 甩负载 |
 | `SEARCH_TIMEOUT` | `10s` | 单次搜索的数据库时间预算 |
 | `ADMIN_TOKEN` | 无 | 管理端令牌，未设置则 `/api/admin/*` 整体禁用（见下文「管理端」） |
+| `SITE_NAME` | `DHTSearch` | 站点名称（标题、页头、OG 默认标题） |
+| `THEME_COLOR` | `teal` | 主色预设：`teal` / `blue` / `violet` / `green` / `orange` / `red` |
+| `THEME_APPEARANCE` | `system` | 默认外观：`system` / `light` / `dark`（访客本地选择优先） |
+| `FILTER_BLOCK_WORDS` | 空 | 逗号分隔的屏蔽词，命中种子名或文件路径即按垃圾过滤 |
 
 ### Postgres（可选，`DATABASE_URL`）
 
@@ -238,6 +242,7 @@ npm run dev                  # 开发，访问 http://localhost:3000
 | `GET /api/stats` | 收录数、成人/垃圾/体积过滤计数、LLM 审核统计、爬虫/刮削/RSS 状态 |
 | `GET /api/trending` | 豆瓣热门榜单（欧美电影、美剧、日剧、韩剧四类标题 + 更新时间），供首页快捷搜索词 |
 | `GET /api/healthz` | 健康检查，返回 `{"ok":true}`，不限流 |
+| `GET /api/site` | 站点名称与主题（主色预设、默认外观），供前端渲染，无需鉴权 |
 
 管理接口（全部需要 `Authorization: Bearer <ADMIN_TOKEN>`，未配置令牌时整体 503，见「管理端」）：
 
@@ -253,11 +258,13 @@ npm run dev                  # 开发，访问 http://localhost:3000
 | `POST /api/admin/torrents/batch` | 批量通过/拉黑（单次 ≤100 条） |
 | `GET /api/admin/blocked` | 黑名单列表 |
 | `DELETE /api/admin/blocked/{hash}` | 取消拉黑 |
+| `GET /api/admin/settings` | 全量配置：分组、每项生效值、来源（数据库/环境变量/默认）、敏感项脱敏 |
+| `PUT /api/admin/settings` | 批量保存运行配置：整批类型/范围校验，任一项非法整批拒绝并逐项报错 |
 
 ## 管理端
 
 入口：前端 `/admin`（概览 `/admin`、种子管理 `/admin/torrents`、未审核队列
-`/admin/review`、黑名单 `/admin/blocked`）。默认关闭：后端设置环境变量
+`/admin/review`、黑名单 `/admin/blocked`、设置 `/admin/settings`）。默认关闭：后端设置环境变量
 `ADMIN_TOKEN`（足够长的随机串，如 `openssl rand -hex 32`）并重启后启用；
 未设置时后端在启动日志里打印 `admin: disabled`，所有 `/api/admin/*`
 返回 503，前端显示「管理端未启用」提示。
@@ -271,6 +278,14 @@ npm run dev                  # 开发，访问 http://localhost:3000
   （只删记录，可被重新收录）。
 - **未审核队列**：只看未审核，支持多选批量通过 / 批量拉黑。
 - **黑名单**：查看 blocked 表，逐条取消拉黑。
+- **设置**：全部配置可视化。启动配置（监听地址、数据库路径/连接串、
+  管理令牌）只读展示，改 env 文件后重启生效；运行配置（爬虫、元数据、
+  刮削、审核与过滤、热门榜单、订阅源、限流）在线可改，存数据库覆盖层，
+  优先级 **数据库 > 环境变量 > 默认值**，多数即时热生效，结构性参数
+  （worker 数、端口等）明确标注「需重启」。密钥类脱敏展示、永不回显
+  明文。同页含「外观 / 主题」分组：站点名称、主色预设（六种，全站
+  CSS 变量切换）、默认外观；前台与管理端右上角另有外观切换
+  （浅 / 深 / 跟随系统），访客选择存 localStorage 并优先于默认外观。
 
 鉴权：所有 `/api/admin/*` 都要 `Authorization: Bearer <ADMIN_TOKEN>`
 （常量时间比较）。登录走 `POST /api/admin/login` 校验，单独限流

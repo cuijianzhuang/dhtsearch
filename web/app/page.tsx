@@ -1,8 +1,10 @@
 import Link from "next/link";
 import { fetchStats, fetchTrending } from "@/lib/api";
+import { fetchSiteConfig } from "@/lib/site";
 import { formatCount } from "@/lib/format";
 import SearchBox from "@/components/SearchBox";
-import DigitalOceanBadge from "@/components/DigitalOceanBadge";
+import SiteLogo from "@/components/SiteLogo";
+import AppearanceSwitcher from "@/components/AppearanceSwitcher";
 
 function TrendingRow({ label, titles }: { label: string; titles: string[] }) {
   return (
@@ -22,7 +24,11 @@ function TrendingRow({ label, titles }: { label: string; titles: string[] }) {
 }
 
 export default async function Home() {
-  const [stats, trending] = await Promise.all([fetchStats(), fetchTrending()]);
+  const [stats, trending, site] = await Promise.all([
+    fetchStats(),
+    fetchTrending(),
+    fetchSiteConfig(),
+  ]);
   const rows = [
     { label: "热门电影", titles: trending?.movies ?? [] },
     { label: "热门美剧", titles: trending?.tv ?? [] },
@@ -31,10 +37,13 @@ export default async function Home() {
   ].filter((r) => r.titles.length > 0);
 
   return (
-    <main className="flex flex-1 flex-col items-center justify-center px-4 py-16">
+    <main className="relative flex flex-1 flex-col items-center justify-center px-4 py-16">
+      <div className="absolute right-4 top-4">
+        <AppearanceSwitcher defaultAppearance={site.themeAppearance} />
+      </div>
       <div className="w-full max-w-2xl">
         <h1 className="text-center text-4xl font-bold tracking-tight sm:text-5xl">
-          DHT<span className="text-accent-ink">Search</span>
+          <SiteLogo name={site.name} />
         </h1>
         <p className="mt-4 text-center text-sm text-mute sm:text-base">
           干净、无广告的磁力链接搜索引擎
@@ -76,9 +85,6 @@ export default async function Home() {
         ) : (
           <p>索引统计暂时不可用（后端未连接）</p>
         )}
-        <div className="mt-6 flex justify-center">
-          <DigitalOceanBadge />
-        </div>
       </footer>
     </main>
   );

@@ -1,11 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { fetchSearch, type SearchResponse } from "@/lib/api";
+import { fetchSiteConfig } from "@/lib/site";
 import { formatCount } from "@/lib/format";
 import SearchBox from "@/components/SearchBox";
 import ResultList from "@/components/ResultList";
 import Pagination from "@/components/Pagination";
-import DigitalOceanBadge from "@/components/DigitalOceanBadge";
+import SiteLogo from "@/components/SiteLogo";
+import AppearanceSwitcher from "@/components/AppearanceSwitcher";
 
 interface PageProps {
   searchParams: Promise<{ q?: string; page?: string }>;
@@ -14,10 +16,11 @@ interface PageProps {
 export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
   const { q } = await searchParams;
   const query = (q ?? "").trim();
+  const site = await fetchSiteConfig();
   return {
     title: query ? `${query} 的搜索结果` : "最新收录",
     description: query
-      ? `在 DHTSearch 中搜索「${query}」的磁力链接，结果已过滤成人内容与垃圾信息。`
+      ? `在 ${site.name} 中搜索「${query}」的磁力链接，结果已过滤成人内容与垃圾信息。`
       : "浏览 DHT 网络最新收录的磁力链接，已过滤成人内容与垃圾信息。",
   };
 }
@@ -35,16 +38,17 @@ export default async function SearchPage({ searchParams }: PageProps) {
   } catch (e) {
     error = e instanceof Error ? e.message : "unknown error";
   }
+  const site = await fetchSiteConfig();
 
   return (
     <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 py-6">
-      {/* Header: logo + search box */}
+      {/* Header: logo + search box + appearance switcher */}
       <header className="flex items-center gap-4">
         <Link
           href="/"
           className="inline-flex min-h-11 shrink-0 items-center text-xl font-bold tracking-tight hover:text-accent-ink"
         >
-          DHT<span className="text-accent-ink">Search</span>
+          <SiteLogo name={site.name} />
         </Link>
         {/* min-w-0 lets this flex child shrink below the input's intrinsic
             width; without it the row overflows narrow viewports and pushes
@@ -52,7 +56,9 @@ export default async function SearchPage({ searchParams }: PageProps) {
         <div className="min-w-0 flex-1">
           <SearchBox initialQuery={q} />
         </div>
-        <DigitalOceanBadge className="hidden shrink-0 sm:inline-block" />
+        <div className="shrink-0">
+          <AppearanceSwitcher defaultAppearance={site.themeAppearance} />
+        </div>
       </header>
 
       <div className="mt-4 rounded-lg border border-accent-line bg-accent-soft px-4 py-3 text-xs text-accent-ink">
@@ -88,7 +94,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
       )}
 
       <footer className="mt-auto pt-10 text-center text-xs text-faint">
-        DHTSearch · 干净、无广告的磁力搜索
+        {site.name} · 干净、无广告的磁力搜索
       </footer>
     </main>
   );

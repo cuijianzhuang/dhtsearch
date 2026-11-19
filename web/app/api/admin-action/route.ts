@@ -16,6 +16,9 @@ interface ActionBody {
   hashes?: string[];
   action?: string;
   reason?: string;
+  /** kind="save-settings": settings key -> new value (null deletes
+   *  the DB override, reverting to env/default). */
+  values?: Record<string, string | null>;
 }
 
 export async function POST(request: Request) {
@@ -58,10 +61,15 @@ export async function POST(request: Request) {
         reason: body.reason ?? "admin",
       };
       break;
+    case "save-settings":
+      method = "PUT";
+      path = `/api/admin/settings`;
+      payload = { values: body.values ?? {} };
+      break;
     default:
       return NextResponse.json({ error: "unknown action" }, { status: 400 });
   }
-  if (body.kind !== "batch" && !body.hash) {
+  if (body.kind !== "batch" && body.kind !== "save-settings" && !body.hash) {
     return NextResponse.json({ error: "hash required" }, { status: 400 });
   }
 

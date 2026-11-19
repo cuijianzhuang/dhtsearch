@@ -200,9 +200,9 @@ func TestSizeFloor(t *testing.T) {
 }
 
 func TestSizeFloorIsConfigurable(t *testing.T) {
-	old := MinTotalSize
-	defer func() { MinTotalSize = old }()
-	MinTotalSize = 1 << 30
+	old := MinTotalSize()
+	defer SetMinTotalSize(old)
+	SetMinTotalSize(1 << 30)
 	if r := Check("Movie 1080p", mkFiles("m.mkv"), 700<<20); !r.TooSmall {
 		t.Errorf("700MB should be too small when floor is 1GB: %+v", r)
 	}
@@ -275,5 +275,23 @@ func TestMainstreamProfanityAndExceptionsPass(t *testing.T) {
 	// Standalone 幼女 outside the anime title must still be flagged.
 	if r := Check("幼女 合集", mkFiles("v.mp4"), 1<<30); !r.Adult {
 		t.Errorf("standalone 幼女 not flagged: %+v", r)
+	}
+}
+
+func TestBlockWordsAreRuntimeAdjustable(t *testing.T) {
+	defer SetBlockWords(nil)
+	SetBlockWords([]string{"ubuntu", "推广词"})
+	if r := Check("Ubuntu 24.04 ISO", mkFiles("ubuntu.iso"), 1<<31); !r.Spam {
+		t.Errorf("block word in name not flagged: %+v", r)
+	}
+	if r := Check("Some Movie 2024", mkFiles("movie.推广词.mkv"), 1<<31); !r.Spam {
+		t.Errorf("block word in file path not flagged: %+v", r)
+	}
+	if r := Check("Some Movie 2024", mkFiles("movie.mkv"), 1<<31); r.Spam || r.Adult {
+		t.Errorf("clean torrent flagged: %+v", r)
+	}
+	SetBlockWords(nil)
+	if r := Check("Ubuntu 24.04 ISO", mkFiles("ubuntu.iso"), 1<<31); r.Spam {
+		t.Errorf("block word still active after clearing: %+v", r)
 	}
 }

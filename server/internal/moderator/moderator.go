@@ -32,6 +32,11 @@ const (
 
 // Config configures the moderation pass.
 type Config struct {
+	// Enabled gates the pass. Only consulted when ConfigFunc is set:
+	// a static Config (the historical wiring, and the tests) is
+	// always on — New() already refused to build a Moderator without
+	// a key in that mode.
+	Enabled    bool
 	BaseURL    string        // OpenAI-compatible base, e.g. https://api.deepseek.com/v1
 	APIKey     string        // never logged
 	Model      string        // e.g. deepseek-v4-flash
@@ -43,13 +48,57 @@ type Config struct {
 	TrimTitles bool          // also strip advertising from titles
 	Logger     *log.Logger
 	HTTPClient *http.Client // optional; for tests
+	// ConfigFunc, when non-nil, supplies a fresh Config before every
+	// sweep (and every idle re-check), so settings changed through
+	// the admin API — key, model, batching, the Enabled gate itself —
+	// apply without a restart. New() then skips its static validation:
+	// an empty key simply means the pass idles until one is set.
+	ConfigFunc func() Config
 }
 
 // Moderator runs the periodic classification pass.
 type Moderator struct {
-	st  *store.Store
-	cfg Config
-	hc  *http.Client
+	st    *store.Store
+	cfg   Config
+	cfgFn func() Config
+	hc    *http.Client
+}
+
+// cfgNow returns the configuration for the next sweep: a fresh
+// snapshot in dynamic mode, the static Config otherwise. Dynamic
+// snapshots get the same defaulting New() applies to static ones.
+func (m *Moderator) cfgNow() Config {
+	if m.cfgFn == nil {
+		return m.cfg
+	}
+	cfg := m.cfgFn()
+	if cfg.BatchSize <= 0 {
+		cfg.BatchSize = 50
+	}
+	if cfg.Interval <= 0 {
+		cfg.Interval = time.Hour
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 2 * time.Minute
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = m.cfg.Logger
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = log.Default()
+	}
+	return cfg
+}
+
+// httpClient picks the client for one sweep: the injected one when
+// there is one (tests, and the static wiring's prebuilt client), else
+// a fresh one carrying the snapshot's timeout — so a MODERATION_TIMEOUT
+// change is honoured by the next sweep in dynamic mode.
+func (m *Moderator) httpClient(cfg Config) *http.Client {
+	if m.hc != nil {
+		return m.hc
+	}
+	return &http.Client{Timeout: cfg.Timeout}
 }
 
 // Summary reports what a single sweep did.
@@ -61,8 +110,16 @@ type Summary struct {
 	Trimmed  int64
 }
 
-// New validates cfg and builds a Moderator.
+// New validates cfg and builds a Moderator. With a ConfigFunc the
+// static validation is skipped — the configuration is allowed to be
+// incomplete (no key yet) and to change over the process's life.
 func New(st *store.Store, cfg Config) (*Moderator, error) {
+	if cfg.Logger == nil {
+		cfg.Logger = log.Default()
+	}
+	if cfg.ConfigFunc != nil {
+		return &Moderator{st: st, cfg: cfg, cfgFn: cfg.ConfigFunc, hc: cfg.HTTPClient}, nil
+	}
 	if cfg.APIKey == "" {
 		return nil, errors.New("moderator: API key is empty")
 	}
@@ -81,9 +138,6 @@ func New(st *store.Store, cfg Config) (*Moderator, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 2 * time.Minute
 	}
-	if cfg.Logger == nil {
-		cfg.Logger = log.Default()
-	}
 	hc := cfg.HTTPClient
 	if hc == nil {
 		hc = &http.Client{Timeout: cfg.Timeout}
@@ -91,30 +145,57 @@ func New(st *store.Store, cfg Config) (*Moderator, error) {
 	return &Moderator{st: st, cfg: cfg, hc: hc}, nil
 }
 
-// Run sweeps every Interval until ctx is cancelled. It blocks.
+// Run sweeps every Interval until ctx is cancelled. It blocks. In
+// dynamic mode it also watches the gate: while moderation is disabled
+// or no API key is set it idles, re-checking periodically, and starts
+// sweeping as soon as a settings change turns it on — no restart.
 func (m *Moderator) Run(ctx context.Context) {
-	m.cfg.Logger.Printf("moderator: enabled (model=%s interval=%s batch=%d dry-run=%v trim-titles=%v)",
-		m.cfg.Model, m.cfg.Interval, m.cfg.BatchSize, m.cfg.DryRun, m.cfg.TrimTitles)
-	t := time.NewTicker(m.cfg.Interval)
-	defer t.Stop()
+	state := ""
 	for {
+		cfg := m.cfgNow()
+		active := m.cfgFn == nil || (cfg.Enabled && cfg.APIKey != "")
+		var wait time.Duration
+		if active {
+			msg := fmt.Sprintf("enabled (model=%s interval=%s batch=%d dry-run=%v trim-titles=%v)",
+				cfg.Model, cfg.Interval, cfg.BatchSize, cfg.DryRun, cfg.TrimTitles)
+			if state != msg {
+				cfg.Logger.Printf("moderator: %s", msg)
+				state = msg
+			}
+			wait = cfg.Interval
+		} else {
+			msg := "disabled via settings"
+			if cfg.Enabled {
+				msg = "disabled (OPENAI_API_KEY not set; see env.example)"
+			}
+			if state != msg {
+				cfg.Logger.Printf("moderator: %s", msg)
+				state = msg
+			}
+			wait = 15 * time.Second
+		}
+		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
 		case <-t.C:
-			s, err := m.SweepOnce(ctx)
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				m.cfg.Logger.Printf("moderator: sweep: %v", err)
-				m.st.IncrStat("llm_errors", 1)
-				continue
+		}
+		if !active {
+			continue
+		}
+		s, err := m.SweepOnce(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
 			}
-			if s.Reviewed > 0 {
-				m.cfg.Logger.Printf("moderator: reviewed=%d adult=%d spam=%d deleted=%d trimmed=%d",
-					s.Reviewed, s.Adult, s.Spam, s.Deleted, s.Trimmed)
-			}
+			cfg.Logger.Printf("moderator: sweep: %v", err)
+			m.st.IncrStat("llm_errors", 1)
+			continue
+		}
+		if s.Reviewed > 0 {
+			cfg.Logger.Printf("moderator: reviewed=%d adult=%d spam=%d deleted=%d trimmed=%d",
+				s.Reviewed, s.Adult, s.Spam, s.Deleted, s.Trimmed)
 		}
 	}
 }
@@ -122,16 +203,17 @@ func (m *Moderator) Run(ctx context.Context) {
 // SweepOnce classifies up to MaxBatches batches of unreviewed torrents.
 // A batch that fails is left unmarked so the next sweep retries it.
 func (m *Moderator) SweepOnce(ctx context.Context) (Summary, error) {
+	cfg := m.cfgNow()
 	var total Summary
-	for n := 0; m.cfg.MaxBatches == 0 || n < m.cfg.MaxBatches; n++ {
-		cands, err := m.st.Unreviewed(m.cfg.BatchSize)
+	for n := 0; cfg.MaxBatches == 0 || n < cfg.MaxBatches; n++ {
+		cands, err := m.st.Unreviewed(cfg.BatchSize)
 		if err != nil {
 			return total, fmt.Errorf("load candidates: %w", err)
 		}
 		if len(cands) == 0 {
 			return total, nil
 		}
-		s, err := m.reviewBatch(ctx, cands)
+		s, err := m.reviewBatch(ctx, cands, cfg)
 		total.Reviewed += s.Reviewed
 		total.Adult += s.Adult
 		total.Spam += s.Spam
@@ -144,10 +226,11 @@ func (m *Moderator) SweepOnce(ctx context.Context) (Summary, error) {
 	return total, nil
 }
 
-// reviewBatch classifies one batch and applies the verdicts.
-func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate) (Summary, error) {
+// reviewBatch classifies one batch and applies the verdicts, all
+// under the sweep's configuration snapshot.
+func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate, cfg Config) (Summary, error) {
 	var s Summary
-	verdicts, err := m.classify(ctx, cands)
+	verdicts, err := m.classify(ctx, cands, cfg)
 	if err != nil {
 		return s, err
 	}
@@ -177,15 +260,15 @@ func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate) (S
 		raw[c.InfoHash] = c.Name
 	}
 	for h, clean := range trims {
-		m.cfg.Logger.Printf("moderator: trim %s %q -> %q", h, raw[h], clean)
+		cfg.Logger.Printf("moderator: trim %s %q -> %q", h, raw[h], clean)
 	}
 
-	if m.cfg.DryRun {
+	if cfg.DryRun {
 		for i, h := range adultH {
-			m.cfg.Logger.Printf("moderator: [dry-run] would remove adult %s %q", h, adultN[i])
+			cfg.Logger.Printf("moderator: [dry-run] would remove adult %s %q", h, adultN[i])
 		}
 		for i, h := range spamH {
-			m.cfg.Logger.Printf("moderator: [dry-run] would remove spam %s %q", h, spamN[i])
+			cfg.Logger.Printf("moderator: [dry-run] would remove spam %s %q", h, spamN[i])
 		}
 	} else {
 		n, err := m.st.SetCleanNames(trims)
@@ -211,7 +294,7 @@ func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate) (S
 			s.Deleted += n
 			m.st.IncrStat(g.stat, n)
 			for i, h := range g.hashes {
-				m.cfg.Logger.Printf("moderator: removed %s %s %q", g.reason, h, g.names[i])
+				cfg.Logger.Printf("moderator: removed %s %s %q", g.reason, h, g.names[i])
 			}
 		}
 	}
@@ -307,7 +390,7 @@ type verdict struct {
 
 // classify returns a verdict per candidate, aligned by index. Entries the model
 // omits or labels unknown default to "ok" (fail-open: never delete on doubt).
-func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]verdict, error) {
+func (m *Moderator) classify(ctx context.Context, cands []store.Candidate, cfg Config) ([]verdict, error) {
 	// The listing goes over as JSON so "title" is unambiguously delimited. With
 	// a "<title> [1.2GB, 3 files]" line the model intermittently copied the
 	// size suffix into the cleaned title, which validation then rejected.
@@ -322,11 +405,11 @@ func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]ve
 	}
 
 	reqBody, err := json.Marshal(chatRequest{
-		Model:          m.cfg.Model,
+		Model:          cfg.Model,
 		Temperature:    0,
 		ResponseFormat: &responseFormat{Type: "json_object"},
 		Messages: []chatMessage{
-			{Role: "system", Content: systemPromptFor(m.cfg.TrimTitles)},
+			{Role: "system", Content: systemPromptFor(cfg.TrimTitles)},
 			{Role: "user", Content: string(listing)},
 		},
 	})
@@ -334,7 +417,7 @@ func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]ve
 		return nil, err
 	}
 
-	raw, err := m.post(ctx, reqBody)
+	raw, err := m.post(ctx, reqBody, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -357,7 +440,7 @@ func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]ve
 		case labelSpam:
 			out[v.I-1].label = labelSpam
 		}
-		if m.cfg.TrimTitles {
+		if cfg.TrimTitles {
 			out[v.I-1].clean = cleanTitle(cands[v.I-1].Name, v.Clean)
 		}
 	}
@@ -365,8 +448,8 @@ func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]ve
 }
 
 // post retries transport failures, transient provider errors and empty completions.
-func (m *Moderator) post(ctx context.Context, body []byte) (string, error) {
-	url := strings.TrimSuffix(m.cfg.BaseURL, "/") + "/chat/completions"
+func (m *Moderator) post(ctx context.Context, body []byte, cfg Config) (string, error) {
+	url := strings.TrimSuffix(cfg.BaseURL, "/") + "/chat/completions"
 	const attempts = 3
 	var lastErr error
 	for a := 0; a < attempts; a++ {
@@ -383,9 +466,9 @@ func (m *Moderator) post(ctx context.Context, body []byte) (string, error) {
 			return "", err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+m.cfg.APIKey)
+		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 
-		resp, err := m.hc.Do(req)
+		resp, err := m.httpClient(cfg).Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
 				return "", ctx.Err()
