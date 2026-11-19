@@ -59,6 +59,10 @@ const (
 	KeyRateLimitBurst    = "RATE_LIMIT_BURST"
 	KeySearchMaxInflight = "SEARCH_MAX_INFLIGHT"
 	KeySearchTimeout     = "SEARCH_TIMEOUT"
+	// public API tokens
+	KeyPublicAPIEnabled         = "PUBLIC_API_ENABLED"
+	KeyPublicAPIRequireToken    = "PUBLIC_API_REQUIRE_TOKEN"
+	KeyPublicAPITokenRatePerMin = "PUBLIC_API_TOKEN_RATE_PER_MIN"
 )
 
 // Groups in settings-page display order.
@@ -72,6 +76,7 @@ var Groups = []Group{
 	{Key: "trending", Label: "趋势"},
 	{Key: "feeds", Label: "订阅源"},
 	{Key: "ratelimit", Label: "限流与搜索"},
+	{Key: "publicapi", Label: "公开 API"},
 }
 
 // Theme color presets offered for THEME_COLOR. The hex values live
@@ -184,6 +189,14 @@ var Registry = []Item{
 		Min: f64(1), Max: f64(4096), Desc: "超出的搜索请求排队 1 秒后返回 503"},
 	{Key: KeySearchTimeout, Group: "ratelimit", Label: "搜索数据库超时", Type: TypeDuration, Default: "10s", Editable: true,
 		Min: f64(0.1), Max: f64(120)},
+
+	// --- public API: live; the token gate reads these per request ---
+	{Key: KeyPublicAPIEnabled, Group: "publicapi", Label: "启用公开 API", Type: TypeBool, Default: "true", Editable: true,
+		Desc: "关 = /api/search、/api/stats、/api/trending 全部返回 503（前台搜索也会停）；/api/healthz 与管理端不受影响"},
+	{Key: KeyPublicAPIRequireToken, Group: "publicapi", Label: "公开 API 要求令牌", Type: TypeBool, Default: "false", Editable: true,
+		Desc: "开 = 公开接口必须带 API 令牌（Authorization: Bearer 或 X-API-Key），无/错令牌 401、被禁用 403。注意：自带前台也是匿名调用这些接口，开启后前台搜索会一并被拦，适合只对外提供 API 的部署；关 = 保持无鉴权，但带有效令牌的请求会被计数"},
+	{Key: KeyPublicAPITokenRatePerMin, Group: "publicapi", Label: "新令牌默认限速（次/分钟）", Type: TypeInt, Default: "600", Editable: true,
+		Min: f64(0), Max: f64(1000000), Desc: "创建令牌时的默认每分钟配额，之后可在「API 令牌」页逐个修改；0 = 不限"},
 }
 
 // byKey indexes Registry for lookups.

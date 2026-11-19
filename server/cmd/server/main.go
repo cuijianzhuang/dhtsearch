@@ -338,6 +338,9 @@ func main() {
 	reg(settings.KeyRateLimitBurst, strconv.Itoa(*rateBurst))
 	reg(settings.KeySearchMaxInflight, strconv.Itoa(*searchInflight))
 	reg(settings.KeySearchTimeout, searchTimeout.String())
+	reg(settings.KeyPublicAPIEnabled, strconv.FormatBool(envBool("PUBLIC_API_ENABLED", true)))
+	reg(settings.KeyPublicAPIRequireToken, strconv.FormatBool(envBool("PUBLIC_API_REQUIRE_TOKEN", false)))
+	reg(settings.KeyPublicAPITokenRatePerMin, strconv.Itoa(envInt("PUBLIC_API_TOKEN_RATE_PER_MIN", 600)))
 
 	mgr, err := settings.New(base, fromEnv, st, logger)
 	if err != nil {

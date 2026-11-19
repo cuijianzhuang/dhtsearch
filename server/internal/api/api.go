@@ -143,6 +143,10 @@ type Server struct {
 	limiter   *ipLimiter    // nil when rate limiting is disabled
 	searchSem chan struct{} // admission gate for search queries
 
+	// tokenLimiter holds the per-API-token quotas enforced by
+	// publicGate when PUBLIC_API_REQUIRE_TOKEN is on.
+	tokenLimiter *tokenLimiter
+
 	// Dynamic-limit state, guarded by dynMu. When Options.Settings is
 	// wired, syncSettings rebuilds limiter/searchSem/dynSearchTimeout
 	// from the registry whenever its version moves; reads go through
@@ -188,6 +192,7 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 		opts:         opts,
 		searchSem:    make(chan struct{}, opts.MaxInflight),
 		loginLimiter: newIPLimiter(adminLoginRate, adminLoginBurst),
+		tokenLimiter: newTokenLimiter(),
 	}
 	if opts.RateRPS > 0 {
 		burst := opts.RateBurst
@@ -285,8 +290,8 @@ func rateLimitExempt(path string) bool {
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -295,6 +300,9 @@ func (s *Server) Handler() http.Handler {
 		if lim := s.rateLimiter(); lim != nil && !rateLimitExempt(r.URL.Path) && !lim.allow(clientKey(r)) {
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+		if isPublicAPIPath(r.URL.Path) && !s.publicGate(w, r) {
 			return
 		}
 		s.mux.ServeHTTP(w, r)

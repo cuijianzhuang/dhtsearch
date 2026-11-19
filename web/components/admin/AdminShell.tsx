@@ -10,6 +10,7 @@ const TABS = [
   { key: "review", href: "/admin/review", label: "未审核队列" },
   { key: "blocked", href: "/admin/blocked", label: "黑名单" },
   { key: "settings", href: "/admin/settings", label: "设置" },
+  { key: "api-tokens", href: "/admin/api-tokens", label: "API 令牌" },
 ] as const;
 
 export type AdminTabKey = (typeof TABS)[number]["key"];

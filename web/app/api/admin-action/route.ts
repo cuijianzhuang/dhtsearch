@@ -19,6 +19,13 @@ interface ActionBody {
   /** kind="save-settings": settings key -> new value (null deletes
    *  the DB override, reverting to env/default). */
   values?: Record<string, string | null>;
+  /** kind="*-api-token": the api_tokens row id. */
+  id?: number;
+  /** kind="create-api-token": display name for the new token. */
+  name?: string;
+  /** kind="create-api-token" / "rate-api-token": per-minute quota
+   *  (0 = unlimited; omitted on create = settings default). */
+  ratePerMin?: number;
 }
 
 export async function POST(request: Request) {
@@ -66,10 +73,45 @@ export async function POST(request: Request) {
       path = `/api/admin/settings`;
       payload = { values: body.values ?? {} };
       break;
+    case "create-api-token":
+      path = `/api/admin/api-tokens`;
+      payload = {
+        name: body.name ?? "",
+        ...(body.ratePerMin !== undefined
+          ? { rate_per_min: body.ratePerMin }
+          : {}),
+      };
+      break;
+    case "enable-api-token":
+      path = `/api/admin/api-tokens/${body.id}/enable`;
+      break;
+    case "disable-api-token":
+      path = `/api/admin/api-tokens/${body.id}/disable`;
+      break;
+    case "delete-api-token":
+      method = "DELETE";
+      path = `/api/admin/api-tokens/${body.id}`;
+      break;
+    case "rate-api-token":
+      method = "PUT";
+      path = `/api/admin/api-tokens/${body.id}/rate`;
+      payload = { rate_per_min: body.ratePerMin ?? 0 };
+      break;
     default:
       return NextResponse.json({ error: "unknown action" }, { status: 400 });
   }
-  if (body.kind !== "batch" && body.kind !== "save-settings" && !body.hash) {
+  const tokenKinds = [
+    "create-api-token",
+    "enable-api-token",
+    "disable-api-token",
+    "delete-api-token",
+    "rate-api-token",
+  ];
+  if (tokenKinds.includes(body.kind ?? "")) {
+    if (body.kind !== "create-api-token" && (!body.id || body.id < 1)) {
+      return NextResponse.json({ error: "id required" }, { status: 400 });
+    }
+  } else if (body.kind !== "batch" && body.kind !== "save-settings" && !body.hash) {
     return NextResponse.json({ error: "hash required" }, { status: 400 });
   }
 

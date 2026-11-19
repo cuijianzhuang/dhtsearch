@@ -261,6 +261,38 @@ npm run dev                  # 开发，访问 http://localhost:3000
 | `GET /api/healthz` | 健康检查，返回 `{"ok":true}`，不限流 |
 | `GET /api/site` | 站点名称与主题（主色预设、默认外观），供前端渲染，无需鉴权 |
 
+### 公开 API 令牌（可选鉴权）
+
+公开接口默认无鉴权。要把搜索 API 开给外部客户端、又不想完全敞开时，
+可以在管理端「API 令牌」页（`/admin/api-tokens`）签发令牌，并在
+「设置 → 公开 API」里打开 `PUBLIC_API_REQUIRE_TOKEN`：
+
+- **令牌形态**：`dht_` + 64 位十六进制随机串（256 位熵）。创建时明文
+  **只显示一次**，后端只存 SHA-256 哈希（随机令牌熵足够高，快哈希
+  即可防爆破，也省去逐请求校验的 CPU 开销）；列表里只显示前缀
+  （`dht_` + 前 8 位）用于区分。禁用立即生效（403），删除立即失效
+  （401）。
+- **携带方式**：`Authorization: Bearer <token>` 或 `X-API-Key: <token>`。
+- **错误码**：无令牌/错令牌 `401`、令牌被禁用 `403`、超令牌配额
+  `429`、公开 API 总开关（`PUBLIC_API_ENABLED`）关闭时 `503`。
+  `/api/healthz` 永远不鉴权、不限流。
+- **限速叠加**：每 IP 令牌桶（默认 3 req/s）对所有请求照常生效；
+  令牌另有自己的每分钟配额（新建默认 600 次/分钟，可在设置里改
+  默认值，也可在令牌页逐个改，0 = 不限）。两道都过才放行，任一
+  触发都是 `429`。
+- **未开启强制时**：接口保持匿名可用，但请求若带了有效令牌会被
+  计数（令牌页能看调用量与最后使用时间），可先观察再切换强制。
+- **注意**：自带前台也是匿名调用这些接口的，开启强制后前台搜索
+  会一并被拦——该开关适合「只对外提供 API」的部署。
+
+```bash
+# 带令牌调用（开启 PUBLIC_API_REQUIRE_TOKEN 后必需）
+curl -H "Authorization: Bearer dht_xxxxxxxx..." \
+  "https://your-host/api/search?q=ubuntu&page=1"
+curl -H "X-API-Key: dht_xxxxxxxx..." \
+  "https://your-host/api/stats"
+```
+
 管理接口（全部需要 `Authorization: Bearer <ADMIN_TOKEN>`，未配置令牌时整体 503，见「管理端」）：
 
 | 方法与路径 | 说明 |
@@ -277,11 +309,17 @@ npm run dev                  # 开发，访问 http://localhost:3000
 | `DELETE /api/admin/blocked/{hash}` | 取消拉黑 |
 | `GET /api/admin/settings` | 全量配置：分组、每项生效值、来源（数据库/环境变量/默认）、敏感项脱敏 |
 | `PUT /api/admin/settings` | 批量保存运行配置：整批类型/范围校验，任一项非法整批拒绝并逐项报错 |
+| `GET /api/admin/api-tokens` | 公开 API 令牌列表（名称、前缀、状态、限速、调用量、最后使用；不含明文与哈希） |
+| `POST /api/admin/api-tokens` | 创建令牌：响应里带一次性明文 `token`，之后只能按前缀识别 |
+| `POST /api/admin/api-tokens/{id}/enable`、`.../disable` | 启用 / 禁用令牌（立即生效） |
+| `PUT /api/admin/api-tokens/{id}/rate` | 改单个令牌的每分钟配额（0 = 不限） |
+| `DELETE /api/admin/api-tokens/{id}` | 删除令牌（立即失效） |
 
 ## 管理端
 
 入口：前端 `/admin`（概览 `/admin`、种子管理 `/admin/torrents`、未审核队列
-`/admin/review`、黑名单 `/admin/blocked`、设置 `/admin/settings`）。默认关闭：后端设置环境变量
+`/admin/review`、黑名单 `/admin/blocked`、设置 `/admin/settings`、API 令牌
+`/admin/api-tokens`）。默认关闭：后端设置环境变量
 `ADMIN_TOKEN`（足够长的随机串，如 `openssl rand -hex 32`）并重启后启用；
 未设置时后端在启动日志里打印 `admin: disabled`，所有 `/api/admin/*`
 返回 503，前端显示「管理端未启用」提示。
@@ -295,6 +333,8 @@ npm run dev                  # 开发，访问 http://localhost:3000
   （只删记录，可被重新收录）。
 - **未审核队列**：只看未审核，支持多选批量通过 / 批量拉黑。
 - **黑名单**：查看 blocked 表，逐条取消拉黑。
+- **API 令牌**：给公开接口签发/禁用/删除调用令牌，逐个设每分钟
+  配额，看每个令牌的调用量与最后使用时间（见「公开 API 令牌」）。
 - **设置**：全部配置可视化。启动配置（监听地址、数据库路径/连接串、
   管理令牌）只读展示，改 env 文件后重启生效；运行配置（爬虫、元数据、
   刮削、审核与过滤、热门榜单、订阅源、限流）在线可改，存数据库覆盖层，

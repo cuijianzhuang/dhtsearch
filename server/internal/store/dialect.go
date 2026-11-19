@@ -111,8 +111,10 @@ func (d dialect) isDuplicateColumn(err error) bool {
 // a torrent that was already rejected.
 func (d dialect) schemaStatements() []string {
 	intType, blobType := "INTEGER", "BLOB"
+	idType := "INTEGER PRIMARY KEY AUTOINCREMENT"
 	if d.isPostgres() {
 		intType, blobType = "BIGINT", "BYTEA"
+		idType = "BIGSERIAL PRIMARY KEY"
 	}
 	return []string{
 		`CREATE TABLE IF NOT EXISTS torrents (
@@ -153,6 +155,23 @@ func (d dialect) schemaStatements() []string {
 		`CREATE TABLE IF NOT EXISTS trending_cache (
 			key   TEXT PRIMARY KEY,
 			value TEXT NOT NULL
+		)`,
+		// Public API tokens (see internal/api's token gate). Only the
+		// SHA-256 hash of a token is stored — the plaintext is shown to
+		// the operator exactly once, at creation. prefix is the
+		// display-safe head of the token ("dht_" + first 8 secret
+		// chars), enough to tell tokens apart in the console and in
+		// logs without revealing anything usable.
+		`CREATE TABLE IF NOT EXISTS api_tokens (
+			id           ` + idType + `,
+			name         TEXT NOT NULL,
+			prefix       TEXT NOT NULL,
+			token_hash   TEXT NOT NULL UNIQUE,
+			enabled      INTEGER NOT NULL DEFAULT 1,
+			rate_per_min ` + intType + ` NOT NULL DEFAULT 0,
+			call_count   ` + intType + ` NOT NULL DEFAULT 0,
+			last_used_at ` + intType + ` NOT NULL DEFAULT 0,
+			created_at   ` + intType + ` NOT NULL
 		)`,
 	}
 }

@@ -288,3 +288,40 @@ export function fetchAdminSettings(
 ): Promise<AdminSettingsResponse> {
   return adminFetch<AdminSettingsResponse>(token, "/api/admin/settings");
 }
+
+// --- Public API tokens (mirror server/internal/store/apitokens.go) ---
+
+/**
+ * One public-API credential as the console may see it. The plaintext
+ * and its hash are never in here — the plaintext comes back exactly
+ * once from the create call, and only `prefix` identifies the token
+ * afterwards.
+ */
+export interface APITokenItem {
+  id: number;
+  name: string;
+  prefix: string;
+  enabled: boolean;
+  /** Per-minute quota; 0 = unlimited. */
+  rate_per_min: number;
+  call_count: number;
+  /** Unix seconds; 0 = never used. */
+  last_used_at: number;
+  created_at: number;
+}
+
+export interface APITokenListResponse {
+  results: APITokenItem[];
+}
+
+export interface CreateAPITokenResponse {
+  /** The plaintext token — shown once, never retrievable again. */
+  token: string;
+  item: APITokenItem;
+}
+
+export function fetchAdminAPITokens(
+  token: string
+): Promise<APITokenListResponse> {
+  return adminFetch<APITokenListResponse>(token, "/api/admin/api-tokens");
+}
