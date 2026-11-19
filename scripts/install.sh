@@ -7,7 +7,14 @@
 # Run with no arguments in a terminal for an interactive menu.
 # install also copies this script to /usr/local/bin/dhtsearch, so on an
 # installed machine plain `dhtsearch` re-opens the menu (status / restart /
-# logs / upgrade / change ports / uninstall) without re-downloading it.
+# logs / upgrade / change ports / switch database / uninstall) without
+# re-downloading it.
+#
+# Database: SQLite by default. install can instead pick PostgreSQL —
+# --db postgres-local installs and configures a local server, --db
+# postgres-url takes an existing one — and the management menu's
+# 数据库切换 moves between backends later, migrating the data with
+# the server binary's `migrate` subcommand.
 # That file is the management script; the service binary is
 # dhtsearch-server and the two never overwrite each other.
 #
@@ -63,6 +70,16 @@ WEB_UNIT="dhtsearch-web.service"
 VERSION=""
 API_PORT_OPT=""
 WEB_PORT_OPT=""
+DB_OPT=""
+DATABASE_URL_OPT=""
+# Resolved by resolve_database during install: the DATABASE_URL the
+# config file should carry ("" = SQLite) and whether the choice was
+# explicit (--db flag or the interactive prompt), as opposed to "keep
+# whatever the existing config already has".
+RESOLVED_DATABASE_URL=""
+DB_CHOICE_EXPLICIT=0
+LOCAL_PG_URL=""
+LOCAL_PG_PASSWORD_NEW=0
 CLEANUP_DIR=""
 cleanup_tmp() { if [ -n "$CLEANUP_DIR" ]; then rm -rf "$CLEANUP_DIR"; fi; }
 trap cleanup_tmp EXIT
@@ -101,6 +118,22 @@ Options (install / upgrade):
                        follows the backend to the new port.
   --web-port PORT      web listen port (default: $WEB_PORT, else the
                        port already configured, else 3000)
+  --db MODE            database backend for a fresh install (default:
+                       sqlite; an existing config's backend is kept
+                       unless --db is given explicitly):
+                         sqlite          single file in the data dir
+                         postgres-local  install PostgreSQL on this
+                                         machine (apt: Debian/Ubuntu),
+                                         create the dhtsearch role and
+                                         database, generate a password
+                         postgres-url    use an existing PostgreSQL;
+                                         requires --database-url and is
+                                         connection-tested before the
+                                         config is written
+                       Upgrade never changes the database; switch later
+                       from the `dhtsearch` menu (数据库切换), which
+                       also migrates the data.
+  --database-url URL   postgres:// connection URL for --db postgres-url
   --dry-run            write config/unit files but do not touch systemd
                        or start services
 
@@ -220,6 +253,196 @@ set_env_value() {
     fi
 }
 
+# remove_env_value KEY — delete the KEY= line from the config file.
+remove_env_value() {
+    [ -f "$ENV_FILE" ] || return 0
+    sed -i -E "/^$1=/d" "$ENV_FILE"
+}
+
+# ---------------------------------------------------------------- database
+
+# db_backend — "postgres" when the config carries a DATABASE_URL, else
+# "sqlite".
+db_backend() {
+    if [ -n "$(env_value DATABASE_URL)" ]; then echo "postgres"; else echo "sqlite"; fi
+}
+
+# sqlite_db_path — the SQLite file the config selects (DB_PATH, with
+# the standard data-dir default).
+sqlite_db_path() {
+    local p
+    p="$(env_value DB_PATH)"
+    echo "${p:-${L_DATA_DIR}/dhtsearch.db}"
+}
+
+# mask_pg_url URL — the URL with its password replaced by ***, safe to
+# print in summaries and logs.
+mask_pg_url() {
+    echo "$1" | sed -E 's#(postgres(ql)?://[^:/@]+:)[^@]*@#\1***@#'
+}
+
+# db_display — one-line description of the configured database.
+db_display() {
+    if [ "$(db_backend)" = "postgres" ]; then
+        echo "PostgreSQL ($(mask_pg_url "$(env_value DATABASE_URL)"))"
+    else
+        echo "SQLite ($(sqlite_db_path))"
+    fi
+}
+
+valid_pg_url() {
+    case "$1" in
+        postgres://*|postgresql://*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+LOCAL_PG_USER="dhtsearch"
+LOCAL_PG_DB="dhtsearch"
+
+# pg_su CMD... — run a command as the postgres OS user (peer auth).
+pg_su() {
+    su postgres -c "$*"
+}
+
+# pg_local_works — true when a local PostgreSQL answers over the
+# superuser's peer connection.
+pg_local_works() {
+    command -v psql >/dev/null 2>&1 || return 1
+    pg_su "psql -tAc 'SELECT 1'" >/dev/null 2>&1
+}
+
+# install_postgres_apt — install the distro PostgreSQL packages. Only
+# the apt path (Debian/Ubuntu) is automated; anything else gets a clear
+# stop with manual instructions instead of a half-configured system.
+install_postgres_apt() {
+    if ! command -v apt-get >/dev/null 2>&1; then
+        die "PostgreSQL is not installed and this system has no apt-get, so it cannot be installed automatically.
+Install PostgreSQL manually (server + a database and login role named dhtsearch), then either:
+  - re-run install with --db postgres-url --database-url postgres://dhtsearch:...@127.0.0.1:5432/dhtsearch, or
+  - install with the default SQLite backend and switch later from the dhtsearch menu."
+    fi
+    log "Installing PostgreSQL via apt (this can take a few minutes)"
+    apt-get update -qq || warn "apt-get update failed; trying the install anyway"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql \
+        || die "apt-get install postgresql failed; install PostgreSQL manually and re-run (see the --db postgres-url option)"
+}
+
+# start_local_postgres — make sure the local server is up and ready.
+start_local_postgres() {
+    if command -v pg_isready >/dev/null 2>&1 && pg_isready -q >/dev/null 2>&1; then
+        return 0
+    fi
+    systemctl start postgresql >/dev/null 2>&1 || service postgresql start >/dev/null 2>&1 || true
+    local _
+    for _ in $(seq 1 30); do
+        if pg_isready -q >/dev/null 2>&1; then return 0; fi
+        sleep 1
+    done
+    die "PostgreSQL is installed but did not come up (pg_isready still failing); check: systemctl status postgresql"
+}
+
+# ensure_local_postgres — reuse a working local PostgreSQL or install
+# one, create the dhtsearch role + database, and set LOCAL_PG_URL.
+# When the existing config already carries a local dhtsearch URL, its
+# password is kept (and re-applied to the role) so nothing that already
+# works is invalidated; otherwise a fresh password is generated and
+# LOCAL_PG_PASSWORD_NEW is set so the caller can show it exactly once.
+ensure_local_postgres() {
+    if ! pg_local_works; then
+        install_postgres_apt
+    fi
+    start_local_postgres
+    pg_local_works || die "PostgreSQL did not answer after install/start; check: systemctl status postgresql"
+
+    local port pw existing
+    port="$(pg_su "psql -tAc 'SHOW port'" | tr -d '[:space:]')"
+    [ -n "$port" ] || port="5432"
+
+    existing="$(env_value DATABASE_URL)"
+    pw=""
+    if [ -n "$existing" ]; then
+        pw="$(echo "$existing" | sed -nE "s#^postgres(ql)?://${LOCAL_PG_USER}:([^@]*)@.*#\2#p")"
+    fi
+    if [ -n "$pw" ]; then
+        LOCAL_PG_PASSWORD_NEW=0
+    else
+        if command -v openssl >/dev/null 2>&1; then
+            pw="$(openssl rand -hex 24)"
+        else
+            pw="$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')"
+        fi
+        LOCAL_PG_PASSWORD_NEW=1
+    fi
+
+    # The password is hex-only by construction, so it is safe inside
+    # the single-quoted SQL literal below.
+    if [ "$(pg_su "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${LOCAL_PG_USER}'\"" | tr -d '[:space:]')" = "1" ]; then
+        pg_su "psql -c \"ALTER ROLE ${LOCAL_PG_USER} WITH LOGIN PASSWORD '${pw}'\"" >/dev/null \
+            || die "failed to set the password of the PostgreSQL role ${LOCAL_PG_USER}"
+    else
+        pg_su "psql -c \"CREATE ROLE ${LOCAL_PG_USER} LOGIN PASSWORD '${pw}'\"" >/dev/null \
+            || die "failed to create the PostgreSQL role ${LOCAL_PG_USER}"
+    fi
+    if [ "$(pg_su "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='${LOCAL_PG_DB}'\"" | tr -d '[:space:]')" != "1" ]; then
+        pg_su "createdb -O ${LOCAL_PG_USER} ${LOCAL_PG_DB}" \
+            || die "failed to create the PostgreSQL database ${LOCAL_PG_DB}"
+    fi
+    LOCAL_PG_URL="postgres://${LOCAL_PG_USER}:${pw}@127.0.0.1:${port}/${LOCAL_PG_DB}?sslmode=disable"
+}
+
+# resolve_database — settle which backend a fresh install uses and set
+# RESOLVED_DATABASE_URL / DB_CHOICE_EXPLICIT. An explicit --db (or the
+# interactive prompt, which sets DB_OPT the same way) wins; without one
+# an existing config's backend is kept untouched.
+resolve_database() {
+    LOCAL_PG_URL=""
+    LOCAL_PG_PASSWORD_NEW=0
+    if [ -n "$DB_OPT" ]; then
+        DB_CHOICE_EXPLICIT=1
+        case "$DB_OPT" in
+            sqlite) RESOLVED_DATABASE_URL="" ;;
+            postgres-url)
+                [ -n "$DATABASE_URL_OPT" ] || die "--db postgres-url needs --database-url"
+                valid_pg_url "$DATABASE_URL_OPT" || die "invalid --database-url: must start with postgres:// or postgresql://"
+                RESOLVED_DATABASE_URL="$DATABASE_URL_OPT"
+                ;;
+            postgres-local)
+                ensure_local_postgres
+                RESOLVED_DATABASE_URL="$LOCAL_PG_URL"
+                ;;
+        esac
+    else
+        DB_CHOICE_EXPLICIT=0
+        RESOLVED_DATABASE_URL="$(env_value DATABASE_URL)"
+    fi
+}
+
+# probe_pg_url URL — prove the URL is connectable (server reachable,
+# credentials accepted) before any config is written, by running the
+# release binary's migrate subcommand from the URL into a throwaway
+# SQLite file: it opens the source (which also creates the schema) and
+# copies zero rows. Needs PKG_TARBALL from obtain_package.
+probe_pg_url() {
+    local url="$1" tmp bin
+    tmp="$(mktemp -d)"
+    if ! tar -xzf "$PKG_TARBALL" -C "$tmp" --wildcards --no-anchored 'dhtsearch-server' 2>/dev/null; then
+        rm -rf "$tmp"
+        die "could not extract dhtsearch-server from the package to test the database connection"
+    fi
+    bin="$(find "$tmp" -name dhtsearch-server -type f | head -1)"
+    chmod +x "$bin"
+    # Bounded: a binary that does not understand the migrate
+    # subcommand (or a half-dead server) must fail the probe, never
+    # hang the install.
+    if timeout 60 "$bin" migrate --from "$url" --to "$tmp/probe.db" >/dev/null 2>&1; then
+        rm -rf "$tmp"
+        return 0
+    fi
+    rm -rf "$tmp"
+    return 1
+}
+
 # apply_ports — write the resolved ports back into an existing config
 # file. Only the port part of HTTP_ADDR changes; a custom host part is
 # preserved. Without explicit port options this rewrites the values
@@ -235,19 +458,41 @@ apply_ports() {
     set_env_value WEB_PORT "$wp"
 }
 
+# apply_db_choice — write an explicit install-time database choice
+# into an existing config file (fresh files get it via the template in
+# write_env_file). SQLite removes the DATABASE_URL line; the DB_PATH
+# file itself is left alone and stays the switch-back target.
+apply_db_choice() {
+    if [ -n "$RESOLVED_DATABASE_URL" ]; then
+        set_env_value DATABASE_URL "$RESOLVED_DATABASE_URL"
+    else
+        remove_env_value DATABASE_URL
+    fi
+}
+
 write_env_file() {
     if [ -f "$ENV_FILE" ]; then
         log "Config exists, keeping it: $ENV_FILE"
         apply_ports
+        if [ "$DB_CHOICE_EXPLICIT" = "1" ]; then
+            apply_db_choice
+        fi
         return
     fi
-    local ap wp
+    local ap wp db_url_line
     ap="$(resolve_api_port)"
     wp="$(resolve_web_port)"
+    if [ -n "$RESOLVED_DATABASE_URL" ]; then
+        db_url_line="DATABASE_URL=${RESOLVED_DATABASE_URL}"
+    else
+        db_url_line="#DATABASE_URL=postgres://user:password@127.0.0.1:5432/dhtsearch?sslmode=disable"
+    fi
     log "Writing default config: $ENV_FILE"
     cat > "$ENV_FILE" <<EOF
 # DHTSearch configuration — full reference: env.example in the repo/release.
 # Values here are read by systemd (EnvironmentFile) and by the server itself.
+# This file can carry a live database password, so it is kept mode 600
+# (root-only); systemd reads it as root for the services.
 
 # API + crawler. Loopback by default; put a reverse proxy in front for
 # public access. The web service fetches this address server-side.
@@ -258,12 +503,15 @@ HTTP_ADDR=127.0.0.1:${ap}
 # web systemd unit's PORT and API_BASE are generated from these ports.
 WEB_PORT=${wp}
 
-# SQLite database (default). Lives in the data dir.
+# Database: SQLite by default — a single file in the data dir.
 DB_PATH=${L_DATA_DIR}/dhtsearch.db
 
-# Postgres instead of SQLite (optional): set a connection URL and DB_PATH
-# is ignored. Tables/indexes are created on startup.
-#DATABASE_URL=postgres://user:password@127.0.0.1:5432/dhtsearch?sslmode=disable
+# PostgreSQL instead of SQLite: when DATABASE_URL is set it wins and
+# DB_PATH is ignored (the file stays as the switch-back target).
+# Chosen at install time via --db, or later from the dhtsearch menu
+# (数据库切换), which also migrates the data. Tables/indexes are
+# created on startup.
+${db_url_line}
 
 # Fixed DHT UDP port so a router port-forward can target it. Inbound UDP
 # is what passive discovery lives on; 0 would pick a new port each start.
@@ -558,8 +806,14 @@ fix_permissions() {
     if id "$SERVICE_USER" >/dev/null 2>&1; then
         chown -R "${SERVICE_USER}:${SERVICE_USER}" "$DATA_DIR" "$APP_DIR" || true
         if [ -f "$ENV_FILE" ]; then
-            chown "root:${SERVICE_USER}" "$ENV_FILE" || true
-            chmod 640 "$ENV_FILE" || true
+            # The env file can carry a live database password (the
+            # postgres-local flow generates one into DATABASE_URL), so
+            # it is root-only 600. That does not starve the services:
+            # systemd reads EnvironmentFile as root and passes the
+            # values in the process environment, which is also what
+            # the server checks first.
+            chown root:root "$ENV_FILE" || true
+            chmod 600 "$ENV_FILE" || true
         fi
     fi
 }
@@ -632,6 +886,20 @@ do_install() {
     prepare_dirs_and_user
     obtain_package "$arch" "$workdir"
     tarball="$PKG_TARBALL"
+    # A bare --database-url (no --db) means postgres-url.
+    if [ -n "$DATABASE_URL_OPT" ] && [ -z "$DB_OPT" ]; then
+        DB_OPT="postgres-url"
+    fi
+    # Database choice comes before any file is written: postgres-local
+    # may install and configure a whole PostgreSQL here, and an
+    # unreachable postgres-url aborts the install before the config
+    # (or the services) are touched.
+    resolve_database
+    if [ -n "$RESOLVED_DATABASE_URL" ] && [ "$DB_CHOICE_EXPLICIT" = "1" ]; then
+        probe_pg_url "$RESOLVED_DATABASE_URL" \
+            || die "cannot connect to PostgreSQL at $(mask_pg_url "$RESOLVED_DATABASE_URL") (server unreachable or credentials rejected); config not written, nothing installed"
+        log "PostgreSQL connection verified: $(mask_pg_url "$RESOLVED_DATABASE_URL")"
+    fi
     install_package_files "$tarball"
     write_env_file
     write_units
@@ -644,6 +912,12 @@ do_install() {
     install_manager
     log "Installed DHTSearch $RESOLVED_VERSION (arch $arch)"
     log "API: http://127.0.0.1:$(resolve_api_port)/api/healthz   Web: http://127.0.0.1:$(resolve_web_port)/"
+    log "Database: $(db_display)"
+    if [ "$LOCAL_PG_PASSWORD_NEW" = "1" ]; then
+        log "Local PostgreSQL configured. Connection URL, shown only this once — save it:"
+        log "  $RESOLVED_DATABASE_URL"
+        log "  (it is also stored in $ENV_FILE, readable by root only)"
+    fi
     log "Config: $ENV_FILE   Data: $DATA_DIR   Logs: journalctl -u $API_UNIT -f"
     log "Manage: run 'dhtsearch' for the interactive menu"
 }
@@ -651,6 +925,14 @@ do_install() {
 do_upgrade() {
     require_root
     [ -f "$BIN_FILE" ] || die "not installed yet; run install first"
+    if [ -n "$DB_OPT" ]; then
+        warn "--db is ignored by upgrade: the database backend is never changed here. Use the dhtsearch menu (数据库切换) to switch, which also migrates the data."
+        DB_OPT=""
+    fi
+    # Never let a database resolution from an earlier action in the
+    # same (menu) process leak into upgrade's config rewrite.
+    DB_CHOICE_EXPLICIT=0
+    RESOLVED_DATABASE_URL=""
     check_platform
     validate_ports
     check_ports_free
@@ -722,6 +1004,7 @@ do_status() {
     echo "Binary:  $BIN_FILE"
     echo "Config:  $ENV_FILE"
     echo "Data:    $DATA_DIR"
+    echo "Database: $(db_display)"
     echo "Ports:   API $(resolve_api_port)   Web $(resolve_web_port)"
     if have_systemd; then
         systemctl is-active "$API_UNIT" "$WEB_UNIT" || true
@@ -781,8 +1064,59 @@ menu_pause() {
     read -r _ || true
 }
 
+# prompt_pg_url — ask until a postgres:// URL is entered. The URL goes
+# to stdout; prompting goes to stderr so the value can be captured.
+prompt_pg_url() {
+    local v
+    while true; do
+        printf 'PostgreSQL 连接地址（postgres://user:pass@host:5432/db）: ' >&2
+        if ! read -r v; then return 1; fi
+        if valid_pg_url "$v"; then
+            echo "$v"
+            return 0
+        fi
+        echo "地址无效：必须以 postgres:// 或 postgresql:// 开头。" >&2
+    done
+}
+
+# menu_prompt_db — the install-time database question. Sets DB_OPT /
+# DATABASE_URL_OPT exactly like the --db / --database-url flags.
+menu_prompt_db() {
+    local c
+    echo "数据库选择："
+    echo "  1) SQLite（默认，零配置，单文件）"
+    echo "  2) PostgreSQL（本机自动安装并配置）"
+    echo "  3) PostgreSQL（已有，填连接地址）"
+    printf '选择（默认 1）: '
+    read -r c || c="1"
+    case "$c" in
+        2) DB_OPT="postgres-local" ;;
+        3)
+            DB_OPT="postgres-url"
+            DATABASE_URL_OPT="$(prompt_pg_url)" || return 1
+            ;;
+        *) DB_OPT="sqlite" ;;
+    esac
+    return 0
+}
+
+# db_choice_summary — how the chosen database reads in the install
+# summary, before the config file exists to describe it.
+db_choice_summary() {
+    case "$DB_OPT" in
+        postgres-local) echo "PostgreSQL（本机自动安装）" ;;
+        postgres-url) echo "PostgreSQL ($(mask_pg_url "$DATABASE_URL_OPT"))" ;;
+        *) echo "SQLite" ;;
+    esac
+}
+
 menu_install() {
     local ap wp
+    # Reset any database choice from an earlier action in this menu
+    # session; it is re-asked below for a fresh config, and an existing
+    # config must not have a stale choice applied to it.
+    DB_OPT=""
+    DATABASE_URL_OPT=""
     ap="$(prompt_port "API 端口" "$(resolve_api_port)")" || return 0
     wp="$(prompt_port "Web 端口" "$(resolve_web_port)")" || return 0
     if [ "$ap" = "$wp" ]; then
@@ -790,11 +1124,22 @@ menu_install() {
         menu_pause
         return 0
     fi
+    # The database question only makes sense for a fresh config; with
+    # an existing one the backend is kept (switching lives in its own
+    # menu entry, with data migration).
+    local db_summary
+    if [ -f "$ENV_FILE" ]; then
+        db_summary="$(db_display)（保持不变）"
+    else
+        menu_prompt_db || return 0
+        db_summary="$(db_choice_summary)"
+    fi
     echo
     echo "安装汇总："
     echo "  版本：    ${VERSION:-最新 Release}"
     echo "  API 端口：$ap"
     echo "  Web 端口：$wp"
+    echo "  数据库：  $db_summary"
     echo "  配置文件：$ENV_FILE"
     echo "  数据目录：$DATA_DIR"
     if ! confirm "确认开始安装？"; then menu_pause; return 0; fi
@@ -875,6 +1220,123 @@ menu_change_port() {
     menu_pause
 }
 
+# switch_database TARGET [URL] — move the live install to another
+# backend, migrating the data. The order is strict: stop the services,
+# migrate with the server binary and let it verify row counts, only
+# then rewrite DATABASE_URL, restart, and health-check. If migration
+# or verification fails the config is never touched and the services
+# come back up on the old backend; if the new backend fails its health
+# check the config change is rolled back the same way (the source data
+# is still intact — migration copies, it never deletes).
+switch_database() {
+    local target="$1" url="${2:-}"
+    local src dst old_url
+    old_url="$(env_value DATABASE_URL)"
+    if [ "$(db_backend)" = "postgres" ]; then
+        src="$old_url"
+    else
+        src="$(sqlite_db_path)"
+    fi
+    case "$target" in
+        postgres-local)
+            ensure_local_postgres
+            dst="$LOCAL_PG_URL"
+            ;;
+        postgres-url) dst="$url" ;;
+        sqlite) dst="$(sqlite_db_path)" ;;
+        *) warn "未知切换目标：$target"; return 1 ;;
+    esac
+
+    log "停止服务（切换期间短暂不可用）"
+    svc stop "$WEB_UNIT" "$API_UNIT"
+    log "迁移数据：$(db_display) -> ${target}"
+    if ! "$BIN_FILE" migrate --from "$src" --to "$dst"; then
+        warn "数据迁移失败或行数核对未通过，配置未做任何修改。按原数据库恢复服务。"
+        restart_services
+        wait_health || true
+        return 1
+    fi
+    if [ "$target" = "sqlite" ]; then
+        remove_env_value DATABASE_URL
+    else
+        set_env_value DATABASE_URL "$dst"
+    fi
+    fix_permissions
+    restart_services
+    if wait_health; then
+        log "数据库已切换：$(db_display)"
+        if [ "$LOCAL_PG_PASSWORD_NEW" = "1" ]; then
+            log "本机 PostgreSQL 连接地址（含密码，只显示这一次，请保存）："
+            log "  $dst"
+        fi
+        return 0
+    fi
+    warn "切换后健康检查未通过，回滚到原数据库配置。"
+    if [ -n "$old_url" ]; then
+        set_env_value DATABASE_URL "$old_url"
+    else
+        remove_env_value DATABASE_URL
+    fi
+    fix_permissions
+    restart_services
+    wait_health || true
+    return 1
+}
+
+menu_switch_db() {
+    require_root
+    if [ ! -f "$ENV_FILE" ]; then
+        echo "尚未安装（找不到 $ENV_FILE），请先选「安装」。"
+        menu_pause
+        return 0
+    fi
+    if [ ! -f "$BIN_FILE" ]; then
+        echo "服务二进制不存在（$BIN_FILE），请先安装或升级。"
+        menu_pause
+        return 0
+    fi
+    echo "当前数据库：$(db_display)"
+    local target="" url="" c
+    if [ "$(db_backend)" = "sqlite" ]; then
+        echo "切换到："
+        echo "  1) PostgreSQL（本机自动安装并配置）"
+        echo "  2) PostgreSQL（已有，填连接地址）"
+        echo "  0) 取消"
+        printf '选择： '
+        read -r c || return 0
+        case "$c" in
+            1) target="postgres-local" ;;
+            2)
+                target="postgres-url"
+                url="$(prompt_pg_url)" || return 0
+                ;;
+            *) echo "已取消。"; menu_pause; return 0 ;;
+        esac
+    else
+        echo "切换到："
+        echo "  1) SQLite（数据迁回数据库文件）"
+        echo "  0) 取消"
+        printf '选择： '
+        read -r c || return 0
+        case "$c" in
+            1) target="sqlite" ;;
+            *) echo "已取消。"; menu_pause; return 0 ;;
+        esac
+    fi
+    echo "切换流程：停服务 → 迁移数据并核对行数 → 改配置 → 重启并健康检查。"
+    echo "期间服务会短暂停机；迁移失败会按原配置自动恢复，数据不丢。"
+    if [ "$target" = "sqlite" ] && [ -f "$(sqlite_db_path)" ]; then
+        echo "注意：目标 SQLite 文件已存在，迁移时同 info_hash 的旧行不会被覆盖。"
+    fi
+    if ! confirm "确认切换数据库？"; then menu_pause; return 0; fi
+    if switch_database "$target" "$url"; then
+        echo "切换完成。"
+    else
+        echo "切换未完成，已按原配置恢复（详情看上面的输出）。"
+    fi
+    menu_pause
+}
+
 menu_uninstall() {
     local c
     echo "卸载方式： 1) 保留配置和数据   2) 全部删除（--purge，连数据库一起删）   0) 取消"
@@ -906,7 +1368,8 @@ menu() {
         echo "  4) 重启服务"
         echo "  5) 查看日志"
         echo "  6) 修改端口"
-        echo "  7) 卸载"
+        echo "  7) 数据库切换"
+        echo "  8) 卸载"
         echo "  0) 退出"
         printf '选择： '
         if ! read -r choice; then exit 0; fi
@@ -917,7 +1380,8 @@ menu() {
             4) menu_restart ;;
             5) menu_logs ;;
             6) menu_change_port ;;
-            7) menu_uninstall ;;
+            7) menu_switch_db ;;
+            8) menu_uninstall ;;
             0) exit 0 ;;
             *) echo "未知选择：$choice" ;;
         esac
@@ -941,6 +1405,18 @@ parse_opts() {
                 [ $# -ge 2 ] || die "--web-port needs a value"
                 WEB_PORT_OPT="$2"
                 valid_port "$WEB_PORT_OPT" || die "invalid --web-port: '$WEB_PORT_OPT' (must be a number 1-65535)"
+                shift 2 ;;
+            --db)
+                [ $# -ge 2 ] || die "--db needs a value (sqlite | postgres-local | postgres-url)"
+                DB_OPT="$2"
+                case "$DB_OPT" in
+                    sqlite|postgres-local|postgres-url) ;;
+                    *) die "invalid --db: '$DB_OPT' (want sqlite | postgres-local | postgres-url)" ;;
+                esac
+                shift 2 ;;
+            --database-url)
+                [ $# -ge 2 ] || die "--database-url needs a value"
+                DATABASE_URL_OPT="$2"
                 shift 2 ;;
             --dry-run) DRY_RUN=1; shift ;;
             --purge) PURGE=1; shift ;;
