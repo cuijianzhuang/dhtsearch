@@ -1,12 +1,16 @@
 "use client";
 
 // Three-state appearance switcher （浅色 / 深色 / 跟随系统）, shown in
-// the front and admin headers. The visitor's choice is stored in
-// localStorage and applied to <html data-appearance> immediately; the
-// inline boot script in the root layout re-applies it before first
-// paint on the next load. It wins over the admin-set default
-// appearance (the server-rendered attribute), which is only the
-// starting point for visitors who never touch this control.
+// the front and admin headers. The visitor's choice is applied to
+// <html data-appearance> immediately and stored twice: in
+// localStorage (read back by this control and by the boot script)
+// and in a cookie, which the root layout reads server-side so it
+// renders the visitor's choice directly. The cookie is what makes
+// the choice survive router.refresh() and soft navigations — those
+// re-render the layout from the server, and a server that cannot
+// see the choice re-renders the admin default over it. The boot
+// script in the root layout covers choices that exist only in
+// localStorage (older visits, expired cookie) before first paint.
 //
 // localStorage is an external store, so the current choice is read
 // through useSyncExternalStore: the server snapshot is the admin
@@ -16,9 +20,10 @@
 
 import { useSyncExternalStore } from "react";
 import {
+  APPEARANCE_COOKIE,
   APPEARANCE_STORAGE_KEY,
   APPEARANCES,
-  asAppearance,
+  parseAppearance,
   type Appearance,
 } from "@/lib/theme";
 
@@ -35,11 +40,23 @@ function subscribe(onChange: () => void) {
 
 function readStored(): Appearance | null {
   try {
-    const v = localStorage.getItem(APPEARANCE_STORAGE_KEY);
-    return v ? asAppearance(v) : null;
+    return parseAppearance(localStorage.getItem(APPEARANCE_STORAGE_KEY));
   } catch {
     return null;
   }
+}
+
+/** Persist a choice to both stores (see the header comment for why
+ *  there are two). Each write is independent: in an environment
+ *  where one store is unavailable (e.g. localStorage throwing in a
+ *  private window) the other still carries the choice. */
+function persistChoice(next: Appearance) {
+  try {
+    localStorage.setItem(APPEARANCE_STORAGE_KEY, next);
+  } catch {
+    // Storage unavailable — the cookie below still persists it.
+  }
+  document.cookie = `${APPEARANCE_COOKIE}=${next};path=/;max-age=31536000;samesite=lax`;
 }
 
 function Icon({ mode }: { mode: Appearance }) {
@@ -90,12 +107,7 @@ export default function AppearanceSwitcher({
   );
 
   function choose(next: Appearance) {
-    try {
-      localStorage.setItem(APPEARANCE_STORAGE_KEY, next);
-    } catch {
-      // Storage unavailable (private mode): the choice still applies
-      // to this page view via the attribute below.
-    }
+    persistChoice(next);
     document.documentElement.setAttribute("data-appearance", next);
     window.dispatchEvent(new Event(CHANGE_EVENT));
   }
