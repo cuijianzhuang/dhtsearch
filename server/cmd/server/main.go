@@ -198,6 +198,12 @@ func main() {
 	samplers := flag.Int("dht-samplers", envInt("DHT_SAMPLERS", 8), "concurrent BEP 51 sampling workers")
 	metaWorkers := flag.Int("meta-workers", envInt("META_WORKERS", 128), "metadata fetch worker count")
 	metaTimeout := flag.Duration("meta-timeout", envDuration("META_TIMEOUT", 45*time.Second), "metadata fetch timeout per torrent")
+	metaPrescreen := flag.Bool("meta-prescreen", envBool("META_PRESCREEN_ENABLED", true),
+		"prescreen fetches: abandon a hash early when no peer connects within the prescreen window")
+	metaPrescreenTimeout := flag.Duration("meta-prescreen-timeout", envDuration("META_PRESCREEN_TIMEOUT", 10*time.Second),
+		"prescreen window per fetch (inside the metadata timeout budget, not added to it)")
+	metaPriority := flag.Bool("meta-priority", envBool("META_PRIORITY_ENABLED", true),
+		"feed metadata workers from a priority queue (seeders > source > freshness) instead of a FIFO channel")
 	fetchMetadata := flag.Bool("fetch-metadata", envBool("FETCH_METADATA", true), "fetch torrent metadata (false: store bare infohashes)")
 	trackersCSV := flag.String("trackers", envDefault("TRACKERS", defaultTrackers),
 		"comma-separated tracker announce URLs, used both to rank discovered infohashes (BEP 15 scrape) and as peer hints on fetch magnets (empty = neither)")
@@ -302,6 +308,9 @@ func main() {
 	reg(settings.KeyFetchMetadata, strconv.FormatBool(*fetchMetadata))
 	reg(settings.KeyMetaWorkers, strconv.Itoa(*metaWorkers))
 	reg(settings.KeyMetaTimeout, metaTimeout.String())
+	reg(settings.KeyMetaPrescreenEnabled, strconv.FormatBool(*metaPrescreen))
+	reg(settings.KeyMetaPrescreenTimeout, metaPrescreenTimeout.String())
+	reg(settings.KeyMetaPriorityEnabled, strconv.FormatBool(*metaPriority))
 	reg(settings.KeyMinTorrentSize, strconv.FormatInt(*minSize, 10))
 	reg(settings.KeyScrapeEnabled, strconv.FormatBool(*scrapeEnabled))
 	reg(settings.KeyTrackers, *trackersCSV)
@@ -386,20 +395,30 @@ func main() {
 	var scr *scraper.Scraper
 	var feedSvc *feeds.Service
 	var feedFetch *metadata.Fetcher
+	var metaQueue *metadata.Queue
+	prescreenCfg := func(c *metadata.Config) {
+		c.PrescreenEnabled = mgr.Bool(settings.KeyMetaPrescreenEnabled)
+		c.PrescreenTimeout = mgr.Duration(settings.KeyMetaPrescreenTimeout)
+		c.PrescreenEnabledFunc = func() bool { return mgr.Bool(settings.KeyMetaPrescreenEnabled) }
+		c.PrescreenTimeoutFunc = func() time.Duration { return mgr.Duration(settings.KeyMetaPrescreenTimeout) }
+	}
 	if fetchMeta {
 		var err error
-		fetcher, err = metadata.NewFetcher(metadata.Config{
+		mainMetaCfg := metadata.Config{
 			Workers:     mgr.Int(settings.KeyMetaWorkers),
 			Timeout:     mgr.Duration(settings.KeyMetaTimeout),
 			TimeoutFunc: func() time.Duration { return mgr.Duration(settings.KeyMetaTimeout) },
 			Trackers:    trackerList,
 			Logger:      logger,
-		})
+		}
+		prescreenCfg(&mainMetaCfg)
+		fetcher, err = metadata.NewFetcher(mainMetaCfg)
 		if err != nil {
 			logger.Fatalf("metadata: %v", err)
 		}
 		defer fetcher.Close()
 		feed := cr.Infohashes()
+		var scraped <-chan scraper.Item
 		if mgr.Bool(settings.KeyScrapeEnabled) && len(trackerList) > 0 && feed != nil {
 			scr, err = scraper.New(scraper.Config{
 				Trackers: trackerList,
@@ -410,7 +429,7 @@ func main() {
 			} else {
 				defer scr.Close()
 				scr.Run(ctx, feed)
-				feed = scr.Out()
+				scraped = scr.Out()
 			}
 		}
 		// Feed hashes get their own small fetcher rather than a place in the
@@ -452,13 +471,15 @@ func main() {
 			}
 			fs.Run(ctx)
 		}(feedSvc)
-		feedFetcher, err := metadata.NewFetcher(metadata.Config{
+		feedMetaCfg := metadata.Config{
 			Workers:     mgr.Int(settings.KeyFeedsWorkers),
 			Timeout:     mgr.Duration(settings.KeyFeedsMetaTimeout),
 			TimeoutFunc: func() time.Duration { return mgr.Duration(settings.KeyFeedsMetaTimeout) },
 			Trackers:    trackerList,
 			Logger:      logger,
-		})
+		}
+		prescreenCfg(&feedMetaCfg)
+		feedFetcher, err := metadata.NewFetcher(feedMetaCfg)
 		if err != nil {
 			logger.Fatalf("feeds metadata: %v", err)
 		}
@@ -491,7 +512,44 @@ func main() {
 			}
 			st.IncrStat("fetched", 1)
 		}
-		fetcher.Run(ctx, feed, onRecord)
+		if mgr.Bool(settings.KeyMetaPriorityEnabled) {
+			// Workers pop from a priority queue (seeders > source >
+			// freshness). The scraper's seeder counts ride along on its
+			// items, so its ranking survives the hand-off; without the
+			// scraper the queue is the only prioritization the pipeline
+			// gets (previously a plain FIFO channel in that case).
+			metaQueue = metadata.NewQueue(0)
+			q := metaQueue
+			if scraped != nil {
+				go func() {
+					for it := range scraped {
+						q.Push(metadata.Item{Hash: it.Hash, Seeders: it.Seeders, Source: metadata.SourceScrape, At: time.Now()})
+					}
+				}()
+			} else {
+				go func() {
+					for h := range feed {
+						q.Push(metadata.Item{Hash: h, Seeders: -1, Source: metadata.SourceDHT, At: time.Now()})
+					}
+				}()
+			}
+			fetcher.RunQueue(ctx, q, onRecord)
+		} else if scraped != nil {
+			hashes := make(chan string)
+			go func() {
+				defer close(hashes)
+				for it := range scraped {
+					select {
+					case hashes <- it.Hash:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}()
+			fetcher.Run(ctx, hashes, onRecord)
+		} else {
+			fetcher.Run(ctx, feed, onRecord)
+		}
 		if feedFetcher != nil {
 			feedFetcher.Run(ctx, feedSvc.Out(), onRecord)
 			feedFetch = feedFetcher
@@ -579,6 +637,8 @@ func main() {
 					_, timedOut, failed := fetcher.Stats()
 					st.IncrStat("meta_timed_out", timedOut-prevTimedOut(&timedOut))
 					st.IncrStat("meta_failed", failed-prevFailed(&failed))
+					pd := fetcher.PrescreenDropped()
+					st.IncrStat("prescreen_dropped", pd-prevPrescreen(&pd))
 				}
 			}
 		}
@@ -606,8 +666,14 @@ func main() {
 			MaxInflight:   *searchInflight,
 			SearchTimeout: *searchTimeout,
 			ScraperStatus: scraperStatus(scr),
-			FeedsStatus:   feedsStatus(feedSvc, feedFetch),
-			Trending:      trendFn,
+			MetaStatus: func() api.MetaStatus {
+				if metaQueue == nil {
+					return api.MetaStatus{}
+				}
+				return api.MetaStatus{QueueDepth: metaQueue.Len()}
+			},
+			FeedsStatus: feedsStatus(feedSvc, feedFetch),
+			Trending:    trendFn,
 			TrendingStatus: func() api.TrendingStatus {
 				ts := trendSvc.Status()
 				out := api.TrendingStatus{Failing: ts.Failing, FailStreak: ts.FailStreak}
@@ -650,9 +716,10 @@ func main() {
 }
 
 var (
-	lastSeen     int64
-	lastTimedOut int64
-	lastFailed   int64
+	lastSeen      int64
+	lastTimedOut  int64
+	lastFailed    int64
+	lastPrescreen int64
 )
 
 // prevSeen returns the previously reported seen count and records the new
@@ -673,6 +740,12 @@ func prevTimedOut(cur *int64) int64 {
 func prevFailed(cur *int64) int64 {
 	prev := lastFailed
 	lastFailed = *cur
+	return prev
+}
+
+func prevPrescreen(cur *int64) int64 {
+	prev := lastPrescreen
+	lastPrescreen = *cur
 	return prev
 }
 

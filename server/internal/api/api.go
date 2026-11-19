@@ -55,6 +55,9 @@ type Options struct {
 	StatsTTL time.Duration
 	// ScraperStatus, when non-nil, adds a "scraper" section to /api/stats.
 	ScraperStatus func() ScraperStatus
+	// MetaStatus, when non-nil, adds live metadata-pipeline fields
+	// (the fetch priority queue's depth) to the "fetch" section.
+	MetaStatus func() MetaStatus
 	// FeedsStatus, when non-nil, adds a "feeds" section to /api/stats.
 	FeedsStatus func() feeds.Stats
 	// Trending, when non-nil, backs /api/trending. Nil (feature disabled)
@@ -109,6 +112,12 @@ type CrawlerStatus struct {
 	Sampled   int64 `json:"sampled"`
 	SampleErr int64 `json:"sample_errors"`
 	Harvested int64 `json:"harvested"`
+}
+
+// MetaStatus describes the metadata fetch pipeline's live state, as
+// opposed to the cumulative fetch counters in the stats table.
+type MetaStatus struct {
+	QueueDepth int `json:"queue_depth"`
 }
 
 // ScraperStatus describes the tracker-scrape prioritizer. Seeded/Scraped is
@@ -436,9 +445,10 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		// Metadata fetch outcomes. A timeout share near 100% means the
 		// fetch pool, not discovery, is what caps indexing throughput.
 		"fetch": map[string]any{
-			"fetched":   counters["fetched"],
-			"timed_out": counters["meta_timed_out"],
-			"failed":    counters["meta_failed"],
+			"fetched":           counters["fetched"],
+			"timed_out":         counters["meta_timed_out"],
+			"failed":            counters["meta_failed"],
+			"prescreen_dropped": counters["prescreen_dropped"],
 		},
 		"moderation": map[string]any{
 			"reviewed":      counters["llm_reviewed"],
@@ -448,6 +458,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			"pending":       pending,
 			"blocked":       blocked,
 		},
+	}
+	if s.opts.MetaStatus != nil {
+		resp["fetch"].(map[string]any)["queue_depth"] = s.opts.MetaStatus().QueueDepth
 	}
 	if s.crawler != nil {
 		resp["crawler"] = s.crawler()

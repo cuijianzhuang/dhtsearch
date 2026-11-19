@@ -138,9 +138,10 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		"dialect":        s.st.Dialect(),
 		"stats":          counters,
 		"fetch": map[string]any{
-			"fetched":   counters["fetched"],
-			"timed_out": counters["meta_timed_out"],
-			"failed":    counters["meta_failed"],
+			"fetched":           counters["fetched"],
+			"timed_out":         counters["meta_timed_out"],
+			"failed":            counters["meta_failed"],
+			"prescreen_dropped": counters["prescreen_dropped"],
 		},
 		"moderation": map[string]any{
 			"reviewed":      counters["llm_reviewed"],
@@ -150,6 +151,9 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 			"pending":       pending,
 			"blocked":       blocked,
 		},
+	}
+	if s.opts.MetaStatus != nil {
+		resp["fetch"].(map[string]any)["queue_depth"] = s.opts.MetaStatus().QueueDepth
 	}
 	if s.crawler != nil {
 		resp["crawler"] = s.crawler()

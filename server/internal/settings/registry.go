@@ -7,14 +7,14 @@ package settings
 // settings system (env support included, for symmetry).
 const (
 	// service (startup, read-only)
-	KeyHTTPAddr     = "HTTP_ADDR"
-	KeyDBPath       = "DB_PATH"
-	KeyDatabaseURL  = "DATABASE_URL"
-	KeyAdminToken   = "ADMIN_TOKEN"
-	KeyEnvFile      = "ENV_FILE"
+	KeyHTTPAddr    = "HTTP_ADDR"
+	KeyDBPath      = "DB_PATH"
+	KeyDatabaseURL = "DATABASE_URL"
+	KeyAdminToken  = "ADMIN_TOKEN"
+	KeyEnvFile     = "ENV_FILE"
 	// appearance
-	KeySiteName       = "SITE_NAME"
-	KeyThemeColor     = "THEME_COLOR"
+	KeySiteName        = "SITE_NAME"
+	KeyThemeColor      = "THEME_COLOR"
 	KeyThemeAppearance = "THEME_APPEARANCE"
 	// crawler
 	KeyCrawlEnabled  = "CRAWL_ENABLED"
@@ -22,24 +22,27 @@ const (
 	KeyDHTSamplers   = "DHT_SAMPLERS"
 	KeyFetchMetadata = "FETCH_METADATA"
 	// metadata
-	KeyMetaWorkers   = "META_WORKERS"
-	KeyMetaTimeout   = "META_TIMEOUT"
-	KeyMinTorrentSize = "MIN_TORRENT_SIZE"
+	KeyMetaWorkers          = "META_WORKERS"
+	KeyMetaTimeout          = "META_TIMEOUT"
+	KeyMetaPrescreenEnabled = "META_PRESCREEN_ENABLED"
+	KeyMetaPrescreenTimeout = "META_PRESCREEN_TIMEOUT"
+	KeyMetaPriorityEnabled  = "META_PRIORITY_ENABLED"
+	KeyMinTorrentSize       = "MIN_TORRENT_SIZE"
 	// scrape
 	KeyScrapeEnabled = "SCRAPE_ENABLED"
 	KeyTrackers      = "TRACKERS"
 	// moderation & filtering
-	KeyModerationEnabled   = "MODERATION_ENABLED"
-	KeyOpenAIAPIKey        = "OPENAI_API_KEY"
-	KeyOpenAIBaseURL       = "OPENAI_BASE_URL"
-	KeyOpenAIModel         = "OPENAI_MODEL"
-	KeyModerationInterval  = "MODERATION_INTERVAL"
-	KeyModerationTimeout   = "MODERATION_TIMEOUT"
-	KeyModerationBatchSize = "MODERATION_BATCH_SIZE"
+	KeyModerationEnabled    = "MODERATION_ENABLED"
+	KeyOpenAIAPIKey         = "OPENAI_API_KEY"
+	KeyOpenAIBaseURL        = "OPENAI_BASE_URL"
+	KeyOpenAIModel          = "OPENAI_MODEL"
+	KeyModerationInterval   = "MODERATION_INTERVAL"
+	KeyModerationTimeout    = "MODERATION_TIMEOUT"
+	KeyModerationBatchSize  = "MODERATION_BATCH_SIZE"
 	KeyModerationMaxBatches = "MODERATION_MAX_BATCHES"
-	KeyModerationDryRun    = "MODERATION_DRY_RUN"
+	KeyModerationDryRun     = "MODERATION_DRY_RUN"
 	KeyModerationTrimTitles = "MODERATION_TRIM_TITLES"
-	KeyFilterBlockWords    = "FILTER_BLOCK_WORDS"
+	KeyFilterBlockWords     = "FILTER_BLOCK_WORDS"
 	// trending
 	KeyTrendingEnabled  = "TRENDING_ENABLED"
 	KeyTrendingInterval = "TRENDING_INTERVAL"
@@ -52,10 +55,10 @@ const (
 	KeyFeedsWorkers     = "FEEDS_WORKERS"
 	KeyFeedsMetaTimeout = "FEEDS_META_TIMEOUT"
 	// rate limiting & search
-	KeyRateLimitRPS     = "RATE_LIMIT_RPS"
-	KeyRateLimitBurst   = "RATE_LIMIT_BURST"
+	KeyRateLimitRPS      = "RATE_LIMIT_RPS"
+	KeyRateLimitBurst    = "RATE_LIMIT_BURST"
 	KeySearchMaxInflight = "SEARCH_MAX_INFLIGHT"
-	KeySearchTimeout    = "SEARCH_TIMEOUT"
+	KeySearchTimeout     = "SEARCH_TIMEOUT"
 )
 
 // Groups in settings-page display order.
@@ -114,6 +117,12 @@ var Registry = []Item{
 		Min: f64(1), Max: f64(2048), Desc: "入库吞吐的主要旋钮；实测 128 最优，256 反而因争抢下降"},
 	{Key: KeyMetaTimeout, Group: "metadata", Label: "元数据超时", Type: TypeDuration, Default: "45s", Editable: true,
 		Min: f64(1), Max: f64(600), Desc: "单个种子等元数据的最长时长，保存后立即生效；实测缩短会让成功率塌陷，不要低于 20s"},
+	{Key: KeyMetaPrescreenEnabled, Group: "metadata", Label: "元数据早筛", Type: TypeBool, Default: "true", Editable: true,
+		Desc: "先在早筛窗口内等任意 peer 连上；一个都没连上的提前放弃，不再占满整个元数据超时。保存后立即生效"},
+	{Key: KeyMetaPrescreenTimeout, Group: "metadata", Label: "早筛窗口", Type: TypeDuration, Default: "10s", Editable: true,
+		Min: f64(1), Max: f64(300), Desc: "早筛窗口，包含在元数据超时之内（不是额外叠加）；窗口内连上 peer 的种子仍享有完整的元数据超时。保存后立即生效"},
+	{Key: KeyMetaPriorityEnabled, Group: "metadata", Label: "抓取优先级队列", Type: TypeBool, Default: "true", Editable: true, Restart: true,
+		Desc: "待抓 infohash 先进优先级队列（做种数 > 来源 > 新鲜度），worker 按优先级取；关 = 回到先进先出直连抓取"},
 	{Key: KeyMinTorrentSize, Group: "metadata", Label: "最小收录体积（字节）", Type: TypeInt64, Default: "104857600", Editable: true,
 		Min: f64(0), Max: f64(1 << 40), Desc: "小于该体积的种子不收录，保存后对新抓取立即生效"},
 

@@ -142,6 +142,9 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | `DHT_SAMPLERS` | `8` | BEP-51 并发采样 worker 数（调大反而降低入库速度，见上） |
 | `META_WORKERS` | `128` | 元数据并发 worker 数（入库速度的主要旋钮） |
 | `META_TIMEOUT` | `45s` | 单个元数据获取超时 |
+| `META_PRESCREEN_ENABLED` | `true` | 元数据早筛：窗口内无任何 peer 连上的 infohash 提前放弃，不占满 `META_TIMEOUT` |
+| `META_PRESCREEN_TIMEOUT` | `10s` | 早筛窗口（包含在 `META_TIMEOUT` 之内，不额外叠加） |
+| `META_PRIORITY_ENABLED` | `true` | 抓取优先级队列：做种数 > 来源 > 新鲜度（关 = 先进先出） |
 | `FETCH_METADATA` | `true` | 是否获取元数据（false 时只收 infohash） |
 | `SCRAPE_ENABLED` | `true` | 是否启用 tracker scrape 排序（见「Tracker 刮削排序」） |
 | `TRACKERS` | 内置列表 | 逗号分隔的 tracker announce URL，既作 scrape 目标也作获取的 peer 提示；完整默认列表见 `env.example` |

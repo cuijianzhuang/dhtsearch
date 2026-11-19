@@ -32,11 +32,11 @@ func fakeSeeders(s *Scraper, seeders map[string]int32) {
 	}
 }
 
-func recvOrFail(t *testing.T, ch <-chan string) string {
+func recvOrFail(t *testing.T, ch <-chan Item) string {
 	t.Helper()
 	select {
-	case h := <-ch:
-		return h
+	case it := <-ch:
+		return it.Hash
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for a prioritized hash")
 		return ""
@@ -120,8 +120,8 @@ func TestQueueEvictsLowestPriority(t *testing.T) {
 
 	// The batch lands in the queue atomically, so the cap keeps the top two.
 	var got []string
-	for h := range s.Out() {
-		got = append(got, h)
+	for it := range s.Out() {
+		got = append(got, it.Hash)
 	}
 	want := []string{h1, h2}
 	if fmt.Sprint(got) != fmt.Sprint(want) {

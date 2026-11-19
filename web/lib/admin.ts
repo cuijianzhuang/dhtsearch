@@ -129,7 +129,13 @@ export interface AdminOverview {
   blocked: number;
   dialect: string;
   stats: Record<string, number>;
-  fetch: { fetched: number; timed_out: number; failed: number };
+  fetch: {
+    fetched: number;
+    timed_out: number;
+    failed: number;
+    prescreen_dropped: number;
+    queue_depth?: number;
+  };
   moderation: {
     reviewed: number;
     adult_removed: number;

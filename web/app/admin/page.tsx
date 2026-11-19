@@ -60,6 +60,8 @@ export default async function AdminOverviewPage() {
           <Row label="体积过滤" value={s.size_filtered} />
           <Row label="元数据超时" value={o.fetch?.timed_out} />
           <Row label="元数据失败" value={o.fetch?.failed} />
+          <Row label="早筛丢弃" value={o.fetch?.prescreen_dropped} />
+          <Row label="抓取队列深度" value={o.fetch?.queue_depth} />
         </Section>
 
         <Section title="LLM 审核">
