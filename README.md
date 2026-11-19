@@ -293,6 +293,29 @@ DEPLOY_HOST=user@example.com ./deploy.sh
 
 > `deploy.sh` **不会上传 `.env`**（密钥不进部署管道）。服务器上的 API key 需自行放置一次：把 `.env` 放到 `DEPLOY_DIR`（systemd 的 `WorkingDirectory`），或用 systemd 的 `EnvironmentFile=` 指向一个 root-only 的文件。缺少 key 时服务照常运行，只是 LLM 审核不启动。
 
+### 一键部署（`scripts/install.sh`）
+
+单机新装推荐这条路径：从 GitHub Release 下载预编译包（Go 二进制 + Next.js standalone 产物），**目标机不需要 Go / npm 工具链**，只需 systemd 和一个 Node.js 运行时（>= 18，跑前端 standalone 服务）：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main/scripts/install.sh) install
+```
+
+子命令：`install` / `upgrade` / `status` / `uninstall`（无参在终端里运行给交互菜单）。常用选项：`--version vX.Y.Z` 指定版本（默认最新 Release）、`--file <tar.gz>` 用本地包安装、`--from-source` 无 Release 产物时从源码构建兜底（需要 git + Go + Node）、`uninstall --purge` 连配置和数据一起删（默认保留）。
+
+装完的布局：
+
+| 路径 | 内容 |
+| --- | --- |
+| `dhtsearch.service` / `dhtsearch-web.service` | API+爬虫 / 前端两个 systemd 单元，`enable --now` |
+| `/usr/local/bin/dhtsearch-server`、`/opt/dhtsearch/web/` | 二进制与前端产物 |
+| `/etc/dhtsearch/dhtsearch.env` | 配置（端口、`DB_PATH` 默认 SQLite；Postgres 把 `DATABASE_URL` 那行取消注释填上即可），重复 install / upgrade 不覆盖 |
+| `/var/lib/dhtsearch/` | 数据库、`VERSION`、upgrade 的备份（`backups/`，健康检查失败自动回滚） |
+
+API 默认只听 `127.0.0.1:8080`、前端听 `127.0.0.1:3000`，公网访问请在前面加反向代理。日志：`journalctl -u dhtsearch -f`（前端 `-u dhtsearch-web`）；健康检查：`curl http://127.0.0.1:8080/api/healthz`（install/upgrade 会等它最多 120 秒，失败打印日志尾巴）。
+
+Release 产物由 `.github/workflows/release.yml` 在打 `v*` tag 时构建（也可手动 `workflow_dispatch`）：`dhtsearch-<version>-linux-<amd64|arm64>.tar.gz` + 对应 `.sha256`，install 时先验 sha256 再安装。本地等价打包用 `./scripts/package-release.sh --version vX.Y.Z --arch amd64`。**在打第一个 tag 之前 Release 里没有现成产物**，这段时间请用 `--from-source` 安装。
+
 ### 每小时备份到 Cloudflare R2
 
 `scripts/backup-r2.sh` 每小时把数据库快照上传到 R2（S3 兼容 API，走 rclone），
