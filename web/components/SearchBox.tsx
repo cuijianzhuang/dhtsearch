@@ -34,14 +34,14 @@ export default function SearchBox({ initialQuery = "", large = false }: SearchBo
           // min-w-0 lets the input shrink past its intrinsic size; without it
           // the row overflows narrow viewports and pushes the submit button
           // off-screen.
-          className={`min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-100 placeholder-zinc-500 outline-none focus:border-emerald-500 ${
-            large ? "px-5 py-3.5 text-lg" : "px-4 py-2 text-sm"
+          className={`min-w-0 flex-1 rounded-lg border border-input bg-surface text-ink placeholder-faint outline-none focus:border-accent focus:ring-4 focus:ring-accent/15 ${
+            large ? "h-12 px-4 text-lg" : "h-11 px-4 text-sm"
           }`}
         />
         <button
           type="submit"
-          className={`shrink-0 rounded-lg bg-emerald-600 font-medium text-white transition-colors hover:bg-emerald-500 ${
-            large ? "px-6 py-3.5 text-lg" : "px-4 py-2 text-sm"
+          className={`inline-flex shrink-0 items-center justify-center rounded-lg bg-accent font-medium text-on-accent transition-colors hover:bg-accent-hover ${
+            large ? "h-12 px-6 text-lg" : "h-11 px-4 text-sm"
           }`}
         >
           搜索

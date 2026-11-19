@@ -21,10 +21,10 @@ export default function CopyMagnetButton({ magnet }: { magnet: string }) {
       onClick={copy}
       title={label}
       aria-label={label}
-      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-md border text-xs font-medium transition-colors sm:h-auto sm:w-auto sm:px-3 sm:py-1.5 ${
+      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border text-xs font-medium transition-colors sm:h-11 sm:w-auto sm:px-3 ${
         copied
-          ? "border-emerald-600 bg-emerald-600/20 text-emerald-400"
-          : "border-zinc-700 bg-zinc-800 text-zinc-300 hover:border-emerald-600 hover:text-emerald-400"
+          ? "border-accent bg-accent-soft text-accent-ink"
+          : "border-input bg-soft text-ink-2 hover:border-accent hover:text-accent-ink"
       }`}
     >
       <span aria-hidden className="sm:hidden">

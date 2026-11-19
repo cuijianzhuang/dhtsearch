@@ -64,15 +64,15 @@ export default function ResultList({ results }: { results: SearchResult[] }) {
         // scrolls, but settles into the flow at the end of the list, so it can
         // never cover the last card, the pagination, or the footer.
         <div className="sticky bottom-4 z-10 mt-3">
-          <div className="flex w-full items-center justify-between gap-2 rounded-lg border border-zinc-700 bg-zinc-900/95 px-3 py-2.5 shadow-lg shadow-black/40 backdrop-blur sm:px-4 sm:py-3">
-            <span className="shrink-0 text-sm text-zinc-300">
-              已选 <span className="font-medium text-emerald-400">{selected.size}</span> 条
+          <div className="flex w-full items-center justify-between gap-2 rounded-xl border border-input bg-surface/95 px-4 py-3 shadow-bar backdrop-blur">
+            <span className="shrink-0 text-sm text-ink-2">
+              已选 <span className="font-medium text-accent-ink">{selected.size}</span> 条
             </span>
             <div className="flex items-center gap-2">
               {/* Phones get shorter labels and taller (easier-to-tap) buttons. */}
               <button
                 onClick={toggleAll}
-                className="rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-300 transition-colors hover:border-emerald-600 hover:text-emerald-400 sm:py-1.5"
+                className="inline-flex min-h-11 items-center rounded-lg border border-input bg-soft px-3 text-xs font-medium text-ink-2 transition-colors hover:border-accent hover:text-accent-ink"
               >
                 <span className="sm:hidden">{allSelected ? "取消" : "全选"}</span>
                 <span className="hidden sm:inline">
@@ -81,10 +81,10 @@ export default function ResultList({ results }: { results: SearchResult[] }) {
               </button>
               <button
                 onClick={copySelected}
-                className={`rounded-md border px-3 py-2 text-xs font-medium transition-colors sm:py-1.5 ${
+                className={`inline-flex min-h-11 items-center rounded-lg border px-3 text-xs font-medium transition-colors ${
                   copied
-                    ? "border-emerald-600 bg-emerald-600/20 text-emerald-400"
-                    : "border-emerald-700 bg-emerald-600/10 text-emerald-400 hover:bg-emerald-600/20"
+                    ? "border-accent bg-accent-soft text-accent-ink"
+                    : "border-accent bg-accent-soft text-accent-ink hover:bg-accent-soft"
                 }`}
               >
                 {copied ? (
@@ -100,7 +100,7 @@ export default function ResultList({ results }: { results: SearchResult[] }) {
                 onClick={clearSelection}
                 title="取消选择"
                 aria-label="取消选择"
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-zinc-700 bg-zinc-800 text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200 sm:h-7 sm:w-7"
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-input bg-soft text-mute transition-colors hover:border-faint hover:text-ink"
               >
                 <svg
                   viewBox="0 0 24 24"

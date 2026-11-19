@@ -36,24 +36,24 @@ export default function ResultCard({
 
   return (
     <div
-      className={`rounded-lg border bg-zinc-900/60 p-4 transition-colors ${
+      className={`rounded-xl border bg-surface/60 p-4 shadow-card transition-colors ${
         selected
-          ? "border-emerald-700/70 bg-emerald-950/20"
-          : "border-zinc-800 hover:border-zinc-700"
+          ? "border-accent bg-accent-soft"
+          : "border-line hover:border-input"
       }`}
     >
       <div className="flex items-start justify-between gap-3">
         {/* Native checkbox for free keyboard/screen-reader semantics. The
             label's padding (undone by negative margins so layout is unchanged)
-            grows the tap target to ~36px for touch; -mt-1 + p-2 nets out to
+            grows the tap target to 44px for touch; -mt-2 + p-3 nets out to
             the mt-1 that aligns the box with the title's first line. */}
-        <label className="-m-2 -mt-1 shrink-0 cursor-pointer p-2">
+        <label className="-m-3 -mt-2 shrink-0 cursor-pointer p-3">
           <input
             type="checkbox"
             checked={selected}
             onChange={onToggleSelect}
             aria-label={`选择 ${result.name || "(未命名)"}`}
-            className="block h-5 w-5 cursor-pointer accent-emerald-500 sm:h-4 sm:w-4"
+            className="block h-5 w-5 cursor-pointer accent-accent"
           />
         </label>
         <button
@@ -66,7 +66,7 @@ export default function ResultCard({
               drop the clamp entirely once the card is open. Phone lines hold
               far fewer characters, so they get a third line to compensate. */}
           <h3
-            className={`text-sm font-medium wrap-anywhere text-emerald-400 hover:text-emerald-300 sm:text-base ${
+            className={`text-sm font-medium wrap-anywhere text-accent-ink hover:text-accent-ink sm:text-base ${
               expanded ? "" : "line-clamp-3 sm:line-clamp-2"
             }`}
           >
@@ -76,14 +76,14 @@ export default function ResultCard({
               name — usually the Chinese name a romaji release was found by. */}
           {result.alias && result.alias !== result.name && (
             <p
-              className={`mt-0.5 text-xs wrap-anywhere text-zinc-500 ${
+              className={`mt-1 text-xs wrap-anywhere text-mute ${
                 expanded ? "" : "line-clamp-1"
               }`}
             >
               {result.alias}
             </p>
           )}
-          <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-zinc-400">
+          <p className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-mute">
             <span>{formatSize(result.total_size)}</span>
             <span>{formatCount(totalFiles)} 个文件</span>
             <span>收录于 {formatRelativeTime(result.created_at)}</span>
@@ -93,18 +93,18 @@ export default function ResultCard({
       </div>
 
       {expanded && (
-        <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+        <div className="mt-3 rounded-lg border border-line bg-canvas/60 p-3">
           {files.length > 0 ? (
             <>
               {root && (
                 <p
-                  className="mb-2 line-clamp-2 border-b border-zinc-800/80 pb-2 font-mono text-[11px] wrap-anywhere text-zinc-500"
+                  className="mb-2 line-clamp-2 border-b border-line-2 pb-2 font-mono text-[11px] wrap-anywhere text-mute"
                   title={root}
                 >
                   📁 {root}
                 </p>
               )}
-              <ul className="space-y-1.5 text-xs text-zinc-400">
+              <ul className="space-y-2 text-xs text-mute">
                 {shownFiles.map((f, i) => {
                   const rest = f.path.slice(root.length);
                   const cut = rest.lastIndexOf("/");
@@ -117,32 +117,32 @@ export default function ResultCard({
                             file name is what tells two rows apart, so it wraps
                             in full on its own line. */}
                         {dir && (
-                          <span className="block truncate text-zinc-600">
+                          <span className="block truncate text-faint">
                             {shortenDir(dir)}
                           </span>
                         )}
-                        <span className="block wrap-anywhere text-zinc-300">
+                        <span className="block wrap-anywhere text-ink-2">
                           {name}
                         </span>
                       </span>
-                      <span className="shrink-0 tabular-nums text-zinc-500">
+                      <span className="shrink-0 tabular-nums text-mute">
                         {formatSize(f.size)}
                       </span>
                     </li>
                   );
                 })}
                 {hiddenFiles > 0 && (
-                  <li className="pt-1 text-zinc-500">
+                  <li className="pt-2 text-mute">
                     … 其余 {formatCount(hiddenFiles)} 个文件未显示
                   </li>
                 )}
               </ul>
             </>
           ) : (
-            <p className="text-xs text-zinc-500">暂无文件列表信息</p>
+            <p className="text-xs text-mute">暂无文件列表信息</p>
           )}
           <p
-            className="mt-3 line-clamp-2 border-t border-zinc-800/80 pt-2 font-mono text-[11px] leading-relaxed break-all text-zinc-600"
+            className="mt-3 line-clamp-2 border-t border-line-2 pt-2 font-mono text-[11px] leading-relaxed break-all text-faint"
             title={result.magnet}
           >
             {result.magnet}

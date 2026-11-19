@@ -42,17 +42,20 @@ export default async function SearchPage({ searchParams }: PageProps) {
       <header className="flex items-center gap-4">
         <Link
           href="/"
-          className="shrink-0 text-xl font-bold tracking-tight hover:text-emerald-400"
+          className="inline-flex min-h-11 shrink-0 items-center text-xl font-bold tracking-tight hover:text-accent-ink"
         >
-          DHT<span className="text-emerald-500">Search</span>
+          DHT<span className="text-accent-ink">Search</span>
         </Link>
-        <div className="flex-1">
+        {/* min-w-0 lets this flex child shrink below the input's intrinsic
+            width; without it the row overflows narrow viewports and pushes
+            the submit button off-screen. */}
+        <div className="min-w-0 flex-1">
           <SearchBox initialQuery={q} />
         </div>
         <DigitalOceanBadge className="hidden shrink-0 sm:inline-block" />
       </header>
 
-      <div className="mt-4 rounded-md border border-emerald-900/50 bg-emerald-950/30 px-3 py-2 text-xs text-emerald-300/80">
+      <div className="mt-4 rounded-lg border border-accent-line bg-accent-soft px-4 py-3 text-xs text-accent-ink">
         🛡️ 本站结果已自动过滤成人内容与垃圾信息，请放心使用。
       </div>
 
@@ -60,10 +63,10 @@ export default async function SearchPage({ searchParams }: PageProps) {
         <BackendError q={q} detail={error} />
       ) : data && data.results && data.results.length > 0 ? (
         <>
-          <p className="mt-4 text-sm text-zinc-400">
+          <p className="mt-4 text-sm text-mute">
             {q ? (
               <>
-                「<span className="text-zinc-200">{q}</span>」共找到{" "}
+                「<span className="text-ink">{q}</span>」共找到{" "}
                 {formatCount(data.total)} 条结果
               </>
             ) : (
@@ -75,8 +78,8 @@ export default async function SearchPage({ searchParams }: PageProps) {
         </>
       ) : (
         <div className="mt-16 text-center">
-          <p className="text-lg text-zinc-300">没有找到相关结果</p>
-          <p className="mt-2 text-sm text-zinc-500">
+          <p className="text-lg text-ink-2">没有找到相关结果</p>
+          <p className="mt-2 text-sm text-mute">
             {q
               ? "换个关键词试试，或者稍后再来——爬虫正在持续收录新资源。"
               : "索引暂时为空，爬虫正在收录中，请稍后再来。"}
@@ -84,7 +87,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
         </div>
       )}
 
-      <footer className="mt-auto pt-10 text-center text-xs text-zinc-600">
+      <footer className="mt-auto pt-10 text-center text-xs text-faint">
         DHTSearch · 干净、无广告的磁力搜索
       </footer>
     </main>
@@ -94,16 +97,16 @@ export default async function SearchPage({ searchParams }: PageProps) {
 function BackendError({ q, detail }: { q: string; detail: string }) {
   return (
     <div className="mt-16 text-center">
-      <p className="text-lg text-zinc-300">无法连接到搜索服务</p>
-      <p className="mt-2 text-sm text-zinc-500">
+      <p className="text-lg text-ink-2">无法连接到搜索服务</p>
+      <p className="mt-2 text-sm text-mute">
         后端服务似乎未启动或暂时不可达，请确认 Go 后端已在运行
-        （默认 <code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-xs">http://localhost:8080</code>
-        ，可通过 <code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-xs">NEXT_PUBLIC_API_BASE</code> 修改）。
+        （默认 <code className="rounded-md bg-soft px-2 py-1 font-mono text-xs">http://localhost:8080</code>
+        ，可通过 <code className="rounded-md bg-soft px-2 py-1 font-mono text-xs">NEXT_PUBLIC_API_BASE</code> 修改）。
       </p>
-      <p className="mt-1 font-mono text-xs text-zinc-600">{detail}</p>
+      <p className="mt-1 font-mono text-xs text-faint">{detail}</p>
       <Link
         href={q ? `/search?q=${encodeURIComponent(q)}` : "/search"}
-        className="mt-6 inline-block rounded-md border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm text-zinc-300 hover:border-emerald-600 hover:text-emerald-400"
+        className="mt-6 inline-flex min-h-11 items-center rounded-lg border border-input bg-soft px-4 text-sm text-ink-2 hover:border-accent hover:text-accent-ink"
       >
         重试
       </Link>
