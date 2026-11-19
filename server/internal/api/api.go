@@ -1,4 +1,5 @@
-// Package api exposes the search HTTP API (JSON only, GET + CORS).
+// Package api exposes the search HTTP API (JSON + CORS) and, when an
+// admin token is configured, the token-guarded /api/admin/* console API.
 package api
 
 import (
@@ -58,6 +59,11 @@ type Options struct {
 	// Trending, when non-nil, backs /api/trending. Nil (feature disabled)
 	// makes the endpoint serve empty lists so the frontend degrades quietly.
 	Trending func() Trending
+	// AdminToken is the bearer token guarding /api/admin/*. Empty (the
+	// default) disables the admin API entirely: every admin route answers
+	// 503 and the startup log says so. The token comes from the
+	// environment only — never stored, never logged.
+	AdminToken string
 }
 
 // Trending is the payload for /api/trending: Douban's current hot movie and
@@ -107,6 +113,11 @@ type Server struct {
 	limiter   *ipLimiter    // nil when rate limiting is disabled
 	searchSem chan struct{} // admission gate for search queries
 
+	// loginLimiter throttles /api/admin/login attempts per client,
+	// independent of (and stricter than) the general API limiter: a
+	// guessed-token endpoint must not be brute-forceable at search speed.
+	loginLimiter *ipLimiter
+
 	// Cached /api/stats body and empty-query total, both refreshed at most
 	// once per StatsTTL. The mutexes double as single-flight: one request
 	// pays for the refresh while the rest wait for its result.
@@ -133,11 +144,12 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 		opts.StatsTTL = defaultStatsTTL
 	}
 	s := &Server{
-		st:        st,
-		crawler:   crawlerStatus,
-		logger:    logger,
-		opts:      opts,
-		searchSem: make(chan struct{}, opts.MaxInflight),
+		st:           st,
+		crawler:      crawlerStatus,
+		logger:       logger,
+		opts:         opts,
+		searchSem:    make(chan struct{}, opts.MaxInflight),
+		loginLimiter: newIPLimiter(adminLoginRate, adminLoginBurst),
 	}
 	if opts.RateRPS > 0 {
 		burst := opts.RateBurst
@@ -151,6 +163,7 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 	mux.HandleFunc("GET /api/stats", s.handleStats)
 	mux.HandleFunc("GET /api/trending", s.handleTrending)
 	mux.HandleFunc("GET /api/healthz", s.handleHealth)
+	s.registerAdminRoutes(mux)
 	s.mux = mux
 	return s
 }
@@ -161,8 +174,8 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
