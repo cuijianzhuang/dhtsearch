@@ -55,16 +55,29 @@ type Options struct {
 	StatsTTL time.Duration
 	// ScraperStatus, when non-nil, adds a "scraper" section to /api/stats.
 	ScraperStatus func() ScraperStatus
+	// MetaStatus, when non-nil, adds live metadata-pipeline fields
+	// (the fetch priority queue's depth) to the "fetch" section.
+	MetaStatus func() MetaStatus
 	// FeedsStatus, when non-nil, adds a "feeds" section to /api/stats.
 	FeedsStatus func() feeds.Stats
 	// Trending, when non-nil, backs /api/trending. Nil (feature disabled)
 	// makes the endpoint serve empty lists so the frontend degrades quietly.
 	Trending func() Trending
+	// TrendingStatus, when non-nil, adds refresh-health fields to
+	// the admin overview's trending section, so a fetcher stuck
+	// failing (e.g. Douban unreachable since a restart) is visible
+	// instead of silently serving stale or empty lists.
+	TrendingStatus func() TrendingStatus
 	// AdminToken is the bearer token guarding /api/admin/*. Empty (the
 	// default) disables the admin API entirely: every admin route answers
 	// 503 and the startup log says so. The token comes from the
 	// environment only — never stored, never logged.
 	AdminToken string
+	// Trackers, when non-nil, returns the announce URLs magnets are
+	// stamped with (the same list the pipeline uses as peer hints) and
+	// that search responses publish for the detail view. Nil means
+	// magnets carry no tr= parameters, as before.
+	Trackers func() []string
 	// Settings, when non-nil, is the live configuration registry: it
 	// backs /api/site and /api/admin/settings, and the DoS knobs above
 	// (RateRPS, RateBurst, MaxInflight, SearchTimeout) are re-read
@@ -84,6 +97,14 @@ type Trending struct {
 	UpdatedAt int64    `json:"updated_at"`
 }
 
+// TrendingStatus is the trending fetcher's refresh health, surfaced
+// in the admin overview.
+type TrendingStatus struct {
+	Failing     bool  `json:"failing"`      // latest refresh cycles are failing
+	FailStreak  int   `json:"fail_streak"`  // consecutive failed cycles
+	LastSuccess int64 `json:"last_success"` // unix time of last fully successful cycle, 0 if none this run
+}
+
 // CrawlerStatus describes the crawler for the stats endpoint. The sampler
 // fields are the ones to watch when discovery looks slow: Nodes is the pool
 // the samplers draw from, and Harvested/Sampled is the average yield per
@@ -96,6 +117,12 @@ type CrawlerStatus struct {
 	Sampled   int64 `json:"sampled"`
 	SampleErr int64 `json:"sample_errors"`
 	Harvested int64 `json:"harvested"`
+}
+
+// MetaStatus describes the metadata fetch pipeline's live state, as
+// opposed to the cumulative fetch counters in the stats table.
+type MetaStatus struct {
+	QueueDepth int `json:"queue_depth"`
 }
 
 // ScraperStatus describes the tracker-scrape prioritizer. Seeded/Scraped is
@@ -121,6 +148,10 @@ type Server struct {
 	limiter   *ipLimiter    // nil when rate limiting is disabled
 	searchSem chan struct{} // admission gate for search queries
 
+	// tokenLimiter holds the per-API-token quotas enforced by
+	// publicGate when PUBLIC_API_REQUIRE_TOKEN is on.
+	tokenLimiter *tokenLimiter
+
 	// Dynamic-limit state, guarded by dynMu. When Options.Settings is
 	// wired, syncSettings rebuilds limiter/searchSem/dynSearchTimeout
 	// from the registry whenever its version moves; reads go through
@@ -134,6 +165,30 @@ type Server struct {
 	// guessed-token endpoint must not be brute-forceable at search speed.
 	loginLimiter *ipLimiter
 
+	// Connection-test debounce for /api/admin/moderation/test: one
+	// probe in flight at a time plus a cooldown between probes, so
+	// the button cannot be turned into a paid-request generator.
+	modTestMu   sync.Mutex
+	modTestBusy bool
+	modTestLast time.Time
+	// reportLimiter throttles POST /api/report per client+torrent: a
+	// report is a write into the operator's queue, so one visitor must
+	// not be able to flood it with duplicates of the same complaint.
+	reportLimiter *ipLimiter
+	// Auth state (see auth.go): the outbound client for OAuth/OIDC
+	// calls, the discovered-provider cache, the memoized account
+	// count behind the admin-enabled check, and the GitHub endpoint
+	// overrides tests use to point at a mock provider.
+	authHTTP       *http.Client
+	oidcMu         sync.Mutex
+	oidcProviders  map[string]*oidcProvider
+	authMu         sync.Mutex
+	userCount      int
+	userCountAt    time.Time
+	userCountErr   error
+	githubTokenURL string
+	githubUserURL  string
+
 	// Cached /api/stats body and empty-query total, both refreshed at most
 	// once per StatsTTL. The mutexes double as single-flight: one request
 	// pays for the refresh while the rest wait for its result.
@@ -143,6 +198,13 @@ type Server struct {
 	countMu   sync.Mutex
 	countVal  int
 	countAt   time.Time
+
+	// Cached whole-table category counts for the no-keyword browse
+	// path: classifying the whole table per request would defeat the
+	// Latest fast path, so the counts ride the same TTL as the total.
+	catMu     sync.Mutex
+	catCounts map[string]int
+	catAt     time.Time
 }
 
 // New builds the HTTP handler. crawlerStatus may be nil.
@@ -160,12 +222,15 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 		opts.StatsTTL = defaultStatsTTL
 	}
 	s := &Server{
-		st:           st,
-		crawler:      crawlerStatus,
-		logger:       logger,
-		opts:         opts,
-		searchSem:    make(chan struct{}, opts.MaxInflight),
-		loginLimiter: newIPLimiter(adminLoginRate, adminLoginBurst),
+		st:            st,
+		crawler:       crawlerStatus,
+		logger:        logger,
+		opts:          opts,
+		searchSem:     make(chan struct{}, opts.MaxInflight),
+		loginLimiter:  newIPLimiter(adminLoginRate, adminLoginBurst),
+		tokenLimiter:  newTokenLimiter(),
+		reportLimiter: newIPLimiter(reportRate, reportBurst),
+		authHTTP:      &http.Client{Timeout: 15 * time.Second},
 	}
 	if opts.RateRPS > 0 {
 		burst := opts.RateBurst
@@ -186,6 +251,9 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 	mux.HandleFunc("GET /api/trending", s.handleTrending)
 	mux.HandleFunc("GET /api/healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/site", s.handleSite)
+	mux.HandleFunc("GET /api/torrents/{hash}/similar", s.handleSimilar)
+	mux.HandleFunc("GET /rss", s.handleRSS)
+	mux.HandleFunc("POST /api/report", s.handleReport)
 	s.registerAdminRoutes(mux)
 	s.mux = mux
 	return s
@@ -244,22 +312,38 @@ func (s *Server) searchTimeout() time.Duration {
 	return s.opts.SearchTimeout
 }
 
+// rateLimitExempt reports whether a path bypasses the public per-client
+// limiter: the health check (monitoring and the deploy script must never
+// be throttled behind a flood) and the admin API. Admin paths sit behind
+// the admin token — and the login endpoint has its own, stricter
+// limiter — so the public limiter buys nothing there; worse, it once let
+// an operator lock themselves out by saving an extreme RATE_LIMIT_*
+// value, because the settings write that would undo it was itself
+// rejected with 429 (and the value persists in the DB across restarts).
+func rateLimitExempt(path string) bool {
+	return path == "/api/healthz" || path == "/api/admin" ||
+		strings.HasPrefix(path, "/api/admin/")
+}
+
 // Handler returns the root handler with CORS/OPTIONS support and per-client
-// rate limiting. The health check is exempt so monitoring and the deploy
-// script never get throttled behind a flood.
+// rate limiting for the public API (see rateLimitExempt for the paths that
+// bypass it).
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		s.syncSettings()
-		if lim := s.rateLimiter(); lim != nil && r.URL.Path != "/api/healthz" && !lim.allow(clientKey(r)) {
+		if lim := s.rateLimiter(); lim != nil && !rateLimitExempt(r.URL.Path) && !lim.allow(clientKey(r)) {
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+		if isPublicAPIPath(r.URL.Path) && !s.publicGate(w, r) {
 			return
 		}
 		s.mux.ServeHTTP(w, r)
@@ -275,6 +359,61 @@ type resultItem struct {
 	Files     any    `json:"files"`
 	Magnet    string `json:"magnet"`
 	CreatedAt int64  `json:"created_at"`
+	Category  string `json:"category"`
+}
+
+func (s *Server) toResultItem(t store.Torrent, trackers []string) resultItem {
+	return resultItem{
+		InfoHash:  t.InfoHash,
+		Name:      t.Name,
+		Alias:     t.Alias,
+		TotalSize: t.TotalSize,
+		FileCount: t.FileCount,
+		Files:     t.Files,
+		Magnet:    magnetURI(t.InfoHash, t.Name, trackers),
+		CreatedAt: t.CreatedAt,
+		Category:  t.Category,
+	}
+}
+
+// trackers returns the announce URLs magnets are stamped with (nil
+// when the deployment configured none).
+func (s *Server) trackers() []string {
+	if s.opts.Trackers == nil {
+		return nil
+	}
+	return s.opts.Trackers()
+}
+
+// gate takes an admission slot for a search-class query (search, RSS,
+// similar), answering 503 itself when the wait exceeds admissionWait.
+// The returned release function must be called exactly once when it
+// reports true.
+func (s *Server) gate(w http.ResponseWriter, r *http.Request) (func(), bool) {
+	s.syncSettings()
+	sem := s.searchSemaphore()
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, true
+	case <-r.Context().Done():
+		return nil, false
+	case <-time.After(admissionWait):
+		w.Header().Set("Retry-After", "2")
+		writeError(w, http.StatusServiceUnavailable, "server busy")
+		return nil, false
+	}
+}
+
+// searchError answers a failed store query the way handleSearch always
+// has: a blown context is a 503 (client may retry), anything else 500.
+func (s *Server) searchError(w http.ResponseWriter, ctx context.Context, err error, what string) {
+	if ctx.Err() != nil {
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "search timed out")
+	} else {
+		writeError(w, http.StatusInternalServerError, "search failed")
+	}
+	s.logger.Printf("api: %s: %v", what, err)
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -293,72 +432,101 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if (page-1)*pageSize > maxOffset {
 		page = maxOffset/pageSize + 1
 	}
+	category := r.URL.Query().Get("category")
+	if category != "" && !store.ValidCategory(category) {
+		writeError(w, http.StatusBadRequest, "invalid category")
+		return
+	}
+	sortOrder := r.URL.Query().Get("sort")
+	switch sortOrder {
+	case "", store.SortRelevance:
+		sortOrder = store.SortRelevance
+	case store.SortNewest, store.SortSize:
+		// ok
+	default:
+		writeError(w, http.StatusBadRequest, "invalid sort")
+		return
+	}
 
 	// Admission gate: the store serializes queries on one connection, so
 	// when all slots are busy piling on more requests only grows the queue.
 	// Wait briefly for a slot, then shed load instead of stacking up.
-	s.syncSettings()
-	sem := s.searchSemaphore()
-	select {
-	case sem <- struct{}{}:
-		defer func() { <-sem }()
-	case <-r.Context().Done():
-		return
-	case <-time.After(admissionWait):
-		w.Header().Set("Retry-After", "2")
-		writeError(w, http.StatusServiceUnavailable, "server busy")
+	release, ok := s.gate(w, r)
+	if !ok {
 		return
 	}
+	defer release()
 
 	// The context bounds database time and dies with the client connection,
 	// so queries for hung-up clients stop consuming the SQLite handle.
 	ctx, cancel := context.WithTimeout(r.Context(), s.searchTimeout())
 	defer cancel()
 
+	trackers := s.trackers()
 	var (
-		items []store.Torrent
-		total int
-		err   error
+		items  []store.Torrent
+		total  int
+		counts map[string]int
+		err    error
 	)
-	if strings.TrimSpace(q) == "" {
-		// The landing page. Latest walks the created_at index instead of
-		// counting matches, and the total comes from the shared cache.
+	if strings.TrimSpace(q) == "" && category == "" && sortOrder != store.SortSize {
+		// The no-keyword browse path. Latest walks the created_at index
+		// instead of counting matches, the total comes from the shared
+		// cache, and the category counts ride their own TTL cache (they
+		// cost a full classification pass, see cachedCategoryCounts).
 		items, err = s.st.Latest(ctx, page, pageSize)
 		if err == nil {
 			total, err = s.cachedCount(ctx)
 		}
+		if err == nil {
+			counts, err = s.cachedCategoryCounts(ctx)
+		}
 	} else {
-		items, total, err = s.st.Search(ctx, q, page, pageSize)
+		items, total, counts, err = s.st.SearchEx(ctx, store.SearchParams{
+			Query:    q,
+			Category: category,
+			Sort:     sortOrder,
+			Page:     page,
+			PageSize: pageSize,
+		})
 	}
 	if err != nil {
-		if ctx.Err() != nil {
-			w.Header().Set("Retry-After", "5")
-			writeError(w, http.StatusServiceUnavailable, "search timed out")
-		} else {
-			writeError(w, http.StatusInternalServerError, "search failed")
-		}
-		s.logger.Printf("api: search: %v", err)
+		s.searchError(w, ctx, err, "search")
 		return
 	}
 	results := make([]resultItem, 0, len(items))
 	for _, t := range items {
-		results = append(results, resultItem{
-			InfoHash:  t.InfoHash,
-			Name:      t.Name,
-			Alias:     t.Alias,
-			TotalSize: t.TotalSize,
-			FileCount: t.FileCount,
-			Files:     t.Files,
-			Magnet:    magnetURI(t.InfoHash, t.Name),
-			CreatedAt: t.CreatedAt,
-		})
+		results = append(results, s.toResultItem(t, trackers))
+	}
+	if trackers == nil {
+		trackers = []string{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"total":     total,
-		"page":      page,
-		"page_size": pageSize,
-		"results":   results,
+		"total":      total,
+		"page":       page,
+		"page_size":  pageSize,
+		"results":    results,
+		"category":   category,
+		"sort":       sortOrder,
+		"categories": counts,
+		"trackers":   trackers,
 	})
+}
+
+// cachedCategoryCounts returns the whole-table per-category counts, at
+// most StatsTTL stale, single-flight like cachedCount.
+func (s *Server) cachedCategoryCounts(ctx context.Context) (map[string]int, error) {
+	s.catMu.Lock()
+	defer s.catMu.Unlock()
+	if s.catCounts != nil && time.Since(s.catAt) < s.opts.StatsTTL {
+		return s.catCounts, nil
+	}
+	_, _, counts, err := s.st.SearchEx(ctx, store.SearchParams{Page: 1, PageSize: 1})
+	if err != nil {
+		return nil, err
+	}
+	s.catCounts, s.catAt = counts, time.Now()
+	return counts, nil
 }
 
 // cachedCount returns the total torrent count, at most StatsTTL stale.
@@ -423,9 +591,10 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		// Metadata fetch outcomes. A timeout share near 100% means the
 		// fetch pool, not discovery, is what caps indexing throughput.
 		"fetch": map[string]any{
-			"fetched":   counters["fetched"],
-			"timed_out": counters["meta_timed_out"],
-			"failed":    counters["meta_failed"],
+			"fetched":           counters["fetched"],
+			"timed_out":         counters["meta_timed_out"],
+			"failed":            counters["meta_failed"],
+			"prescreen_dropped": counters["prescreen_dropped"],
 		},
 		"moderation": map[string]any{
 			"reviewed":      counters["llm_reviewed"],
@@ -435,6 +604,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			"pending":       pending,
 			"blocked":       blocked,
 		},
+	}
+	if s.opts.MetaStatus != nil {
+		resp["fetch"].(map[string]any)["queue_depth"] = s.opts.MetaStatus().QueueDepth
 	}
 	if s.crawler != nil {
 		resp["crawler"] = s.crawler()
@@ -477,8 +649,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func magnetURI(hash, name string) string {
-	return "magnet:?xt=urn:btih:" + hash + "&dn=" + url.QueryEscape(name)
+// magnetURI builds the magnet link for a torrent, stamping the
+// configured trackers as tr= parameters so clients find peers even
+// after the originating swarm's DHT presence fades.
+func magnetURI(hash, name string, trackers []string) string {
+	var b strings.Builder
+	b.WriteString("magnet:?xt=urn:btih:")
+	b.WriteString(hash)
+	b.WriteString("&dn=")
+	b.WriteString(url.QueryEscape(name))
+	for _, tr := range trackers {
+		b.WriteString("&tr=")
+		b.WriteString(url.QueryEscape(tr))
+	}
+	return b.String()
 }
 
 func atoiDefault(s string, def int) int {

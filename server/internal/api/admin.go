@@ -5,9 +5,10 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
-	"strings"
+	"strconv"
 	"time"
 
+	"dhtsearch/server/internal/settings"
 	"dhtsearch/server/internal/store"
 )
 
@@ -25,7 +26,20 @@ const (
 
 func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/login", s.handleAdminLogin)
+	mux.HandleFunc("POST /api/admin/auth/password", s.handleAdminPasswordLogin)
+	mux.HandleFunc("POST /api/admin/auth/github/exchange", s.handleGitHubExchange)
+	mux.HandleFunc("POST /api/admin/auth/oidc/exchange", s.handleOIDCExchange)
+	mux.HandleFunc("GET /api/admin/auth/config", s.handleAuthConfig)
+	mux.HandleFunc("GET /api/admin/me", s.handleAdminMe)
+	mux.HandleFunc("POST /api/admin/logout", s.handleAdminLogout)
+	mux.HandleFunc("POST /api/admin/me/password", s.handleAdminChangeMyPassword)
+	mux.HandleFunc("GET /api/admin/users", s.handleAdminUsersList)
+	mux.HandleFunc("POST /api/admin/users", s.handleAdminUsersCreate)
+	mux.HandleFunc("POST /api/admin/users/{id}", s.handleAdminUserUpdate)
+	mux.HandleFunc("POST /api/admin/users/{id}/password", s.handleAdminUserResetPassword)
+	mux.HandleFunc("DELETE /api/admin/users/{id}", s.handleAdminUserDelete)
 	mux.HandleFunc("GET /api/admin/overview", s.handleAdminOverview)
+	mux.HandleFunc("GET /api/admin/trends", s.handleAdminTrends)
 	mux.HandleFunc("GET /api/admin/torrents", s.handleAdminList)
 	mux.HandleFunc("POST /api/admin/torrents/batch", s.handleAdminBatch)
 	mux.HandleFunc("GET /api/admin/torrents/{hash}", s.handleAdminDetail)
@@ -36,34 +50,27 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/admin/blocked/{hash}", s.handleAdminUnblock)
 	mux.HandleFunc("GET /api/admin/settings", s.handleAdminSettingsGet)
 	mux.HandleFunc("PUT /api/admin/settings", s.handleAdminSettingsPut)
+	mux.HandleFunc("GET /api/admin/api-tokens", s.handleAdminAPITokenList)
+	mux.HandleFunc("POST /api/admin/api-tokens", s.handleAdminAPITokenCreate)
+	mux.HandleFunc("POST /api/admin/api-tokens/{id}/enable", s.handleAdminAPITokenEnable)
+	mux.HandleFunc("POST /api/admin/api-tokens/{id}/disable", s.handleAdminAPITokenDisable)
+	mux.HandleFunc("PUT /api/admin/api-tokens/{id}/rate", s.handleAdminAPITokenRate)
+	mux.HandleFunc("DELETE /api/admin/api-tokens/{id}", s.handleAdminAPITokenDelete)
+	mux.HandleFunc("GET /api/admin/moderation", s.handleAdminModeration)
+	mux.HandleFunc("POST /api/admin/moderation/test", s.handleAdminModerationTest)
+	mux.HandleFunc("GET /api/admin/reports", s.handleAdminReports)
+	mux.HandleFunc("POST /api/admin/reports/{id}/resolve", s.handleAdminReportResolve)
+	mux.HandleFunc("POST /api/admin/reports/{id}/dismiss", s.handleAdminReportDismiss)
+	mux.HandleFunc("POST /api/admin/reports/{id}/block", s.handleAdminReportBlock)
 }
 
-func (s *Server) adminEnabled() bool { return s.opts.AdminToken != "" }
-
-// requireAdmin gates a handler: 503 when the admin API is disabled, 401
-// when the bearer token is missing or wrong. Returns false when it has
-// already answered the request.
-func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
-	if !s.adminEnabled() {
-		writeError(w, http.StatusServiceUnavailable, "admin disabled")
-		return false
-	}
-	tok := ""
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		tok = strings.TrimPrefix(auth, "Bearer ")
-	}
-	if tok == "" || subtle.ConstantTimeCompare([]byte(tok), []byte(s.opts.AdminToken)) != 1 {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return false
-	}
-	return true
-}
-
-// handleAdminLogin verifies a token without exposing any data, so the
-// web UI can trade the operator's token for an httpOnly cookie only
-// after the backend has accepted it.
+// handleAdminLogin verifies the ADMIN_TOKEN recovery credential and
+// trades it for a server-side session, so the web UI's cookie holds
+// a revocable session token rather than the recovery token itself.
+// (adminEnabled / requireAdmin live in auth.go, where the principal
+// resolution for every credential kind is defined.)
 func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.adminEnabled() {
+	if s.opts.AdminToken == "" {
 		writeError(w, http.StatusServiceUnavailable, "admin disabled")
 		return
 	}
@@ -84,7 +91,25 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	ctx, cancel := s.adminCtx(r)
+	defer cancel()
+	token, err := s.mintSession(ctx, "", "token")
+	if err != nil {
+		// Session storage is down; the login itself is valid, so
+		// answer as before and let the web layer fall back to
+		// storing the recovery token (which requireAdmin accepts
+		// directly) rather than locking the operator out.
+		s.logger.Printf("api: mint token session: %v", err)
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return
+	}
+	writeJSON(w, http.StatusOK, loginResult{
+		OK:      true,
+		Session: token,
+		Principal: &principal{
+			Kind: "token", Username: "ADMIN_TOKEN", Role: roleAdmin, Method: "token",
+		},
+	})
 }
 
 func (s *Server) adminCtx(r *http.Request) (context.Context, context.CancelFunc) {
@@ -124,25 +149,33 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "overview failed")
 		return
 	}
+	reportsPending, err := s.st.PendingReportsCount(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "overview failed")
+		return
+	}
 	counters, err := s.st.Stats(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "overview failed")
 		return
 	}
 	resp := map[string]any{
-		"torrents":       total,
-		"today":          today,
-		"pending_review": pending,
-		"reviewed":       total - pending,
-		"blocked":        blocked,
-		"dialect":        s.st.Dialect(),
-		"stats":          counters,
+		"torrents":        total,
+		"today":           today,
+		"pending_review":  pending,
+		"reviewed":        total - pending,
+		"blocked":         blocked,
+		"reports_pending": reportsPending,
+		"dialect":         s.st.Dialect(),
+		"stats":           counters,
 		"fetch": map[string]any{
-			"fetched":   counters["fetched"],
-			"timed_out": counters["meta_timed_out"],
-			"failed":    counters["meta_failed"],
+			"fetched":           counters["fetched"],
+			"timed_out":         counters["meta_timed_out"],
+			"failed":            counters["meta_failed"],
+			"prescreen_dropped": counters["prescreen_dropped"],
 		},
 		"moderation": map[string]any{
+			"enabled":       s.moderationEnabled(),
 			"reviewed":      counters["llm_reviewed"],
 			"adult_removed": counters["llm_adult_removed"],
 			"spam_removed":  counters["llm_spam_removed"],
@@ -150,6 +183,25 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 			"pending":       pending,
 			"blocked":       blocked,
 		},
+	}
+	if s.opts.MetaStatus != nil {
+		resp["fetch"].(map[string]any)["queue_depth"] = s.opts.MetaStatus().QueueDepth
+	}
+	// Static-filter state: the category switches as currently
+	// configured (a category that is off no longer increments its
+	// counter, so the counts below freeze where they were turned off)
+	// next to the cumulative counters themselves.
+	if s.opts.Settings != nil {
+		mgr := s.opts.Settings
+		resp["filter"] = map[string]any{
+			"enabled":           mgr.Bool(settings.KeyFilterEnabled),
+			"adult_enabled":     mgr.Bool(settings.KeyFilterAdultEnabled),
+			"spam_enabled":      mgr.Bool(settings.KeyFilterSpamEnabled),
+			"too_small_enabled": mgr.Bool(settings.KeyFilterTooSmallEnabled),
+			"adult_filtered":    counters["adult_filtered"],
+			"spam_filtered":     counters["spam_filtered"],
+			"size_filtered":     counters["size_filtered"],
+		}
 	}
 	if s.crawler != nil {
 		resp["crawler"] = s.crawler()
@@ -162,15 +214,94 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.opts.Trending != nil {
 		t := s.opts.Trending()
-		resp["trending"] = map[string]any{
+		sec := map[string]any{
 			"movies":     len(t.Movies),
 			"tv":         len(t.TV),
 			"tv_jp":      len(t.TVJP),
 			"tv_kr":      len(t.TVKR),
 			"updated_at": t.UpdatedAt,
 		}
+		if s.opts.TrendingStatus != nil {
+			ts := s.opts.TrendingStatus()
+			sec["failing"] = ts.Failing
+			sec["fail_streak"] = ts.FailStreak
+			sec["last_success"] = ts.LastSuccess
+		}
+		resp["trending"] = sec
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// moderationEnabled reports whether the LLM moderation pass can
+// actually run: the same gate the moderator itself applies (feature
+// switch on AND an API key present), read from the live settings
+// registry. Without a registry (bare test wiring) the pass cannot be
+// configured, so it reports false; the console uses this to show a
+// "not enabled" state instead of a wall of zeros.
+func (s *Server) moderationEnabled() bool {
+	if s.opts.Settings == nil {
+		return false
+	}
+	return s.opts.Settings.Bool(settings.KeyModerationEnabled) &&
+		s.opts.Settings.Get(settings.KeyOpenAIAPIKey) != ""
+}
+
+type trendBucket struct {
+	Start int64 `json:"start"`
+	Count int64 `json:"count"`
+}
+
+// handleAdminTrends serves the ingest time series behind the console's
+// overview chart: torrent counts per hour over the last 24 hours
+// (range=24h, the default) or per day over the last 14 days
+// (range=14d). Windows align to the server's local hour / midnight so
+// the last bucket is always the current, still-filling period, and
+// empty buckets are materialised as zeros — the frontend draws the
+// series verbatim.
+func (s *Server) handleAdminTrends(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	now := time.Now()
+	loc := now.Location()
+	var start time.Time
+	var bucketSec int64
+	var buckets int
+	rng := r.URL.Query().Get("range")
+	switch rng {
+	case "", "24h":
+		rng = "24h"
+		bucketSec, buckets = 3600, 24
+		start = time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, loc).
+			Add(-time.Duration(buckets-1) * time.Hour)
+	case "14d":
+		bucketSec, buckets = 86400, 14
+		start = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).
+			AddDate(0, 0, -(buckets - 1))
+	default:
+		writeError(w, http.StatusBadRequest, "invalid range")
+		return
+	}
+	ctx, cancel := s.adminCtx(r)
+	defer cancel()
+	counts, err := s.st.CreatedBuckets(ctx, start.Unix(), bucketSec, buckets)
+	if err != nil {
+		s.logger.Printf("api: admin trends: %v", err)
+		writeError(w, http.StatusInternalServerError, "trends failed")
+		return
+	}
+	out := make([]trendBucket, buckets)
+	for i := range out {
+		out[i] = trendBucket{
+			Start: start.Add(time.Duration(i) * time.Duration(bucketSec) * time.Second).Unix(),
+			Count: counts[i],
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"range":          rng,
+		"bucket_seconds": bucketSec,
+		"buckets":        out,
+	})
 }
 
 type adminItem struct {
@@ -185,7 +316,7 @@ type adminItem struct {
 	Magnet     string `json:"magnet"`
 }
 
-func toAdminItem(t store.AdminTorrent) adminItem {
+func toAdminItem(t store.AdminTorrent, trackers []string) adminItem {
 	return adminItem{
 		InfoHash:   t.InfoHash,
 		Name:       t.Name,
@@ -195,7 +326,7 @@ func toAdminItem(t store.AdminTorrent) adminItem {
 		FileCount:  t.FileCount,
 		CreatedAt:  t.CreatedAt,
 		ReviewedAt: t.ReviewedAt,
-		Magnet:     magnetURI(t.InfoHash, t.Name),
+		Magnet:     magnetURI(t.InfoHash, t.Name, trackers),
 	}
 }
 
@@ -243,9 +374,10 @@ func (s *Server) handleAdminList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "list failed")
 		return
 	}
+	trackers := s.trackers()
 	out := make([]adminItem, 0, len(items))
 	for _, t := range items {
-		out = append(out, toAdminItem(t))
+		out = append(out, toAdminItem(t, trackers))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"total":     total,
@@ -281,7 +413,7 @@ func (s *Server) handleAdminDetail(w http.ResponseWriter, r *http.Request) {
 		"files":       t.Files,
 		"created_at":  t.CreatedAt,
 		"reviewed_at": t.ReviewedAt,
-		"magnet":      magnetURI(t.InfoHash, t.Name),
+		"magnet":      magnetURI(t.InfoHash, t.Name, s.trackers()),
 	})
 }
 
@@ -339,7 +471,7 @@ func (s *Server) handleAdminApprove(w http.ResponseWriter, r *http.Request) {
 	if t == nil {
 		return
 	}
-	if err := s.st.MarkReviewed([]string{t.InfoHash}, time.Now().Unix()); err != nil {
+	if _, err := s.st.MarkReviewed([]string{t.InfoHash}, time.Now().Unix()); err != nil {
 		writeError(w, http.StatusInternalServerError, "approve failed")
 		return
 	}
@@ -385,11 +517,12 @@ func (s *Server) handleAdminBatch(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	switch body.Action {
 	case "approve":
-		if err := s.st.MarkReviewed(body.Hashes, time.Now().Unix()); err != nil {
+		n, err := s.st.MarkReviewed(body.Hashes, time.Now().Unix())
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "approve failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "affected": len(body.Hashes)})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "affected": n})
 	case "block":
 		reason := body.Reason
 		if reason == "" {
@@ -439,6 +572,139 @@ func (s *Server) handleAdminBlockedList(w http.ResponseWriter, r *http.Request) 
 		"page_size": pageSize,
 		"results":   items,
 	})
+}
+
+// --- Visitor report queue ---
+
+// handleAdminReports lists the report queue. The status filter is
+// pending (the default worklist), resolved, dismissed or all.
+func (s *Server) handleAdminReports(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	status := store.ReportPending
+	switch r.URL.Query().Get("status") {
+	case "", "pending":
+		// default worklist
+	case "resolved":
+		status = store.ReportResolved
+	case "dismissed":
+		status = store.ReportDismissed
+	case "all":
+		status = store.ReportStatusAll
+	default:
+		writeError(w, http.StatusBadRequest, "invalid status")
+		return
+	}
+	page, pageSize := adminPage(r)
+	ctx, cancel := s.adminCtx(r)
+	defer cancel()
+	items, total, err := s.st.AdminListReports(ctx, status, page, pageSize)
+	if err != nil {
+		s.logger.Printf("api: admin reports: %v", err)
+		writeError(w, http.StatusInternalServerError, "list failed")
+		return
+	}
+	if items == nil {
+		items = []store.Report{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+		"results":   items,
+	})
+}
+
+// adminReport resolves the {id} path value to a stored report,
+// answering 400/404 itself when it does not parse or exist.
+func (s *Server) adminReport(w http.ResponseWriter, r *http.Request) *store.Report {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id < 1 {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return nil
+	}
+	ctx, cancel := s.adminCtx(r)
+	defer cancel()
+	rep, err := s.st.ReportByID(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "lookup failed")
+		return nil
+	}
+	if rep == nil {
+		writeError(w, http.StatusNotFound, "not found")
+		return nil
+	}
+	return rep
+}
+
+func (s *Server) setReportStatus(w http.ResponseWriter, r *http.Request, status int) {
+	rep := s.adminReport(w, r)
+	if rep == nil {
+		return
+	}
+	ctx, cancel := s.adminCtx(r)
+	defer cancel()
+	ok, err := s.st.AdminSetReportStatus(ctx, rep.ID, status)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "update failed")
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleAdminReportResolve(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	s.setReportStatus(w, r, store.ReportResolved)
+}
+
+func (s *Server) handleAdminReportDismiss(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	s.setReportStatus(w, r, store.ReportDismissed)
+}
+
+// handleAdminReportBlock is the queue's one-click takedown: block the
+// reported torrent through the same Block path the console uses (so
+// the crawler cannot re-add it) and mark the report resolved. When
+// the torrent is already gone the report is still resolved — there is
+// nothing left to take down.
+func (s *Server) handleAdminReportBlock(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	rep := s.adminReport(w, r)
+	if rep == nil {
+		return
+	}
+	ctx, cancel := s.adminCtx(r)
+	defer cancel()
+	var deleted int64
+	if t, err := s.st.AdminGet(ctx, rep.InfoHash); err != nil {
+		writeError(w, http.StatusInternalServerError, "block failed")
+		return
+	} else if t != nil {
+		n, err := s.st.Block([]string{t.InfoHash}, []string{t.RawName},
+			"report:"+rep.Reason, time.Now().Unix())
+		if err != nil {
+			s.logger.Printf("api: admin report block: %v", err)
+			writeError(w, http.StatusInternalServerError, "block failed")
+			return
+		}
+		deleted = n
+	}
+	if _, err := s.st.AdminSetReportStatus(ctx, rep.ID, store.ReportResolved); err != nil {
+		writeError(w, http.StatusInternalServerError, "update failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
 }
 
 func (s *Server) handleAdminUnblock(w http.ResponseWriter, r *http.Request) {

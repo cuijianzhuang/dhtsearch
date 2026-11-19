@@ -59,13 +59,30 @@ export interface SearchResult {
   files?: TorrentFile[];
   magnet: string;
   created_at: number;
+  /** Category key computed by the backend from the main file's
+   *  extension: video/audio/image/doc/software/archive/other. */
+  category: string;
 }
+
+// Category/sort constants live in lib/search-ui.ts (client-safe) and
+// are re-exported here for server-side callers.
+export { CATEGORIES, SORTS, type SearchSort } from "./search-ui";
+import type { SearchSort } from "./search-ui";
 
 export interface SearchResponse {
   total: number;
   page: number;
   page_size: number;
   results: SearchResult[];
+  /** The category filter and sort the backend applied (echoed). */
+  category?: string;
+  sort?: string;
+  /** Per-category counts over the full keyword match set (before the
+   *  category filter) — the tab badges. */
+  categories?: Record<string, number>;
+  /** Announce URLs the magnets were stamped with; shown in the
+   *  detail view's tracker list. */
+  trackers?: string[];
 }
 
 export interface StatsResponse {
@@ -80,13 +97,17 @@ export interface StatsResponse {
 export async function fetchSearch(
   q: string,
   page: number,
-  pageSize = 20
+  pageSize = 20,
+  category = "",
+  sort: SearchSort = "relevance"
 ): Promise<SearchResponse> {
   const params = new URLSearchParams({
     q,
     page: String(page),
     page_size: String(pageSize),
   });
+  if (category) params.set("category", category);
+  if (sort !== "relevance") params.set("sort", sort);
   const res = await fetch(`${API_BASE}/api/search?${params.toString()}`, {
     cache: "no-store",
     headers: await clientIPHeaders(),
@@ -125,6 +146,28 @@ export async function fetchTrending(): Promise<TrendingResponse | null> {
     // Trending is decorative — degrade to no section.
     return null;
   }
+}
+
+export interface SimilarItem {
+  info_hash: string;
+  name: string;
+  total_size: number;
+  file_count: number;
+  magnet: string;
+  created_at: number;
+  category: string;
+}
+
+/** Similar torrents for the detail view; backs the /api/similar proxy
+ *  route (the browser asks this server, never the Go API directly). */
+export async function fetchSimilar(hash: string): Promise<SimilarItem[]> {
+  const res = await fetch(
+    `${API_BASE}/api/torrents/${encodeURIComponent(hash)}/similar`,
+    { cache: "no-store", headers: await clientIPHeaders() }
+  );
+  if (!res.ok) return [];
+  const data = (await res.json()) as { results?: SimilarItem[] };
+  return data.results ?? [];
 }
 
 export async function fetchStats(): Promise<StatsResponse | null> {

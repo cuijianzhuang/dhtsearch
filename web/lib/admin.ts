@@ -1,11 +1,14 @@
 // Admin console data layer (server-side only).
 //
-// Auth model: the operator's ADMIN_TOKEN lives in an httpOnly cookie
-// (set by /api/admin-session after the Go backend accepts the token at
-// /api/admin/login). Server Components read the cookie and call the Go
-// admin API with it as a Bearer header; browser JavaScript never sees
-// the token, so an XSS anywhere on the site cannot exfiltrate it —
-// unlike sessionStorage, which any script on the page can read.
+// Auth model: a successful login (recovery token, username+password,
+// GitHub OAuth or OIDC SSO) is traded at the Go backend for a
+// server-side session token, and only that session token lives in
+// the httpOnly cookie (set by /api/admin-session or the OAuth
+// callback routes). Server Components read the cookie and call the
+// Go admin API with it as a Bearer header; browser JavaScript never
+// sees any credential, so an XSS anywhere on the site cannot
+// exfiltrate one — unlike sessionStorage, which any script on the
+// page can read.
 
 import { cookies, headers } from "next/headers";
 import { API_BASE } from "./api";
@@ -38,7 +41,7 @@ export async function getAdminToken(): Promise<string | null> {
 // Forward the caller's identity like lib/api.ts does, so the backend's
 // per-client rate limiting (especially the strict login limiter) sees
 // the real visitor instead of the Next server.
-async function clientIPHeaders(): Promise<Record<string, string>> {
+export async function clientIPHeaders(): Promise<Record<string, string>> {
   try {
     const h = await headers();
     const out: Record<string, string> = {};
@@ -79,34 +82,132 @@ export async function adminFetch<T>(
 
 export type LoginVerdict = "ok" | "invalid" | "disabled" | "limited" | "unreachable";
 
-/** Ask the Go backend whether a token is the configured ADMIN_TOKEN. */
-export async function verifyAdminToken(token: string): Promise<LoginVerdict> {
+export interface AdminPrincipal {
+  kind: "token" | "user";
+  username: string;
+  role: "admin" | "reviewer";
+  method: string;
+  has_password?: boolean;
+}
+
+export interface LoginOutcome {
+  verdict: LoginVerdict;
+  /** Session token to store in the cookie; absent on failure (and on
+   *  a pre-session backend, where the caller falls back to the raw
+   *  credential — the backend accepts both). */
+  session?: string;
+  principal?: AdminPrincipal;
+}
+
+async function postLogin(path: string, payload: unknown): Promise<LoginOutcome> {
   let res: Response;
   try {
-    res = await fetch(`${API_BASE}/api/admin/login`, {
+    res = await fetch(`${API_BASE}${path}`, {
       method: "POST",
       cache: "no-store",
       headers: {
         "Content-Type": "application/json",
         ...(await clientIPHeaders()),
       },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify(payload),
     });
   } catch {
-    return "unreachable";
+    return { verdict: "unreachable" };
   }
   switch (res.status) {
-    case 200:
-      return "ok";
+    case 200: {
+      const data = (await res.json().catch(() => ({}))) as {
+        session?: string;
+        principal?: AdminPrincipal;
+      };
+      return { verdict: "ok", session: data.session, principal: data.principal };
+    }
     case 401:
-      return "invalid";
+      return { verdict: "invalid" };
     case 503:
-      return "disabled";
+      return { verdict: "disabled" };
     case 429:
-      return "limited";
+      return { verdict: "limited" };
     default:
-      return "unreachable";
+      return { verdict: "unreachable" };
   }
+}
+
+/** Trade the ADMIN_TOKEN recovery credential for a session. */
+export function loginWithToken(token: string): Promise<LoginOutcome> {
+  return postLogin("/api/admin/login", { token });
+}
+
+/** Trade a username + password pair for a session. */
+export function loginWithPassword(
+  username: string,
+  password: string
+): Promise<LoginOutcome> {
+  return postLogin("/api/admin/auth/password", { username, password });
+}
+
+// --- Auth configuration (public; drives the login page) ---
+
+export interface AuthConfig {
+  has_users: boolean;
+  token: boolean;
+  password: boolean;
+  github: { enabled: boolean; client_id: string };
+  oidc: { enabled: boolean; issuer: string; client_id: string; name: string };
+}
+
+const AUTH_CONFIG_FALLBACK: AuthConfig = {
+  has_users: false,
+  token: false,
+  password: false,
+  github: { enabled: false, client_id: "" },
+  oidc: { enabled: false, issuer: "", client_id: "", name: "SSO" },
+};
+
+/** Which login methods the backend offers. Public by design: client
+ *  IDs are not secrets, and the page must render before login. */
+export async function fetchAuthConfig(): Promise<AuthConfig> {
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/auth/config`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return AUTH_CONFIG_FALLBACK;
+    const data = (await res.json()) as Partial<AuthConfig>;
+    return {
+      ...AUTH_CONFIG_FALLBACK,
+      ...data,
+      github: { ...AUTH_CONFIG_FALLBACK.github, ...(data.github ?? {}) },
+      oidc: { ...AUTH_CONFIG_FALLBACK.oidc, ...(data.oidc ?? {}) },
+    };
+  } catch {
+    return AUTH_CONFIG_FALLBACK;
+  }
+}
+
+// --- Principal and accounts ---
+
+export interface AdminMe extends AdminPrincipal {
+  has_users: boolean;
+}
+
+export function fetchMe(token: string): Promise<AdminMe> {
+  return adminFetch<AdminMe>(token, "/api/admin/me");
+}
+
+export interface AdminUserItem {
+  id: string;
+  username: string;
+  role: "admin" | "reviewer";
+  source: "local" | "github" | "oidc";
+  disabled: boolean;
+  created_at: number;
+  last_login_at: number;
+}
+
+export function fetchAdminUsers(
+  token: string
+): Promise<{ users: AdminUserItem[]; total: number }> {
+  return adminFetch(token, "/api/admin/users");
 }
 
 // --- Response types (mirror server/internal/api/admin.go) ---
@@ -127,16 +228,35 @@ export interface AdminOverview {
   pending_review: number;
   reviewed: number;
   blocked: number;
+  /** Visitor reports awaiting handling (front-features). */
+  reports_pending?: number;
   dialect: string;
   stats: Record<string, number>;
-  fetch: { fetched: number; timed_out: number; failed: number };
+  fetch: {
+    fetched: number;
+    timed_out: number;
+    failed: number;
+    prescreen_dropped: number;
+    queue_depth?: number;
+  };
   moderation: {
+    /** Whether the LLM pass can run (switch on AND API key set). */
+    enabled: boolean;
     reviewed: number;
     adult_removed: number;
     spam_removed: number;
     errors: number;
     pending: number;
     blocked: number;
+  };
+  filter?: {
+    enabled: boolean;
+    adult_enabled: boolean;
+    spam_enabled: boolean;
+    too_small_enabled: boolean;
+    adult_filtered: number;
+    spam_filtered: number;
+    size_filtered: number;
   };
   crawler?: AdminCrawler;
   scraper?: {
@@ -154,6 +274,9 @@ export interface AdminOverview {
     tv_jp: number;
     tv_kr: number;
     updated_at: number;
+    failing?: boolean;
+    fail_streak?: number;
+    last_success?: number;
   };
 }
 
@@ -195,8 +318,54 @@ export interface BlockedListResponse {
   results: BlockedItem[];
 }
 
+export interface ReportItem {
+  id: number;
+  info_hash: string;
+  reason: "adult" | "spam" | "infringement" | "other" | string;
+  note: string;
+  reporter_ip: string;
+  status: number; // 0 pending, 1 resolved, 2 dismissed
+  created_at: number;
+  /** Current display name of the reported torrent; "" if deleted. */
+  name: string;
+}
+
+export interface ReportsListResponse {
+  total: number;
+  page: number;
+  page_size: number;
+  results: ReportItem[];
+}
+
+export function fetchAdminReports(
+  token: string,
+  opts: { status?: string; page?: number; pageSize?: number }
+): Promise<ReportsListResponse> {
+  const params = new URLSearchParams({
+    status: opts.status ?? "pending",
+    page: String(opts.page ?? 1),
+    page_size: String(opts.pageSize ?? 20),
+  });
+  return adminFetch<ReportsListResponse>(token, `/api/admin/reports?${params}`);
+}
+
 export function fetchAdminOverview(token: string): Promise<AdminOverview> {
   return adminFetch<AdminOverview>(token, "/api/admin/overview");
+}
+
+export type AdminTrendsRange = "24h" | "14d";
+
+export interface AdminTrends {
+  range: AdminTrendsRange;
+  bucket_seconds: number;
+  buckets: { start: number; count: number }[];
+}
+
+export function fetchAdminTrends(
+  token: string,
+  range: AdminTrendsRange
+): Promise<AdminTrends> {
+  return adminFetch<AdminTrends>(token, `/api/admin/trends?range=${range}`);
 }
 
 export function fetchAdminTorrents(
@@ -278,4 +447,76 @@ export function fetchAdminSettings(
   token: string
 ): Promise<AdminSettingsResponse> {
   return adminFetch<AdminSettingsResponse>(token, "/api/admin/settings");
+}
+
+// --- Public API tokens (mirror server/internal/store/apitokens.go) ---
+
+/**
+ * One public-API credential as the console may see it. The plaintext
+ * and its hash are never in here — the plaintext comes back exactly
+ * once from the create call, and only `prefix` identifies the token
+ * afterwards.
+ */
+export interface APITokenItem {
+  id: number;
+  name: string;
+  prefix: string;
+  enabled: boolean;
+  /** Per-minute quota; 0 = unlimited. */
+  rate_per_min: number;
+  call_count: number;
+  /** Unix seconds; 0 = never used. */
+  last_used_at: number;
+  created_at: number;
+}
+
+export interface APITokenListResponse {
+  results: APITokenItem[];
+}
+
+export interface CreateAPITokenResponse {
+  /** The plaintext token — shown once, never retrievable again. */
+  token: string;
+  item: APITokenItem;
+}
+
+export function fetchAdminAPITokens(
+  token: string
+): Promise<APITokenListResponse> {
+  return adminFetch<APITokenListResponse>(token, "/api/admin/api-tokens");
+}
+
+// --- LLM moderation console (mirror server/internal/api/moderation.go) ---
+
+export interface ModerationRecentItem {
+  info_hash: string;
+  name: string;
+  /** Verdict: ok | adult | spam. */
+  label: string;
+  /** Outcome: kept | deleted | would_delete (dry-run). */
+  action: string;
+  created_at: number;
+}
+
+export interface AdminModeration {
+  enabled: boolean;
+  key_set: boolean;
+  model: string;
+  base_url: string;
+  dry_run: boolean;
+  pending: number;
+  stats: {
+    reviewed: number;
+    adult_removed: number;
+    spam_removed: number;
+    errors: number;
+    titles_trimmed: number;
+  };
+  recent: ModerationRecentItem[];
+}
+
+export function fetchAdminModeration(
+  token: string
+): Promise<AdminModeration> {
+  return adminFetch<AdminModeration>(token, "/api/admin/moderation");
 }

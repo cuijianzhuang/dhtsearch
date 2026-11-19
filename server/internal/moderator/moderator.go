@@ -304,10 +304,33 @@ func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate, cf
 	for i, c := range cands {
 		hashes[i] = c.InfoHash
 	}
-	if err := m.st.MarkReviewed(hashes, now); err != nil {
+	if _, err := m.st.MarkReviewed(hashes, now); err != nil {
 		return s, fmt.Errorf("mark reviewed: %w", err)
 	}
 	m.st.IncrStat("llm_reviewed", int64(len(cands)))
+
+	// Audit trail for the admin console's LLM page: one record per
+	// candidate with its verdict and what happened to it. A logging
+	// failure must not fail the sweep — the batch is already marked
+	// reviewed, and re-running it would re-pay the classification.
+	recs := make([]store.ModerationRecord, len(cands))
+	for i, c := range cands {
+		action := "kept"
+		if verdicts[i].label != labelOK {
+			if cfg.DryRun {
+				action = "would_delete"
+			} else {
+				action = "deleted"
+			}
+		}
+		recs[i] = store.ModerationRecord{
+			InfoHash: c.InfoHash, Name: c.Name,
+			Label: verdicts[i].label, Action: action,
+		}
+	}
+	if err := m.st.LogModeration(recs, now); err != nil {
+		cfg.Logger.Printf("moderator: log moderation records: %v", err)
+	}
 	return s, nil
 }
 
@@ -516,6 +539,79 @@ func (m *Moderator) post(ctx context.Context, body []byte, cfg Config) (string, 
 		return content, nil
 	}
 	return "", fmt.Errorf("chat completions: %d attempts failed: %w", attempts, lastErr)
+}
+
+// TestConnection probes the configured OpenAI-compatible endpoint
+// with a single minimal chat completion and reports the round-trip
+// latency. It backs the admin console's "test connection" button:
+// the answer to "do this base URL, key and model actually work"
+// without waiting for a sweep. Unlike post() it makes exactly one
+// attempt — the operator is watching, so fail fast and say why.
+func TestConnection(ctx context.Context, cfg Config) (time.Duration, error) {
+	if cfg.BaseURL == "" {
+		return 0, errors.New("base URL is empty")
+	}
+	if cfg.APIKey == "" {
+		return 0, errors.New("API key is empty")
+	}
+	if cfg.Model == "" {
+		return 0, errors.New("model is empty")
+	}
+	body, err := json.Marshal(chatRequest{
+		Model:       cfg.Model,
+		Temperature: 0,
+		Messages: []chatMessage{
+			{Role: "system", Content: "You are a connection test probe."},
+			{Role: "user", Content: "Reply with exactly: ok"},
+		},
+	})
+	if err != nil {
+		return 0, err
+	}
+	hc := cfg.HTTPClient
+	if hc == nil {
+		timeout := cfg.Timeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		hc = &http.Client{Timeout: timeout}
+	}
+	url := strings.TrimSuffix(cfg.BaseURL, "/") + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+
+	start := time.Now()
+	resp, err := hc.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	latency := time.Since(start)
+	if err != nil {
+		return 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("chat completions: http %d: %.200s", resp.StatusCode, payload)
+	}
+	var cr chatResponse
+	if err := json.Unmarshal(payload, &cr); err != nil {
+		return 0, fmt.Errorf("decode response: %w", err)
+	}
+	if cr.Error != nil {
+		return 0, fmt.Errorf("chat completions: provider error code=%.32s", cr.Error.Code)
+	}
+	if len(cr.Choices) == 0 {
+		return 0, errors.New("chat completions: no choices in response")
+	}
+	if strings.TrimSpace(cr.Choices[0].Message.Content) == "" {
+		return 0, errors.New("chat completions: empty content in response")
+	}
+	return latency, nil
 }
 
 // stripFences removes a ```json ... ``` wrapper if the model added one.

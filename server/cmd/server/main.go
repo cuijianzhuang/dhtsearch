@@ -198,6 +198,12 @@ func main() {
 	samplers := flag.Int("dht-samplers", envInt("DHT_SAMPLERS", 8), "concurrent BEP 51 sampling workers")
 	metaWorkers := flag.Int("meta-workers", envInt("META_WORKERS", 128), "metadata fetch worker count")
 	metaTimeout := flag.Duration("meta-timeout", envDuration("META_TIMEOUT", 45*time.Second), "metadata fetch timeout per torrent")
+	metaPrescreen := flag.Bool("meta-prescreen", envBool("META_PRESCREEN_ENABLED", true),
+		"prescreen fetches: abandon a hash early when no peer connects within the prescreen window")
+	metaPrescreenTimeout := flag.Duration("meta-prescreen-timeout", envDuration("META_PRESCREEN_TIMEOUT", 10*time.Second),
+		"prescreen window per fetch (inside the metadata timeout budget, not added to it)")
+	metaPriority := flag.Bool("meta-priority", envBool("META_PRIORITY_ENABLED", true),
+		"feed metadata workers from a priority queue (seeders > source > freshness) instead of a FIFO channel")
 	fetchMetadata := flag.Bool("fetch-metadata", envBool("FETCH_METADATA", true), "fetch torrent metadata (false: store bare infohashes)")
 	trackersCSV := flag.String("trackers", envDefault("TRACKERS", defaultTrackers),
 		"comma-separated tracker announce URLs, used both to rank discovered infohashes (BEP 15 scrape) and as peer hints on fetch magnets (empty = neither)")
@@ -302,6 +308,9 @@ func main() {
 	reg(settings.KeyFetchMetadata, strconv.FormatBool(*fetchMetadata))
 	reg(settings.KeyMetaWorkers, strconv.Itoa(*metaWorkers))
 	reg(settings.KeyMetaTimeout, metaTimeout.String())
+	reg(settings.KeyMetaPrescreenEnabled, strconv.FormatBool(*metaPrescreen))
+	reg(settings.KeyMetaPrescreenTimeout, metaPrescreenTimeout.String())
+	reg(settings.KeyMetaPriorityEnabled, strconv.FormatBool(*metaPriority))
 	reg(settings.KeyMinTorrentSize, strconv.FormatInt(*minSize, 10))
 	reg(settings.KeyScrapeEnabled, strconv.FormatBool(*scrapeEnabled))
 	reg(settings.KeyTrackers, *trackersCSV)
@@ -315,7 +324,16 @@ func main() {
 	reg(settings.KeyModerationMaxBatches, strconv.Itoa(*modMaxBatches))
 	reg(settings.KeyModerationDryRun, strconv.FormatBool(*modDryRun))
 	reg(settings.KeyModerationTrimTitles, strconv.FormatBool(*modTrim))
+	reg(settings.KeyFilterEnabled, strconv.FormatBool(envBool("FILTER_ENABLED", true)))
+	reg(settings.KeyFilterAdultEnabled, strconv.FormatBool(envBool("FILTER_ADULT_ENABLED", true)))
+	reg(settings.KeyFilterSpamEnabled, strconv.FormatBool(envBool("FILTER_SPAM_ENABLED", true)))
+	reg(settings.KeyFilterTooSmallEnabled, strconv.FormatBool(envBool("FILTER_TOO_SMALL_ENABLED", true)))
+	reg(settings.KeyFilterMaxNameLen, strconv.Itoa(envInt("FILTER_MAX_NAME_LEN", 300)))
+	reg(settings.KeyFilterStuffingMinRepeat, strconv.Itoa(envInt("FILTER_STUFFING_MIN_REPEAT", 4)))
+	reg(settings.KeyFilterNonAlnumMaxRatio, strconv.FormatFloat(envFloat("FILTER_NON_ALNUM_MAX_RATIO", 0.5), 'f', -1, 64))
+	reg(settings.KeyFilterRandomFileMaxRatio, strconv.FormatFloat(envFloat("FILTER_RANDOM_FILE_MAX_RATIO", 0.3), 'f', -1, 64))
 	reg(settings.KeyFilterBlockWords, envDefault("FILTER_BLOCK_WORDS", ""))
+	reg(settings.KeyFilterAllowWords, envDefault("FILTER_ALLOW_WORDS", ""))
 	reg(settings.KeyTrendingEnabled, strconv.FormatBool(*trendEnabled))
 	reg(settings.KeyTrendingInterval, trendInterval.String())
 	reg(settings.KeyTrendingLimit, strconv.Itoa(*trendLimit))
@@ -325,21 +343,44 @@ func main() {
 	reg(settings.KeyFeedsInterval, feedsInterval.String())
 	reg(settings.KeyFeedsWorkers, strconv.Itoa(*feedsWorkers))
 	reg(settings.KeyFeedsMetaTimeout, feedsTimeout.String())
+	reg(settings.KeyGitHubClientID, envDefault("GITHUB_CLIENT_ID", ""))
+	reg(settings.KeyGitHubClientSecret, os.Getenv("GITHUB_CLIENT_SECRET"))
+	reg(settings.KeyGitHubAllowedUsers, envDefault("GITHUB_ALLOWED_USERS", ""))
+	reg(settings.KeyOIDCIssuer, envDefault("OIDC_ISSUER", ""))
+	reg(settings.KeyOIDCClientID, envDefault("OIDC_CLIENT_ID", ""))
+	reg(settings.KeyOIDCClientSecret, os.Getenv("OIDC_CLIENT_SECRET"))
+	reg(settings.KeyOIDCProviderName, envDefault("OIDC_PROVIDER_NAME", "SSO"))
+	reg(settings.KeyOIDCAllowedEmails, envDefault("OIDC_ALLOWED_EMAILS", ""))
+	reg(settings.KeyOIDCAllowedDomain, envDefault("OIDC_ALLOWED_DOMAIN", ""))
 	reg(settings.KeyRateLimitRPS, strconv.FormatFloat(*rateRPS, 'f', -1, 64))
 	reg(settings.KeyRateLimitBurst, strconv.Itoa(*rateBurst))
 	reg(settings.KeySearchMaxInflight, strconv.Itoa(*searchInflight))
 	reg(settings.KeySearchTimeout, searchTimeout.String())
+	reg(settings.KeyPublicAPIEnabled, strconv.FormatBool(envBool("PUBLIC_API_ENABLED", true)))
+	reg(settings.KeyPublicAPIRequireToken, strconv.FormatBool(envBool("PUBLIC_API_REQUIRE_TOKEN", false)))
+	reg(settings.KeyPublicAPITokenRatePerMin, strconv.Itoa(envInt("PUBLIC_API_TOKEN_RATE_PER_MIN", 600)))
 
 	mgr, err := settings.New(base, fromEnv, st, logger)
 	if err != nil {
 		logger.Fatalf("settings: %v", err)
 	}
 
-	// The content filter keeps package-level state; push its two live
+	// The content filter keeps package-level state; push its live
 	// settings now and on every accepted settings update.
 	applyFilter := func() {
 		filter.SetMinTotalSize(mgr.Int64(settings.KeyMinTorrentSize))
 		filter.SetBlockWords(mgr.List(settings.KeyFilterBlockWords))
+		filter.SetAllowWords(mgr.List(settings.KeyFilterAllowWords))
+		filter.SetConfig(filter.Config{
+			Enabled:            mgr.Bool(settings.KeyFilterEnabled),
+			AdultEnabled:       mgr.Bool(settings.KeyFilterAdultEnabled),
+			SpamEnabled:        mgr.Bool(settings.KeyFilterSpamEnabled),
+			TooSmallEnabled:    mgr.Bool(settings.KeyFilterTooSmallEnabled),
+			MaxNameLen:         mgr.Int(settings.KeyFilterMaxNameLen),
+			StuffingMinRepeat:  mgr.Int(settings.KeyFilterStuffingMinRepeat),
+			NonAlnumMaxRatio:   mgr.Float(settings.KeyFilterNonAlnumMaxRatio),
+			RandomFileMaxRatio: mgr.Float(settings.KeyFilterRandomFileMaxRatio),
+		})
 	}
 	applyFilter()
 	mgr.SetOnChange(func([]string) { applyFilter() })
@@ -371,6 +412,7 @@ func main() {
 		Interval: *trendInterval,
 		Limit:    *trendLimit,
 		Logger:   logger,
+		Store:    st,
 		ConfigFunc: func() trending.Config {
 			return trending.Config{
 				Interval: mgr.Duration(settings.KeyTrendingInterval),
@@ -385,20 +427,30 @@ func main() {
 	var scr *scraper.Scraper
 	var feedSvc *feeds.Service
 	var feedFetch *metadata.Fetcher
+	var metaQueue *metadata.Queue
+	prescreenCfg := func(c *metadata.Config) {
+		c.PrescreenEnabled = mgr.Bool(settings.KeyMetaPrescreenEnabled)
+		c.PrescreenTimeout = mgr.Duration(settings.KeyMetaPrescreenTimeout)
+		c.PrescreenEnabledFunc = func() bool { return mgr.Bool(settings.KeyMetaPrescreenEnabled) }
+		c.PrescreenTimeoutFunc = func() time.Duration { return mgr.Duration(settings.KeyMetaPrescreenTimeout) }
+	}
 	if fetchMeta {
 		var err error
-		fetcher, err = metadata.NewFetcher(metadata.Config{
+		mainMetaCfg := metadata.Config{
 			Workers:     mgr.Int(settings.KeyMetaWorkers),
 			Timeout:     mgr.Duration(settings.KeyMetaTimeout),
 			TimeoutFunc: func() time.Duration { return mgr.Duration(settings.KeyMetaTimeout) },
 			Trackers:    trackerList,
 			Logger:      logger,
-		})
+		}
+		prescreenCfg(&mainMetaCfg)
+		fetcher, err = metadata.NewFetcher(mainMetaCfg)
 		if err != nil {
 			logger.Fatalf("metadata: %v", err)
 		}
 		defer fetcher.Close()
 		feed := cr.Infohashes()
+		var scraped <-chan scraper.Item
 		if mgr.Bool(settings.KeyScrapeEnabled) && len(trackerList) > 0 && feed != nil {
 			scr, err = scraper.New(scraper.Config{
 				Trackers: trackerList,
@@ -409,7 +461,7 @@ func main() {
 			} else {
 				defer scr.Close()
 				scr.Run(ctx, feed)
-				feed = scr.Out()
+				scraped = scr.Out()
 			}
 		}
 		// Feed hashes get their own small fetcher rather than a place in the
@@ -451,13 +503,15 @@ func main() {
 			}
 			fs.Run(ctx)
 		}(feedSvc)
-		feedFetcher, err := metadata.NewFetcher(metadata.Config{
+		feedMetaCfg := metadata.Config{
 			Workers:     mgr.Int(settings.KeyFeedsWorkers),
 			Timeout:     mgr.Duration(settings.KeyFeedsMetaTimeout),
 			TimeoutFunc: func() time.Duration { return mgr.Duration(settings.KeyFeedsMetaTimeout) },
 			Trackers:    trackerList,
 			Logger:      logger,
-		})
+		}
+		prescreenCfg(&feedMetaCfg)
+		feedFetcher, err := metadata.NewFetcher(feedMetaCfg)
 		if err != nil {
 			logger.Fatalf("feeds metadata: %v", err)
 		}
@@ -490,7 +544,44 @@ func main() {
 			}
 			st.IncrStat("fetched", 1)
 		}
-		fetcher.Run(ctx, feed, onRecord)
+		if mgr.Bool(settings.KeyMetaPriorityEnabled) {
+			// Workers pop from a priority queue (seeders > source >
+			// freshness). The scraper's seeder counts ride along on its
+			// items, so its ranking survives the hand-off; without the
+			// scraper the queue is the only prioritization the pipeline
+			// gets (previously a plain FIFO channel in that case).
+			metaQueue = metadata.NewQueue(0)
+			q := metaQueue
+			if scraped != nil {
+				go func() {
+					for it := range scraped {
+						q.Push(metadata.Item{Hash: it.Hash, Seeders: it.Seeders, Source: metadata.SourceScrape, At: time.Now()})
+					}
+				}()
+			} else {
+				go func() {
+					for h := range feed {
+						q.Push(metadata.Item{Hash: h, Seeders: -1, Source: metadata.SourceDHT, At: time.Now()})
+					}
+				}()
+			}
+			fetcher.RunQueue(ctx, q, onRecord)
+		} else if scraped != nil {
+			hashes := make(chan string)
+			go func() {
+				defer close(hashes)
+				for it := range scraped {
+					select {
+					case hashes <- it.Hash:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}()
+			fetcher.Run(ctx, hashes, onRecord)
+		} else {
+			fetcher.Run(ctx, feed, onRecord)
+		}
 		if feedFetcher != nil {
 			feedFetcher.Run(ctx, feedSvc.Out(), onRecord)
 			feedFetch = feedFetcher
@@ -543,7 +634,10 @@ func main() {
 	// Douban trending fetcher for the homepage quick-search chips.
 	// The enable gate is consulted per request: disabled means the
 	// endpoint serves empty lists even though the service keeps its
-	// last snapshot.
+	// last snapshot. Restore first: the persisted last good charts
+	// serve from the first request, even if Douban is unreachable
+	// right now.
+	trendSvc.Restore(ctx)
 	go trendSvc.Run(ctx)
 	trendFn := func() api.Trending {
 		t := api.Trending{Movies: []string{}, TV: []string{}, TVJP: []string{}, TVKR: []string{}}
@@ -575,6 +669,8 @@ func main() {
 					_, timedOut, failed := fetcher.Stats()
 					st.IncrStat("meta_timed_out", timedOut-prevTimedOut(&timedOut))
 					st.IncrStat("meta_failed", failed-prevFailed(&failed))
+					pd := fetcher.PrescreenDropped()
+					st.IncrStat("prescreen_dropped", pd-prevPrescreen(&pd))
 				}
 			}
 		}
@@ -602,10 +698,25 @@ func main() {
 			MaxInflight:   *searchInflight,
 			SearchTimeout: *searchTimeout,
 			ScraperStatus: scraperStatus(scr),
-			FeedsStatus:   feedsStatus(feedSvc, feedFetch),
-			Trending:      trendFn,
-			AdminToken:    *adminToken,
-			Settings:      mgr,
+			MetaStatus: func() api.MetaStatus {
+				if metaQueue == nil {
+					return api.MetaStatus{}
+				}
+				return api.MetaStatus{QueueDepth: metaQueue.Len()}
+			},
+			FeedsStatus: feedsStatus(feedSvc, feedFetch),
+			Trending:    trendFn,
+			TrendingStatus: func() api.TrendingStatus {
+				ts := trendSvc.Status()
+				out := api.TrendingStatus{Failing: ts.Failing, FailStreak: ts.FailStreak}
+				if !ts.LastSuccess.IsZero() {
+					out.LastSuccess = ts.LastSuccess.Unix()
+				}
+				return out
+			},
+			AdminToken: *adminToken,
+			Settings:   mgr,
+			Trackers:   func() []string { return mgr.List(settings.KeyTrackers) },
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -625,7 +736,15 @@ func main() {
 		dbDesc = st.Dialect()
 	}
 	if *adminToken == "" {
-		logger.Printf("admin: disabled (ADMIN_TOKEN not set; /api/admin/* answers 503, see env.example)")
+		// No recovery token, but the console can still be enabled by
+		// admin accounts or a configured federated login.
+		nUsers, _ := st.CountAdminUsers(context.Background())
+		oauth := mgr.Get(settings.KeyGitHubClientID) != "" || mgr.Get(settings.KeyOIDCIssuer) != ""
+		if nUsers > 0 || oauth {
+			logger.Printf("admin: enabled (account/OAuth login; ADMIN_TOKEN recovery credential not set)")
+		} else {
+			logger.Printf("admin: disabled (ADMIN_TOKEN not set; /api/admin/* answers 503, see env.example)")
+		}
 	} else {
 		logger.Printf("admin: enabled (console API at /api/admin/*, UI at the web app's /admin)")
 	}
@@ -638,9 +757,10 @@ func main() {
 }
 
 var (
-	lastSeen     int64
-	lastTimedOut int64
-	lastFailed   int64
+	lastSeen      int64
+	lastTimedOut  int64
+	lastFailed    int64
+	lastPrescreen int64
 )
 
 // prevSeen returns the previously reported seen count and records the new
@@ -661,6 +781,12 @@ func prevTimedOut(cur *int64) int64 {
 func prevFailed(cur *int64) int64 {
 	prev := lastFailed
 	lastFailed = *cur
+	return prev
+}
+
+func prevPrescreen(cur *int64) int64 {
+	prev := lastPrescreen
+	lastPrescreen = *cur
 	return prev
 }
 

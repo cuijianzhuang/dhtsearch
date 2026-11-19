@@ -58,6 +58,28 @@ func SetBlockWords(words []string) {
 	blockWords.Store(&m)
 }
 
+// allowWords holds the operator-defined exception phrases
+// (FILTER_ALLOW_WORDS via the settings system): each phrase is removed
+// from the name and file paths before the adult signals are matched,
+// the same treatment the built-in adultExceptions get, so a legitimate
+// title that happens to contain a keyword can be exempted without
+// touching the compiled-in lists. Allow words only ever neutralise
+// adult signals — never the structural spam rules and never the
+// operator's own block words.
+var allowWords atomic.Pointer[[]string]
+
+// SetAllowWords replaces the operator exception list; it applies to
+// the next Check call.
+func SetAllowWords(words []string) {
+	out := make([]string, 0, len(words))
+	for _, w := range words {
+		if w = strings.ToLower(strings.TrimSpace(w)); w != "" {
+			out = append(out, w)
+		}
+	}
+	allowWords.Store(&out)
+}
+
 const (
 	maxNameLen        = 300
 	maxTotalSize      = 20 << 40 // 20 TiB
@@ -68,6 +90,79 @@ const (
 	randomMaxRatio    = 0.3
 	randomMinFiles    = 5
 )
+
+// Config is the filter's live rule configuration: the category
+// switches and the spam thresholds, pushed from the settings system
+// (FILTER_* keys) by the same OnChange hook that feeds SetMinTotalSize
+// and SetBlockWords. Check reads the current Config on every call, so
+// a settings save applies to the very next fetched torrent.
+type Config struct {
+	// Enabled is the master switch: off means Check passes everything.
+	Enabled bool
+	// AdultEnabled gates the adult signals (keywords, domains,
+	// banners, JAV codes).
+	AdultEnabled bool
+	// SpamEnabled gates the structural spam rules and the operator
+	// block words.
+	SpamEnabled bool
+	// TooSmallEnabled gates the MinTotalSize floor.
+	TooSmallEnabled bool
+	// MaxNameLen is the longest acceptable torrent name, in runes.
+	MaxNameLen int
+	// StuffingMinRepeat is how often one word may repeat in the name
+	// before it counts as keyword stuffing.
+	StuffingMinRepeat int
+	// NonAlnumMaxRatio is the highest tolerated share of
+	// non-alphanumeric runes in the name.
+	NonAlnumMaxRatio float64
+	// RandomFileMaxRatio is the highest tolerated share of
+	// random-looking file names (only judged with enough files).
+	RandomFileMaxRatio float64
+}
+
+// DefaultConfig returns the historical behaviour: every category on,
+// thresholds at the values the package constants have always used.
+func DefaultConfig() Config {
+	return Config{
+		Enabled:            true,
+		AdultEnabled:       true,
+		SpamEnabled:        true,
+		TooSmallEnabled:    true,
+		MaxNameLen:         maxNameLen,
+		StuffingMinRepeat:  stuffingMinRepeat,
+		NonAlnumMaxRatio:   nonAlnumMaxRatio,
+		RandomFileMaxRatio: randomMaxRatio,
+	}
+}
+
+var liveConfig atomic.Pointer[Config]
+
+// SetConfig replaces the live rule configuration; it applies to the
+// next Check call. Non-positive thresholds fall back to the defaults
+// so a bad push cannot silently disable a rule by zeroing it.
+func SetConfig(c Config) {
+	d := DefaultConfig()
+	if c.MaxNameLen <= 0 {
+		c.MaxNameLen = d.MaxNameLen
+	}
+	if c.StuffingMinRepeat <= 0 {
+		c.StuffingMinRepeat = d.StuffingMinRepeat
+	}
+	if c.NonAlnumMaxRatio <= 0 {
+		c.NonAlnumMaxRatio = d.NonAlnumMaxRatio
+	}
+	if c.RandomFileMaxRatio <= 0 {
+		c.RandomFileMaxRatio = d.RandomFileMaxRatio
+	}
+	liveConfig.Store(&c)
+}
+
+func configNow() Config {
+	if c := liveConfig.Load(); c != nil {
+		return *c
+	}
+	return DefaultConfig()
+}
 
 var (
 	adultDomainRe = regexp.MustCompile(adultDomainPattern)
@@ -137,98 +232,115 @@ func isShortASCII(s string) bool {
 }
 
 // Check inspects a torrent's name, file list and total size and returns
-// whether it should be dropped as adult or spam content.
+// whether it should be dropped as adult or spam content. The live
+// Config decides which categories run at all: a category whose switch
+// is off never sets its flag (and so is never counted by the caller).
 func Check(name string, files []File, totalSize int64) Result {
 	var r Result
+	cfg := configNow()
+	if !cfg.Enabled {
+		return r
+	}
 	add := func(format string, args ...interface{}) {
 		r.Reasons = append(r.Reasons, fmt.Sprintf(format, args...))
 	}
 
 	lowerName := strings.ToLower(name)
 
-	// --- Adult signals ---
-	adultHit := false
-	checkAdult := func(what, text string) {
-		if text == "" {
-			return
+	if cfg.AdultEnabled {
+		// --- Adult signals ---
+		// Exception phrases — the built-in list plus the operator's
+		// FILTER_ALLOW_WORDS — are removed before matching, so a
+		// legitimate title containing a keyword is not flagged.
+		strip := adultExceptions
+		if aw := allowWords.Load(); aw != nil && len(*aw) > 0 {
+			strip = append(append(make([]string, 0, len(adultExceptions)+len(*aw)), adultExceptions...), *aw...)
 		}
-		for _, ex := range adultExceptions {
-			text = strings.ReplaceAll(text, strings.ToLower(ex), "")
+		adultHit := false
+		checkAdult := func(what, text string) {
+			if text == "" {
+				return
+			}
+			for _, ex := range strip {
+				text = strings.ReplaceAll(text, strings.ToLower(ex), "")
+			}
+			if kw := kwAll.find(text); kw != "" {
+				add("adult keyword %q in %s", kw, what)
+				adultHit = true
+				return
+			}
+			if m := adultDomainRe.FindString(text); m != "" {
+				add("adult site domain %q in %s", m, what)
+				adultHit = true
+			}
 		}
-		if kw := kwAll.find(text); kw != "" {
-			add("adult keyword %q in %s", kw, what)
+		checkAdult("name", lowerName)
+		// Adult-forum banners count only in the name: ad files carrying the same
+		// banners get bundled into legitimate uploads.
+		if kw := kwName.find(lowerName); kw != "" && !adultHit {
+			add("adult site banner %q in name", kw)
 			adultHit = true
-			return
 		}
-		if m := adultDomainRe.FindString(text); m != "" {
-			add("adult site domain %q in %s", m, what)
+		// A known JAV studio code is a strong signal on its own.
+		if m := javStudioRe.FindString(lowerName); m != "" && !adultHit {
+			add("jav studio code %q in name", m)
 			adultHit = true
 		}
-	}
-	checkAdult("name", lowerName)
-	// Adult-forum banners count only in the name: ad files carrying the same
-	// banners get bundled into legitimate uploads.
-	if kw := kwName.find(lowerName); kw != "" && !adultHit {
-		add("adult site banner %q in name", kw)
-		adultHit = true
-	}
-	// A known JAV studio code is a strong signal on its own.
-	if m := javStudioRe.FindString(lowerName); m != "" && !adultHit {
-		add("jav studio code %q in name", m)
-		adultHit = true
-	}
-	for _, f := range files {
-		checkAdult("file", strings.ToLower(f.Path))
-	}
-	// A generic release-code shape is a weak signal: only flag when another
-	// adult signal hit.
-	if javCodeRe.MatchString(name) && adultHit {
-		add("jav-style product code in name")
-	}
-	r.Adult = adultHit
-
-	// --- Spam signals ---
-	if strings.TrimSpace(name) == "" {
-		add("empty name")
-		r.Spam = true
-	} else if !hasLetterOrDigit(name) {
-		add("name contains no letters or digits")
-		r.Spam = true
-	}
-	if runeLen(name) > maxNameLen {
-		add("name too long: %d chars", runeLen(name))
-		r.Spam = true
-	}
-	if w, n := stuffedWord(name); n >= stuffingMinRepeat {
-		add("word %q repeated %d times (keyword stuffing)", w, n)
-		r.Spam = true
-	}
-	if ratio := nonAlnumRatio(name); ratio > nonAlnumMaxRatio {
-		add("non-alphanumeric ratio %.2f exceeds %.2f", ratio, nonAlnumMaxRatio)
-		r.Spam = true
-	}
-	if totalSize <= 0 {
-		add("zero or negative total size")
-		r.Spam = true
-	} else if totalSize > maxTotalSize {
-		add("total size %d exceeds 20 TiB", totalSize)
-		r.Spam = true
+		for _, f := range files {
+			checkAdult("file", strings.ToLower(f.Path))
+		}
+		// A generic release-code shape is a weak signal: only flag when another
+		// adult signal hit.
+		if javCodeRe.MatchString(name) && adultHit {
+			add("jav-style product code in name")
+		}
+		r.Adult = adultHit
 	}
 
-	// --- Operator block words ---
-	// The admin-defined list (FILTER_BLOCK_WORDS): a hit in the name or
-	// any file path drops the torrent as spam. Checked before the size
-	// floor so the reason names the actual cause.
-	if bw := blockWords.Load(); bw != nil {
-		if kw := bw.find(lowerName); kw != "" {
-			add("block word %q in name", kw)
+	if cfg.SpamEnabled {
+		// --- Spam signals ---
+		if strings.TrimSpace(name) == "" {
+			add("empty name")
 			r.Spam = true
-		} else {
-			for _, f := range files {
-				if kw := bw.find(strings.ToLower(f.Path)); kw != "" {
-					add("block word %q in file", kw)
-					r.Spam = true
-					break
+		} else if !hasLetterOrDigit(name) {
+			add("name contains no letters or digits")
+			r.Spam = true
+		}
+		if runeLen(name) > cfg.MaxNameLen {
+			add("name too long: %d chars", runeLen(name))
+			r.Spam = true
+		}
+		if w, n := stuffedWord(name); n >= cfg.StuffingMinRepeat {
+			add("word %q repeated %d times (keyword stuffing)", w, n)
+			r.Spam = true
+		}
+		if ratio := nonAlnumRatio(name); ratio > cfg.NonAlnumMaxRatio {
+			add("non-alphanumeric ratio %.2f exceeds %.2f", ratio, cfg.NonAlnumMaxRatio)
+			r.Spam = true
+		}
+		if totalSize <= 0 {
+			add("zero or negative total size")
+			r.Spam = true
+		} else if totalSize > maxTotalSize {
+			add("total size %d exceeds 20 TiB", totalSize)
+			r.Spam = true
+		}
+
+		// --- Operator block words ---
+		// The admin-defined list (FILTER_BLOCK_WORDS): a hit in the name or
+		// any file path drops the torrent as spam. Checked before the size
+		// floor so the reason names the actual cause.
+		if bw := blockWords.Load(); bw != nil {
+			if kw := bw.find(lowerName); kw != "" {
+				add("block word %q in name", kw)
+				r.Spam = true
+			} else {
+				for _, f := range files {
+					if kw := bw.find(strings.ToLower(f.Path)); kw != "" {
+						add("block word %q in file", kw)
+						r.Spam = true
+						break
+					}
 				}
 			}
 		}
@@ -237,24 +349,28 @@ func Check(name string, files []File, totalSize int64) Result {
 	// --- Size floor ---
 	// Distinct from spam: the torrent may be perfectly legitimate, just too
 	// small to be worth indexing.
-	if floor := MinTotalSize(); totalSize > 0 && totalSize < floor {
-		add("total size %d below minimum %d", totalSize, floor)
-		r.TooSmall = true
-	}
-	if len(files) > maxFileCount {
-		add("file count %d exceeds %d", len(files), maxFileCount)
-		r.Spam = true
-	}
-	if len(files) >= randomMinFiles {
-		n := 0
-		for _, f := range files {
-			if looksRandom(f.Path) {
-				n++
-			}
+	if cfg.TooSmallEnabled {
+		if floor := MinTotalSize(); totalSize > 0 && totalSize < floor {
+			add("total size %d below minimum %d", totalSize, floor)
+			r.TooSmall = true
 		}
-		if float64(n)/float64(len(files)) > randomMaxRatio {
-			add("%d/%d file names look like random strings", n, len(files))
+	}
+	if cfg.SpamEnabled {
+		if len(files) > maxFileCount {
+			add("file count %d exceeds %d", len(files), maxFileCount)
 			r.Spam = true
+		}
+		if len(files) >= randomMinFiles {
+			n := 0
+			for _, f := range files {
+				if looksRandom(f.Path) {
+					n++
+				}
+			}
+			if float64(n)/float64(len(files)) > cfg.RandomFileMaxRatio {
+				add("%d/%d file names look like random strings", n, len(files))
+				r.Spam = true
+			}
 		}
 	}
 

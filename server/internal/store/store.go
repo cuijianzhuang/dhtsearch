@@ -33,6 +33,9 @@ type Torrent struct {
 	// dmhy page title carrying the Chinese and Japanese names), where the
 	// torrent's own name is often romaji only. Searched alongside the name.
 	Alias string `json:"alias,omitempty"`
+	// Category is computed at read time from the file list (see
+	// CategoryOf); it is never stored.
+	Category string `json:"category,omitempty"`
 }
 
 // Candidate is the slim projection of a torrent handed to the moderation
@@ -322,6 +325,16 @@ func (s *Store) migrateFilesBlob() error {
 // Upsert inserts a torrent, ignoring duplicates (same info hash) and
 // infohashes previously rejected by moderation.
 func (s *Store) Upsert(t Torrent) error {
+	// Name, alias and file paths are raw DHT/feed bytes and may not be
+	// valid UTF-8; sanitize before they reach a TEXT column (Postgres
+	// rejects invalid UTF-8, SQLite does not). The file list itself is
+	// stored as a compressed blob, but its paths are sanitized too so
+	// both backends serve identical values.
+	t.Name = sanitizeUTF8(t.Name)
+	t.Alias = sanitizeUTF8(t.Alias)
+	for i := range t.Files {
+		t.Files[i].Path = sanitizeUTF8(t.Files[i].Path)
+	}
 	fj, err := json.Marshal(t.Files)
 	if err != nil {
 		return err
@@ -335,7 +348,7 @@ func (s *Store) Upsert(t Torrent) error {
 // reports whether the torrent exists; false means it still has to be
 // fetched (or was blocked — see IsBlocked).
 func (s *Store) SetAlias(infoHash, alias string) (bool, error) {
-	res, err := s.exec(`UPDATE torrents SET alias = ? WHERE info_hash = ?`, alias, infoHash)
+	res, err := s.exec(`UPDATE torrents SET alias = ? WHERE info_hash = ?`, sanitizeUTF8(alias), infoHash)
 	if err != nil {
 		return false, err
 	}
@@ -437,6 +450,7 @@ func scanTorrents(rows *sql.Rows) (items []Torrent, err error) {
 		if err := json.Unmarshal(fj, &t.Files); err != nil {
 			return nil, err
 		}
+		t.Category = CategoryOf(t.Files, t.Name)
 		items = append(items, t)
 	}
 	return items, rows.Err()
@@ -467,18 +481,24 @@ func (s *Store) Unreviewed(limit int) ([]Candidate, error) {
 }
 
 // MarkReviewed stamps hashes as classified so later sweeps skip them.
-func (s *Store) MarkReviewed(hashes []string, ts int64) error {
+// Returns the number of rows actually stamped; hashes that are not in
+// the table match nothing, so callers reporting an "affected" count
+// stay truthful (same convention as Block).
+func (s *Store) MarkReviewed(hashes []string, ts int64) (int64, error) {
 	if len(hashes) == 0 {
-		return nil
+		return 0, nil
 	}
 	args := make([]interface{}, 0, len(hashes)+1)
 	args = append(args, ts)
 	for _, h := range hashes {
 		args = append(args, h)
 	}
-	_, err := s.exec(
+	res, err := s.exec(
 		`UPDATE torrents SET reviewed_at = ? WHERE info_hash IN (`+placeholders(len(hashes))+`)`, args...)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // SetCleanNames records trimmed titles. clean is keyed by info hash and holds
@@ -502,7 +522,7 @@ func (s *Store) SetCleanNames(clean map[string]string) (int64, error) {
 
 	var n int64
 	for hash, name := range clean {
-		res, err := up.Exec(name, hash)
+		res, err := up.Exec(sanitizeUTF8(name), hash)
 		if err != nil {
 			return 0, err
 		}
@@ -536,8 +556,9 @@ func (s *Store) Block(hashes, names []string, reason string, ts int64) (int64, e
 		return 0, err
 	}
 	defer ins.Close()
+	reason = sanitizeUTF8(reason)
 	for i, h := range hashes {
-		if _, err := ins.Exec(h, reason, names[i], ts); err != nil {
+		if _, err := ins.Exec(h, reason, sanitizeUTF8(names[i]), ts); err != nil {
 			return 0, err
 		}
 	}

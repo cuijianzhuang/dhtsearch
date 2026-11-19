@@ -89,6 +89,24 @@ export const APPEARANCES: { key: Appearance; label: string }[] = [
  *  over the admin-set default appearance. */
 export const APPEARANCE_STORAGE_KEY = "dhtsearch-appearance";
 
+/** Cookie mirroring the visitor's appearance choice. The root layout
+ *  reads it server-side and renders data-appearance from it, so a
+ *  router.refresh() or soft navigation — which re-renders the layout
+ *  from the server — keeps the visitor's choice instead of snapping
+ *  back to the admin default. localStorage alone cannot do this: it
+ *  is invisible to the server, so every server render of <html>
+ *  carried the admin default and React re-applied it over the
+ *  boot script's value on refresh. Not httpOnly (the switcher writes
+ *  it from the client); it is a UI preference, not a credential. */
+export const APPEARANCE_COOKIE = "dhtsearch-appearance";
+
+/** Parse an untrusted appearance value: the three valid modes, or
+ *  null when absent/garbage (distinct from asAppearance, which maps
+ *  everything unknown onto the "system" default). */
+export function parseAppearance(v: string | undefined | null): Appearance | null {
+  return v === "light" || v === "dark" || v === "system" ? v : null;
+}
+
 export function asAppearance(v: string | undefined): Appearance {
   return v === "light" || v === "dark" ? v : "system";
 }

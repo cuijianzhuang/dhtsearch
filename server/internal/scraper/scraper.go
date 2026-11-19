@@ -70,9 +70,13 @@ type Stats struct {
 	Evicted    int64 // hashes evicted from a full queue
 }
 
-type item struct {
-	hash    string
-	seeders int32
+// Item is one scraped infohash on its way to the fetch pool. The
+// seeder count travels with the hash so a downstream priority queue
+// (metadata.Queue) can keep ranking by it after the hand-off instead
+// of flattening back to arrival order.
+type Item struct {
+	Hash    string
+	Seeders int32
 }
 
 // trackerConn owns the UDP client for one tracker, recreating it after a
@@ -90,12 +94,12 @@ type Scraper struct {
 	trackers []*trackerConn
 	logger   *log.Logger
 
-	out      chan string
+	out      chan Item
 	wake     chan struct{}
 	feedDone chan struct{} // closed once nothing can enqueue anymore
 
 	mu      sync.Mutex
-	pending []item // sorted by seeders descending; FIFO among equals
+	pending []Item // sorted by seeders descending; FIFO among equals
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -132,7 +136,7 @@ func New(cfg Config) (*Scraper, error) {
 	s := &Scraper{
 		cfg:           cfg,
 		logger:        logger,
-		out:           make(chan string),
+		out:           make(chan Item),
 		wake:          make(chan struct{}, 1),
 		feedDone:      make(chan struct{}),
 		scrapeTracker: realScrape,
@@ -190,8 +194,9 @@ func (s *Scraper) Run(ctx context.Context, in <-chan string) {
 	s.logger.Printf("scraper: ranking infohashes via %d trackers", len(s.trackers))
 }
 
-// Out returns the channel of prioritized hex infohashes.
-func (s *Scraper) Out() <-chan string { return s.out }
+// Out returns the channel of prioritized infohashes, each carrying
+// the best seeder count the scrape found for it.
+func (s *Scraper) Out() <-chan Item { return s.out }
 
 // Stats returns a snapshot of the counters.
 func (s *Scraper) Stats() Stats {
@@ -334,13 +339,13 @@ func (s *Scraper) scrapeBatch(ctx context.Context, hexes []string) {
 	}
 	wg.Wait()
 
-	items := make([]item, len(kept))
+	items := make([]Item, len(kept))
 	var seededN int64
 	for i, h := range kept {
 		if best[i] > 0 {
 			seededN++
 		}
-		items[i] = item{hash: h, seeders: best[i]}
+		items[i] = Item{Hash: h, Seeders: best[i]}
 	}
 	s.scraped.Add(int64(len(kept)))
 	s.seeded.Add(seededN)
@@ -351,15 +356,15 @@ func (s *Scraper) scrapeBatch(ctx context.Context, hexes []string) {
 // slice per batch is deliberate: batches arrive every second or two and the
 // queue is a few thousand entries, so a stable sort is both fast enough and
 // gives FIFO order among equal seeder counts for free.
-func (s *Scraper) enqueue(items []item) {
+func (s *Scraper) enqueue(items []Item) {
 	s.mu.Lock()
 	s.pending = append(s.pending, items...)
 	sort.SliceStable(s.pending, func(i, j int) bool {
-		return s.pending[i].seeders > s.pending[j].seeders
+		return s.pending[i].Seeders > s.pending[j].Seeders
 	})
 	if n := len(s.pending); n > s.cfg.QueueCap {
 		s.evicted.Add(int64(n - s.cfg.QueueCap))
-		s.pending = append([]item(nil), s.pending[:s.cfg.QueueCap]...)
+		s.pending = append([]Item(nil), s.pending[:s.cfg.QueueCap]...)
 	}
 	s.mu.Unlock()
 	select {
@@ -377,10 +382,10 @@ func (s *Scraper) pushLoop(ctx context.Context) {
 	defer close(s.out)
 	for {
 		s.mu.Lock()
-		var next string
+		var next Item
 		ok := len(s.pending) > 0
 		if ok {
-			next = s.pending[0].hash
+			next = s.pending[0]
 			s.pending = s.pending[1:]
 		}
 		s.mu.Unlock()

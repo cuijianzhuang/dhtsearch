@@ -5,7 +5,13 @@ import type { SearchResult } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import ResultCard from "./ResultCard";
 
-export default function ResultList({ results }: { results: SearchResult[] }) {
+export default function ResultList({
+  results,
+  trackers = [],
+}: {
+  results: SearchResult[];
+  trackers?: string[];
+}) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [copied, setCopied] = useState(false);
 
@@ -53,6 +59,7 @@ export default function ResultList({ results }: { results: SearchResult[] }) {
           <ResultCard
             key={r.info_hash}
             result={r}
+            trackers={trackers}
             selected={selected.has(r.info_hash)}
             onToggleSelect={() => toggle(r.info_hash)}
           />

@@ -40,6 +40,23 @@ type Config struct {
 	// overriding Timeout — the settings system uses it so META_TIMEOUT
 	// changes apply without rebuilding the fetcher.
 	TimeoutFunc func() time.Duration
+	// PrescreenEnabled turns on the early-abandon phase: a fetch first
+	// waits at most PrescreenTimeout for any peer connection to be
+	// established, and gives up then if none was — instead of holding
+	// the worker slot for the whole Timeout on a hash nobody serves.
+	// The prescreen window is part of the Timeout budget, not added to
+	// it: a torrent that connects keeps the full remaining budget, so
+	// the empirically calibrated 45s total is unchanged for live swarms.
+	PrescreenEnabled bool
+	// PrescreenTimeout bounds the prescreen phase. <= 0 selects
+	// DefaultPrescreenTimeout. A window >= the fetch timeout disables
+	// prescreening for that fetch (it could never fire in time).
+	PrescreenTimeout time.Duration
+	// PrescreenEnabledFunc / PrescreenTimeoutFunc, when non-nil,
+	// override the static fields per fetch — the settings system uses
+	// them so META_PRESCREEN_* changes apply live.
+	PrescreenEnabledFunc func() bool
+	PrescreenTimeoutFunc func() time.Duration
 	// MaxFiles caps how many file entries are kept per torrent.
 	MaxFiles int
 	// Trackers are announce URLs appended to every magnet. Tracker announces
@@ -62,11 +79,25 @@ type Fetcher struct {
 	cancel context.CancelFunc
 
 	// Stats
-	mu       sync.Mutex
-	fetched  int64
-	timedOut int64
-	failed   int64
+	mu               sync.Mutex
+	fetched          int64
+	timedOut         int64
+	failed           int64
+	prescreenDropped int64
 }
+
+// DefaultPrescreenTimeout is the prescreen window used when none is
+// configured. Ten seconds is deliberately conservative: tracker
+// announces (appended to every magnet) answer with peer lists in one
+// round trip, and a BitTorrent handshake completes in about a second
+// once an address is known, so a live swarm virtually always shows a
+// connection well inside the window. What the window mostly waits on
+// is the DHT get_peers walk for trackerless hashes — the slow tail the
+// 45s total timeout was calibrated on — so the drop rule additionally
+// requires that no peer ever connected during the whole window, and
+// the window is a settings knob (META_PRESCREEN_TIMEOUT) for operators
+// who measure a different tail.
+const DefaultPrescreenTimeout = 10 * time.Second
 
 // NewFetcher creates a fetcher with its own torrent client. The client uses
 // disabled storage and disallows payload transfers before adding each torrent.
@@ -79,6 +110,9 @@ func NewFetcher(cfg Config) (*Fetcher, error) {
 	}
 	if cfg.MaxFiles <= 0 {
 		cfg.MaxFiles = 50
+	}
+	if cfg.PrescreenTimeout <= 0 {
+		cfg.PrescreenTimeout = DefaultPrescreenTimeout
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -139,6 +173,29 @@ func (f *Fetcher) worker(ctx context.Context, in <-chan string, onRecord func(Re
 	}
 }
 
+// RunQueue is Run with a priority Queue as the input instead of a
+// channel: workers pop the highest-priority waiting item (see Queue
+// for the ordering). It returns when ctx ends; items left in the queue
+// are simply abandoned, exactly like an undrained channel at shutdown.
+func (f *Fetcher) RunQueue(ctx context.Context, q *Queue, onRecord func(Record)) {
+	ctx, f.cancel = context.WithCancel(ctx)
+	for i := 0; i < f.cfg.Workers; i++ {
+		f.wg.Add(1)
+		go func() {
+			defer f.wg.Done()
+			for {
+				it, ok := q.Pop(ctx)
+				if !ok {
+					return
+				}
+				if rec, ok := f.fetch(ctx, it.Hash); ok {
+					onRecord(rec)
+				}
+			}
+		}()
+	}
+}
+
 // fetch adds the magnet, waits for GotInfo with a timeout and always drops
 // the torrent afterwards.
 func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
@@ -172,12 +229,15 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 			timeout = d
 		}
 	}
-	select {
-	case <-t.GotInfo():
-	case <-time.After(timeout):
+	switch waitForInfo(ctx, torrentInfoSource{t}, timeout, f.prescreenWindow(timeout)) {
+	case waitGotInfo:
+	case waitPrescreened:
+		f.count(&f.prescreenDropped)
+		return rec, false
+	case waitTimedOut:
 		f.count(&f.timedOut)
 		return rec, false
-	case <-ctx.Done():
+	case waitAborted:
 		return rec, false
 	}
 
@@ -201,6 +261,133 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 	}
 	f.count(&f.fetched)
 	return rec, true
+}
+
+// prescreenWindow resolves the prescreen phase length for one fetch
+// with the given total timeout: 0 when prescreening is off, when the
+// window would cover the whole budget (it could never fire in time),
+// or when the settings funcs say so.
+func (f *Fetcher) prescreenWindow(timeout time.Duration) time.Duration {
+	enabled := f.cfg.PrescreenEnabled
+	if f.cfg.PrescreenEnabledFunc != nil {
+		enabled = f.cfg.PrescreenEnabledFunc()
+	}
+	if !enabled {
+		return 0
+	}
+	d := f.cfg.PrescreenTimeout
+	if f.cfg.PrescreenTimeoutFunc != nil {
+		if v := f.cfg.PrescreenTimeoutFunc(); v > 0 {
+			d = v
+		}
+	}
+	if d <= 0 {
+		d = DefaultPrescreenTimeout
+	}
+	if d >= timeout {
+		return 0
+	}
+	return d
+}
+
+// waitOutcome is how a metadata wait ended.
+type waitOutcome int
+
+const (
+	waitGotInfo waitOutcome = iota
+	waitTimedOut
+	// waitPrescreened: the prescreen window closed without a single
+	// peer connection ever being established — the hash is abandoned
+	// early instead of riding out the full timeout.
+	waitPrescreened
+	waitAborted // ctx ended
+)
+
+// infoSource abstracts the two things the fetch wait needs from a
+// torrent, so the prescreen logic is testable without a live client.
+type infoSource interface {
+	GotInfo() <-chan struct{}
+	// ActivePeers is the number of established peer connections.
+	ActivePeers() int
+}
+
+type torrentInfoSource struct{ t *torrent.Torrent }
+
+func (s torrentInfoSource) GotInfo() <-chan struct{} { return s.t.GotInfo() }
+func (s torrentInfoSource) ActivePeers() int         { return s.t.Stats().ActivePeers }
+
+// prescreenPollInterval is how often the prescreen phase checks for a
+// peer connection. Polling Stats takes the client read lock briefly;
+// at 100ms across the worker pool that is noise next to the network
+// waits it replaces.
+const prescreenPollInterval = 100 * time.Millisecond
+
+// waitForInfo waits for a torrent's info with an optional prescreen
+// phase. The prescreen window is part of the total timeout budget: a
+// torrent whose peer connects during the window keeps whatever budget
+// remains, so the total wait for live swarms is exactly timeout — the
+// prescreen only shortens the wait for hashes nobody connects to.
+func waitForInfo(ctx context.Context, src infoSource, timeout, prescreen time.Duration) waitOutcome {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	if prescreen <= 0 || prescreen >= timeout {
+		select {
+		case <-src.GotInfo():
+			return waitGotInfo
+		case <-deadline.C:
+			return waitTimedOut
+		case <-ctx.Done():
+			return waitAborted
+		}
+	}
+
+	// Phase 1: prescreen. Info may still arrive here (a fast swarm
+	// skips the phase entirely); the phase passes the moment any peer
+	// connection is established.
+	pre := time.NewTimer(prescreen)
+	defer pre.Stop()
+	poll := time.NewTicker(prescreenPollInterval)
+	defer poll.Stop()
+	connected := false
+phase1:
+	for !connected {
+		select {
+		case <-src.GotInfo():
+			return waitGotInfo
+		case <-deadline.C:
+			return waitTimedOut
+		case <-ctx.Done():
+			return waitAborted
+		case <-pre.C:
+			break phase1
+		case <-poll.C:
+			connected = src.ActivePeers() > 0
+		}
+	}
+	if !connected {
+		// Boundary re-check: a peer that connected in the same instant
+		// the window closed counts as connected.
+		select {
+		case <-src.GotInfo():
+			return waitGotInfo
+		default:
+		}
+		connected = src.ActivePeers() > 0
+	}
+	if !connected {
+		return waitPrescreened
+	}
+
+	// Phase 2: at least one peer is connected; wait out the rest of
+	// the budget for it (or another peer) to deliver the metadata.
+	select {
+	case <-src.GotInfo():
+		return waitGotInfo
+	case <-deadline.C:
+		return waitTimedOut
+	case <-ctx.Done():
+		return waitAborted
+	}
 }
 
 // validInfohash reports whether s is a 40-character hex infohash that is not
@@ -235,6 +422,15 @@ func (f *Fetcher) Stats() (fetched, timedOut, failed int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.fetched, f.timedOut, f.failed
+}
+
+// PrescreenDropped returns how many fetches the prescreen phase
+// abandoned early (no peer connection within the prescreen window).
+// Kept separate from Stats so existing callers keep their shape.
+func (f *Fetcher) PrescreenDropped() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.prescreenDropped
 }
 
 // Close stops the workers and the torrent client.

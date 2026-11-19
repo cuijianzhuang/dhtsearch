@@ -236,3 +236,49 @@ func TestEnumAndListValidation(t *testing.T) {
 		t.Fatal("keyword URL without placeholder accepted")
 	}
 }
+func TestRateLimitFloors(t *testing.T) {
+	m := newManager(t, nil, nil, &fakeStorage{})
+	// Zero is a sentinel on both knobs (limiter off / burst auto) and
+	// must stay valid; positive values below the floor are the ones
+	// that starved the admin UI in the field (0.01 rps, burst 1).
+	for _, tc := range []struct {
+		key, val string
+		ok       bool
+	}{
+		{KeyRateLimitRPS, "0", true},
+		{KeyRateLimitRPS, "0.01", false},
+		{KeyRateLimitRPS, "0.09", false},
+		{KeyRateLimitRPS, "0.1", true},
+		{KeyRateLimitRPS, "3", true},
+		{KeyRateLimitBurst, "0", true},
+		{KeyRateLimitBurst, "1", false},
+		{KeyRateLimitBurst, "9", false},
+		{KeyRateLimitBurst, "10", true},
+		{KeyRateLimitBurst, "30", true},
+	} {
+		_, _, err := m.Update(map[string]*string{tc.key: strptr(tc.val)})
+		if tc.ok && err != nil {
+			t.Errorf("%s=%s: rejected: %v", tc.key, tc.val, err)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("%s=%s: accepted, want floor rejection", tc.key, tc.val)
+		}
+	}
+}
+
+// A rate-limit override stored before the floors existed (e.g. the
+// 0.01/1 pair from the lockout report) must be ignored on load, not
+// resurrected: the manager falls back to the base layer.
+func TestRateLimitFloorHealsStoredOverride(t *testing.T) {
+	st := &fakeStorage{data: map[string]string{
+		KeyRateLimitRPS:   "0.01",
+		KeyRateLimitBurst: "1",
+	}}
+	m := newManager(t, nil, nil, st)
+	if got := m.Float(KeyRateLimitRPS); got != 3 {
+		t.Fatalf("RPS = %v, want default 3 (poisoned override ignored)", got)
+	}
+	if got := m.Int(KeyRateLimitBurst); got != 30 {
+		t.Fatalf("burst = %d, want default 30 (poisoned override ignored)", got)
+	}
+}

@@ -91,8 +91,13 @@ func TestUnreviewedMarkReviewedAndBlock(t *testing.T) {
 	if err != nil || n != 1 {
 		t.Fatalf("block: n=%d err=%v", n, err)
 	}
-	if err := s.MarkReviewed([]string{"aa", "bb"}, 500); err != nil {
-		t.Fatal(err)
+	// "bb" was deleted by the block above, so only "aa" can be stamped:
+	// the returned count must be the rows actually updated, not len(hashes).
+	if n, err := s.MarkReviewed([]string{"aa", "bb"}, 500); err != nil || n != 1 {
+		t.Fatalf("mark reviewed: n=%d err=%v, want 1", n, err)
+	}
+	if n, err := s.MarkReviewed([]string{"zz"}, 500); err != nil || n != 0 {
+		t.Fatalf("mark reviewed (missing): n=%d err=%v, want 0", n, err)
 	}
 
 	if cands, err = s.Unreviewed(10); err != nil || len(cands) != 0 {
