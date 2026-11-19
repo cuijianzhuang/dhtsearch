@@ -11,7 +11,10 @@ import (
 // the installer's database switch). The schemas are isomorphic by
 // design — info_hash stays hex TEXT, timestamps stay Unix seconds, the
 // files column stays the same zstd bytes — so a migration is a plain
-// row copy with no value conversion, in either direction.
+// row copy in either direction, with exactly one value conversion:
+// text columns pass through sanitizeUTF8, because a SQLite source may
+// hold DHT-supplied names that are not valid UTF-8 and a Postgres
+// target would reject them (SQLSTATE 22021).
 //
 // Copy semantics: a row whose primary key already exists in the target
 // is skipped, never overwritten (ON CONFLICT DO NOTHING / INSERT OR
@@ -182,7 +185,11 @@ func readBatch(ctx context.Context, s *Store, t migrateTable, lastPK string) ([]
 		for i, h := range holders {
 			switch v := h.(type) {
 			case *string:
-				r.vals[i] = *v
+				if t.kind[i] == colText {
+					r.vals[i] = sanitizeUTF8(*v)
+				} else {
+					r.vals[i] = *v
+				}
 			case *int64:
 				r.vals[i] = *v
 			case *[]byte:

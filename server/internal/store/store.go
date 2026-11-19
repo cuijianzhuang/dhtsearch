@@ -322,6 +322,16 @@ func (s *Store) migrateFilesBlob() error {
 // Upsert inserts a torrent, ignoring duplicates (same info hash) and
 // infohashes previously rejected by moderation.
 func (s *Store) Upsert(t Torrent) error {
+	// Name, alias and file paths are raw DHT/feed bytes and may not be
+	// valid UTF-8; sanitize before they reach a TEXT column (Postgres
+	// rejects invalid UTF-8, SQLite does not). The file list itself is
+	// stored as a compressed blob, but its paths are sanitized too so
+	// both backends serve identical values.
+	t.Name = sanitizeUTF8(t.Name)
+	t.Alias = sanitizeUTF8(t.Alias)
+	for i := range t.Files {
+		t.Files[i].Path = sanitizeUTF8(t.Files[i].Path)
+	}
 	fj, err := json.Marshal(t.Files)
 	if err != nil {
 		return err
@@ -335,7 +345,7 @@ func (s *Store) Upsert(t Torrent) error {
 // reports whether the torrent exists; false means it still has to be
 // fetched (or was blocked — see IsBlocked).
 func (s *Store) SetAlias(infoHash, alias string) (bool, error) {
-	res, err := s.exec(`UPDATE torrents SET alias = ? WHERE info_hash = ?`, alias, infoHash)
+	res, err := s.exec(`UPDATE torrents SET alias = ? WHERE info_hash = ?`, sanitizeUTF8(alias), infoHash)
 	if err != nil {
 		return false, err
 	}
@@ -502,7 +512,7 @@ func (s *Store) SetCleanNames(clean map[string]string) (int64, error) {
 
 	var n int64
 	for hash, name := range clean {
-		res, err := up.Exec(name, hash)
+		res, err := up.Exec(sanitizeUTF8(name), hash)
 		if err != nil {
 			return 0, err
 		}
@@ -536,8 +546,9 @@ func (s *Store) Block(hashes, names []string, reason string, ts int64) (int64, e
 		return 0, err
 	}
 	defer ins.Close()
+	reason = sanitizeUTF8(reason)
 	for i, h := range hashes {
-		if _, err := ins.Exec(h, reason, names[i], ts); err != nil {
+		if _, err := ins.Exec(h, reason, sanitizeUTF8(names[i]), ts); err != nil {
 			return 0, err
 		}
 	}
