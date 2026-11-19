@@ -3,12 +3,22 @@
 #
 #   bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main/scripts/install.sh) install
 #
-# Subcommands: install | upgrade | uninstall | status
+# Subcommands: install | upgrade | uninstall | status | start | stop |
+# restart | check-update | backup | backups | restore | selfcheck |
+# config | set-token | autostart | auto-update
 # Run with no arguments in a terminal for an interactive menu.
 # install also copies this script to /usr/local/bin/dhtsearch, so on an
-# installed machine plain `dhtsearch` re-opens the menu (status / restart /
-# logs / upgrade / change ports / switch database / uninstall) without
-# re-downloading it.
+# installed machine plain `dhtsearch` re-opens the menu (install / upgrade /
+# status / start / stop / restart / logs / change ports / switch database /
+# autostart / config / backup & restore / selfcheck / check update /
+# auto-update / uninstall) without re-downloading it.
+#
+# Auto-update: a systemd timer (dhtsearch-update.timer) can run
+# `dhtsearch upgrade --yes` on a daily/weekly schedule. It is off by
+# default; its state (enabled flag, frequency, last check) lives in
+# /var/lib/dhtsearch/autoupdate — a script-owned state file, not the
+# server env file, because it is installer state rather than server
+# configuration and it has to survive with the data dir.
 #
 # Database: SQLite by default. install can instead pick PostgreSQL —
 # --db postgres-local installs and configures a local server, --db
@@ -66,6 +76,9 @@ VERSION_FILE="${DATA_DIR}/VERSION"
 UNIT_DIR="${PREFIX}/etc/systemd/system"
 API_UNIT="dhtsearch.service"
 WEB_UNIT="dhtsearch-web.service"
+UPDATE_UNIT="dhtsearch-update.service"
+UPDATE_TIMER="dhtsearch-update.timer"
+AUTOUPDATE_FILE="${DATA_DIR}/autoupdate"
 
 VERSION=""
 API_PORT_OPT=""
@@ -87,6 +100,11 @@ FROM_SOURCE=0
 LOCAL_FILE=""
 PURGE=0
 DRY_RUN="${DHTSEARCH_DRY_RUN:-0}"
+YES_OPT=0
+CHECK_OPT=0
+# Set by install_package_files to the install.sh copy inside the
+# package being installed, when the package carries one.
+PKG_MANAGER_SRC=""
 
 log() { printf '==> %s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
@@ -101,9 +119,34 @@ Commands:
   upgrade              like install, but back up the old binary/web/env
                        first and roll back automatically if the health
                        check fails
-  uninstall            stop services and remove binary/web/units;
-                       config and data are kept unless --purge is given
-  status               show service state, installed version, health
+  uninstall            stop services and remove binary/web/units (and
+                       the auto-update timer); config and data are kept
+                       unless --purge is given
+  status               show service state, installed version, health,
+                       autostart and auto-update state
+  start | stop | restart
+                       control the API and web services
+  check-update         compare the installed version with the latest
+                       release without changing anything; the result is
+                       recorded and shown by status. Exit code: 0 = up
+                       to date, 2 = update available, 1 = check failed
+  backup               back up the database now (SQLite: file copy;
+                       PostgreSQL: pg_dump) into the backups dir
+  backups              list database backups
+  restore FILE         restore a database backup: stops the services
+                       and snapshots the current database first
+  selfcheck            run the health checklist: services, ports, disk,
+                       database connectivity, recent error log summary
+  config               print the config file with secrets masked
+  set-token [VALUE]    set/reset ADMIN_TOKEN in the config file; with
+                       no VALUE a random one is generated and printed
+  autostart on|off|status
+                       toggle boot-time start of the two services
+  auto-update on [daily|weekly] | off | status
+                       scheduled automatic upgrades via a systemd timer
+                       (off by default). Upgrades keep the normal
+                       backup + health-check + rollback behaviour.
+                       State is kept in /var/lib/dhtsearch/autoupdate.
   help                 this text
 
 Options (install / upgrade):
@@ -134,6 +177,10 @@ Options (install / upgrade):
                        from the `dhtsearch` menu (数据库切换), which
                        also migrates the data.
   --database-url URL   postgres:// connection URL for --db postgres-url
+  --check              (upgrade) only check for a newer release, like
+                       check-update, without upgrading
+  --yes                run non-interactively (no prompts); used by the
+                       auto-update timer
   --dry-run            write config/unit files but do not touch systemd
                        or start services
 
@@ -576,6 +623,10 @@ Environment=PORT=${wp}
 Environment=HOSTNAME=127.0.0.1
 Environment=API_BASE=http://127.0.0.1:${ap}
 ExecStart=${node_bin} ${L_WEB_DIR}/server.js
+# Node's standalone server answers SIGTERM by exiting with code 143
+# (128+15) instead of dying by the signal; without this, a plain
+# systemctl stop leaves the unit marked failed.
+SuccessExitStatus=143
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
@@ -719,6 +770,16 @@ resolve_latest_version() {
     echo "$tag"
 }
 
+# resolve_latest_version_quiet — same lookup, but prints "" instead of
+# dying when the network or the API is unavailable (check-update must
+# be able to report a failed check, not crash on one).
+resolve_latest_version_quiet() {
+    local tag=""
+    tag="$(curl -fsSL --max-time 20 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+        | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)" || tag=""
+    echo "$tag"
+}
+
 # download_package <version> <arch> <dest-dir>; sets PKG_TARBALL.
 download_package() {
     local version="$1" arch="$2" dest="$3"
@@ -777,6 +838,16 @@ install_package_files() {
         die "package is corrupt: web/.next build output (BUILD_ID / required-server-files.json) missing in $tarball; the web frontend cannot start from this package — re-download it, or install a fixed release"
     fi
 
+    # The package carries a copy of this script. Remember it so
+    # install_manager can refresh the management entry from the
+    # package even when the running script IS the old entry (the case
+    # that used to fail with "are the same file"): the package copy is
+    # a different file, so it can be renamed over the entry safely.
+    if [ -f "$pkg_dir/install.sh" ] && [ -n "$CLEANUP_DIR" ]; then
+        cp "$pkg_dir/install.sh" "${CLEANUP_DIR}/manager.sh"
+        PKG_MANAGER_SRC="${CLEANUP_DIR}/manager.sh"
+    fi
+
     install -m 0755 "$pkg_dir/dhtsearch-server" "$BIN_FILE"
     rm -rf "$WEB_DIR"
     mkdir -p "$APP_DIR"
@@ -828,23 +899,50 @@ installed_version() {
 
 # install_manager — copy this script to /usr/local/bin/dhtsearch so an
 # installed machine gets a stable management entry point: plain
-# `dhtsearch` opens the interactive menu. When the script was piped in
-# (bash <(curl ...)), $0 is not a regular file, so fetch the published
-# copy instead. This is the management script only; the service binary
-# dhtsearch-server is a different file and is never touched here.
+# `dhtsearch` opens the interactive menu. Source preference: the copy
+# inside the package being installed (PKG_MANAGER_SRC), then this
+# running script ($0), then — when the script was piped in
+# (bash <(curl ...)), so $0 is not a regular file — the published copy
+# fetched from GitHub. This is the management script only; the service
+# binary dhtsearch-server is a different file and is never touched here.
+#
+# Two self-overwrite traps are handled:
+#   - When the only source IS the management entry (a menu-initiated
+#     upgrade with no package copy at hand), copying it over itself
+#     fails with "are the same file"; skip quietly instead — the entry
+#     is by definition the script already running.
+#   - Otherwise the new file is staged next to the entry and renamed
+#     over it. Rename swaps the directory entry atomically, so a bash
+#     process executing the old entry keeps reading its (now unlinked)
+#     inode undisturbed; truncating it in place would corrupt the
+#     running script.
 install_manager() {
-    if [ -f "$0" ]; then
-        if install -m 0755 "$0" "$MANAGER_FILE"; then
+    local src=""
+    if [ -n "$PKG_MANAGER_SRC" ] && [ -f "$PKG_MANAGER_SRC" ]; then
+        src="$PKG_MANAGER_SRC"
+    elif [ -f "$0" ]; then
+        src="$0"
+    fi
+    local tmp="${MANAGER_FILE}.new.$$"
+    if [ -n "$src" ]; then
+        if [ -f "$MANAGER_FILE" ] && [ "$src" -ef "$MANAGER_FILE" ]; then
+            log "Management entry is this script itself; already in place: $MANAGER_FILE"
+            return 0
+        fi
+        if cp "$src" "$tmp" && chmod 755 "$tmp" && mv -f "$tmp" "$MANAGER_FILE"; then
             log "Management entry installed: run 'dhtsearch' for the menu"
         else
+            rm -f "$tmp"
             warn "could not install the management entry to $MANAGER_FILE"
         fi
-    elif curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh" -o "${MANAGER_FILE}.tmp" 2>/dev/null; then
-        chmod 755 "${MANAGER_FILE}.tmp"
-        mv "${MANAGER_FILE}.tmp" "$MANAGER_FILE"
+        return 0
+    fi
+    if curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh" -o "$tmp" 2>/dev/null; then
+        chmod 755 "$tmp"
+        mv -f "$tmp" "$MANAGER_FILE"
         log "Management entry installed: run 'dhtsearch' for the menu"
     else
-        rm -f "${MANAGER_FILE}.tmp"
+        rm -f "$tmp"
         warn "could not install the management entry ($MANAGER_FILE); download install.sh and re-run install to get it"
     fi
 }
@@ -869,6 +967,185 @@ obtain_package() {
         RESOLVED_VERSION="$v"
         download_package "$v" "$arch" "$workdir"
     fi
+}
+
+# ------------------------------------------------------------- auto-update
+# State lives in $AUTOUPDATE_FILE (/var/lib/dhtsearch/autoupdate):
+#   ENABLED=0|1
+#   FREQ=daily|weekly
+#   LAST_CHECK=YYYY-MM-DD HH:MM:SS
+#   LAST_RESULT=<free text: up-to-date vX / update available: vY / ...>
+# A separate state file (not the server env file) on purpose: this is
+# installer state, not server configuration, and the env file is the
+# server's 600 root-only config. The timer simply runs the normal
+# upgrade path (`dhtsearch upgrade --yes`), so backups, the health
+# check and rollback on failure all apply unchanged.
+
+# au_value KEY — value from the auto-update state file ("" if unset).
+au_value() {
+    local line=""
+    if [ -f "$AUTOUPDATE_FILE" ]; then
+        line="$(grep -E "^$1=" "$AUTOUPDATE_FILE" | tail -1 || true)"
+    fi
+    echo "${line#"$1"=}"
+}
+
+au_enabled() { [ "$(au_value ENABLED)" = "1" ]; }
+
+au_freq() {
+    local f
+    f="$(au_value FREQ)"
+    echo "${f:-daily}"
+}
+
+# au_write ENABLED FREQ — rewrite the state file, keeping last-check.
+au_write() {
+    local lc lr
+    lc="$(au_value LAST_CHECK)"
+    lr="$(au_value LAST_RESULT)"
+    mkdir -p "$DATA_DIR"
+    {
+        printf 'ENABLED=%s\n' "$1"
+        printf 'FREQ=%s\n' "$2"
+        printf 'LAST_CHECK=%s\n' "$lc"
+        printf 'LAST_RESULT=%s\n' "$lr"
+    } > "$AUTOUPDATE_FILE"
+}
+
+# au_record RESULT — stamp the last check time and its outcome.
+au_record() {
+    local en=0 freq lc
+    au_enabled && en=1
+    freq="$(au_freq)"
+    lc="$(date '+%Y-%m-%d %H:%M:%S')"
+    mkdir -p "$DATA_DIR"
+    {
+        printf 'ENABLED=%s\n' "$en"
+        printf 'FREQ=%s\n' "$freq"
+        printf 'LAST_CHECK=%s\n' "$lc"
+        printf 'LAST_RESULT=%s\n' "$1"
+    } > "$AUTOUPDATE_FILE"
+}
+
+write_update_units() {
+    local oncal
+    case "$(au_freq)" in
+        weekly) oncal="Mon *-*-* 03:37:00" ;;
+        *) oncal="*-*-* 03:37:00" ;;
+    esac
+    cat > "${UNIT_DIR}/${UPDATE_UNIT}" <<EOF
+[Unit]
+Description=DHTSearch automatic update (upgrade to the latest release)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=DHTSEARCH_AUTO_UPDATE=1
+ExecStart=${L_MANAGER} upgrade --yes
+EOF
+    cat > "${UNIT_DIR}/${UPDATE_TIMER}" <<EOF
+[Unit]
+Description=Scheduled DHTSearch automatic update
+
+[Timer]
+OnCalendar=${oncal}
+RandomizedDelaySec=1800
+Persistent=true
+Unit=${UPDATE_UNIT}
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+# au_apply — install/upgrade regenerate the unit dir; when auto-update
+# is on, put its units back and re-arm the timer so the schedule
+# survives the upgrade (including the timer's own upgrades).
+au_apply() {
+    au_enabled || return 0
+    write_update_units
+    svc daemon-reload
+    if have_systemd; then
+        systemctl enable --now "$UPDATE_TIMER" >/dev/null 2>&1 || true
+    fi
+}
+
+au_status_line() {
+    if au_enabled; then
+        local t="timer inactive"
+        if have_systemd && systemctl is-active --quiet "$UPDATE_TIMER" 2>/dev/null; then
+            t="timer active"
+        fi
+        echo "enabled ($(au_freq), $t)"
+    else
+        echo "disabled"
+    fi
+}
+
+# au_set on [daily|weekly] | off — the auto-update command behind both
+# the menu entry and the auto-update subcommand.
+au_set() {
+    local mode="$1" freq="${2:-}"
+    case "$mode" in
+        on)
+            [ -n "$freq" ] || freq="$(au_freq)"
+            case "$freq" in
+                daily|weekly) ;;
+                *) die "invalid auto-update frequency: '$freq' (want daily | weekly)" ;;
+            esac
+            mkdir -p "$DATA_DIR" "$UNIT_DIR"
+            au_write 1 "$freq"
+            # The timer executes the management entry; make sure it
+            # exists (it normally does — install put it there).
+            if [ ! -f "$MANAGER_FILE" ]; then
+                install_manager
+            fi
+            [ -f "$MANAGER_FILE" ] || die "management entry $MANAGER_FILE is missing; re-run install first, the auto-update timer needs it"
+            write_update_units
+            svc daemon-reload
+            if have_systemd; then
+                systemctl enable --now "$UPDATE_TIMER" >/dev/null 2>&1 \
+                    || warn "could not enable $UPDATE_TIMER; check: systemctl status $UPDATE_TIMER"
+            fi
+            log "Auto-update enabled ($freq, early-morning with a random delay of up to 30m): $UPDATE_TIMER"
+            ;;
+        off)
+            au_write 0 "$(au_freq)"
+            if have_systemd; then
+                systemctl disable --now "$UPDATE_TIMER" >/dev/null 2>&1 || true
+            fi
+            rm -f "${UNIT_DIR}/${UPDATE_TIMER}" "${UNIT_DIR}/${UPDATE_UNIT}"
+            svc daemon-reload
+            log "Auto-update disabled"
+            ;;
+        *) die "usage: auto-update on [daily|weekly] | off | status" ;;
+    esac
+}
+
+# do_check_update — compare the installed version with the latest
+# release, changing nothing. The outcome is recorded in the
+# auto-update state file and shown by status. Returns 0 when up to
+# date, 2 when an update is available, 1 when the check itself failed.
+do_check_update() {
+    local cur latest
+    cur="$(installed_version)"
+    echo "当前版本：$cur"
+    latest="$(resolve_latest_version_quiet)"
+    if [ -z "$latest" ]; then
+        echo "最新版本：查询失败（网络不可用或 GitHub API 无响应）"
+        au_record "check failed (network or API error)"
+        return 1
+    fi
+    echo "最新版本：$latest"
+    if [ "$cur" = "$latest" ]; then
+        echo "已是最新版本。"
+        au_record "up-to-date $latest"
+        return 0
+    fi
+    echo "有新版本可升级：$cur -> $latest（运行 upgrade，或在 dhtsearch 菜单里选「升级」）"
+    au_record "update available: $latest"
+    return 2
 }
 
 # ---------------------------------------------------------------- commands
@@ -910,6 +1187,7 @@ do_install() {
     fi
     record_version "$RESOLVED_VERSION"
     install_manager
+    au_apply
     log "Installed DHTSearch $RESOLVED_VERSION (arch $arch)"
     log "API: http://127.0.0.1:$(resolve_api_port)/api/healthz   Web: http://127.0.0.1:$(resolve_web_port)/"
     log "Database: $(db_display)"
@@ -924,6 +1202,12 @@ do_install() {
 
 do_upgrade() {
     require_root
+    if [ "$CHECK_OPT" = "1" ]; then
+        # upgrade --check: report only, exactly like check-update.
+        local check_rc=0
+        do_check_update || check_rc=$?
+        return "$check_rc"
+    fi
     [ -f "$BIN_FILE" ] || die "not installed yet; run install first"
     if [ -n "$DB_OPT" ]; then
         warn "--db is ignored by upgrade: the database backend is never changed here. Use the dhtsearch menu (数据库切换) to switch, which also migrates the data."
@@ -960,6 +1244,10 @@ do_upgrade() {
     if wait_health; then
         record_version "$RESOLVED_VERSION"
         install_manager
+        if [ "${DHTSEARCH_AUTO_UPDATE:-0}" = "1" ]; then
+            au_record "auto-upgraded: $old_version -> $RESOLVED_VERSION"
+        fi
+        au_apply
         log "Upgraded: $old_version -> $RESOLVED_VERSION"
         return 0
     fi
@@ -981,8 +1269,9 @@ do_uninstall() {
     require_root
     if have_systemd; then
         systemctl disable --now "$API_UNIT" "$WEB_UNIT" >/dev/null 2>&1 || true
+        systemctl disable --now "$UPDATE_TIMER" >/dev/null 2>&1 || true
     fi
-    rm -f "${UNIT_DIR}/${API_UNIT}" "${UNIT_DIR}/${WEB_UNIT}"
+    rm -f "${UNIT_DIR}/${API_UNIT}" "${UNIT_DIR}/${WEB_UNIT}" "${UNIT_DIR}/${UPDATE_UNIT}" "${UNIT_DIR}/${UPDATE_TIMER}"
     svc daemon-reload
     rm -f "$BIN_FILE"
     rm -f "$MANAGER_FILE"
@@ -1006,6 +1295,13 @@ do_status() {
     echo "Data:    $DATA_DIR"
     echo "Database: $(db_display)"
     echo "Ports:   API $(resolve_api_port)   Web $(resolve_web_port)"
+    echo "Autostart: $(autostart_state)"
+    echo "AutoUpdate: $(au_status_line)"
+    local au_last
+    au_last="$(au_value LAST_CHECK)"
+    if [ -n "$au_last" ]; then
+        echo "LastCheck: $au_last ($(au_value LAST_RESULT))"
+    fi
     if have_systemd; then
         systemctl is-active "$API_UNIT" "$WEB_UNIT" || true
         systemctl status "$API_UNIT" "$WEB_UNIT" --no-pager -n 5 || true
@@ -1025,6 +1321,308 @@ do_status() {
     else
         echo "Health:  Web not responding on port ${webport}"
     fi
+}
+
+# autostart_state — "enabled" when both services start at boot.
+autostart_state() {
+    if ! have_systemd; then echo "unknown (no systemd)"; return; fi
+    if systemctl is-enabled --quiet "$API_UNIT" 2>/dev/null \
+        && systemctl is-enabled --quiet "$WEB_UNIT" 2>/dev/null; then
+        echo "enabled"
+    else
+        echo "disabled"
+    fi
+}
+
+do_start() {
+    require_root
+    svc start "$API_UNIT" "$WEB_UNIT" || { warn "failed to start the services (installed? check: systemctl status $API_UNIT)"; return 1; }
+    wait_health || true
+}
+
+do_stop() {
+    require_root
+    svc stop "$WEB_UNIT" "$API_UNIT" || { warn "failed to stop the services"; return 1; }
+    log "Services stopped (API + web). Start them again with: dhtsearch start"
+}
+
+do_restart_cmd() {
+    require_root
+    validate_ports
+    check_ports_free
+    restart_services
+    wait_health || true
+}
+
+# ------------------------------------------------------------- config admin
+
+# mask_config_text — print the config file with secrets hidden: the
+# password inside any postgres URL, and the value of every key whose
+# name contains TOKEN / KEY / SECRET / PASSWORD.
+mask_config_text() {
+    sed -E \
+        -e 's#(postgres(ql)?://[^:/@]+:)[^@]*@#\1***@#g' \
+        -e 's#^([A-Za-z0-9_]*(TOKEN|KEY|SECRET|PASSWORD)[A-Za-z0-9_]*=).+$#\1*** (set)#' \
+        "$ENV_FILE"
+}
+
+do_config_show() {
+    [ -f "$ENV_FILE" ] || die "config not found: $ENV_FILE (not installed?)"
+    mask_config_text
+}
+
+# do_set_token [VALUE] — set/reset ADMIN_TOKEN in the config file.
+# Without VALUE a random token is generated and printed exactly once.
+do_set_token() {
+    require_root
+    [ -f "$ENV_FILE" ] || die "config not found: $ENV_FILE (not installed?)"
+    local tok="${1:-}"
+    if [ -z "$tok" ]; then
+        if command -v openssl >/dev/null 2>&1; then
+            tok="$(openssl rand -hex 32)"
+        else
+            tok="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+        fi
+        log "New ADMIN_TOKEN (shown only this once — save it):"
+        log "  $tok"
+    fi
+    set_env_value ADMIN_TOKEN "$tok"
+    fix_permissions
+    log "ADMIN_TOKEN written to $ENV_FILE. It takes effect after an API restart:"
+    log "  systemctl restart $API_UNIT   (or run: dhtsearch restart)"
+}
+
+# ------------------------------------------------------------ backup/restore
+
+# backup_db_to OUT — write a database backup to OUT, using whichever
+# backend the config selects. SQLite: sqlite3 .backup when the CLI is
+# available (safe against a running server), else a raw file copy of
+# the db plus its WAL sidecars, with a warning. PostgreSQL: pg_dump
+# with --clean --if-exists so a restore is a plain psql -f.
+backup_db_to() {
+    local out="$1"
+    if [ "$(db_backend)" = "postgres" ]; then
+        command -v pg_dump >/dev/null 2>&1 || { warn "pg_dump not found (install the postgresql-client package)"; return 1; }
+        pg_dump --clean --if-exists "$(env_value DATABASE_URL)" > "$out"
+        return $?
+    fi
+    local db real_db
+    db="$(sqlite_db_path)"
+    real_db="${PREFIX}${db}"
+    [ -f "$real_db" ] || { warn "SQLite database not found: $db"; return 1; }
+    if command -v sqlite3 >/dev/null 2>&1; then
+        sqlite3 "$real_db" ".backup '$out'"
+        return $?
+    fi
+    cp -a "$real_db" "$out" || return 1
+    [ -f "${real_db}-wal" ] && cp -a "${real_db}-wal" "${out}-wal"
+    [ -f "${real_db}-shm" ] && cp -a "${real_db}-shm" "${out}-shm"
+    warn "sqlite3 CLI not found: copied the raw database file (plus WAL sidecars). For a perfectly consistent snapshot, stop the service first (dhtsearch stop) and re-run the backup."
+    return 0
+}
+
+do_backup() {
+    require_root
+    [ -f "$ENV_FILE" ] || die "config not found: $ENV_FILE (not installed?)"
+    mkdir -p "$BACKUP_DIR"
+    local ts out
+    ts="$(date +%Y%m%d%H%M%S)"
+    if [ "$(db_backend)" = "postgres" ]; then
+        out="${BACKUP_DIR}/db-${ts}.sql"
+    else
+        out="${BACKUP_DIR}/db-${ts}.sqlite"
+    fi
+    log "Backing up database ($(db_display)) -> $out"
+    backup_db_to "$out" || die "backup failed (see above); nothing was restored or changed"
+    log "Backup done: $out ($(du -h "$out" | cut -f1))"
+}
+
+# list_db_backups — database backup files, oldest first.
+list_db_backups() {
+    find "$BACKUP_DIR" -maxdepth 1 -type f -name 'db-*' 2>/dev/null | sort
+}
+
+do_backups() {
+    local f found=0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        found=1
+        printf '%s  %s\n' "$(du -h "$f" | cut -f1)" "$f"
+    done <<EOF
+$(list_db_backups)
+EOF
+    if [ "$found" -eq 0 ]; then
+        echo "暂无数据库备份（$BACKUP_DIR 下没有 db-* 文件）。用 backup 先备一份。"
+    fi
+}
+
+# do_restore FILE — restore a backup made by do_backup. Stops the
+# services first and snapshots the current database to a
+# db-pre-restore-* file before overwriting anything, so a bad restore
+# can itself be undone with the same command.
+do_restore() {
+    require_root
+    local file="${1:-}"
+    [ -n "$file" ] || die "usage: restore <backup-file> (see: backups)"
+    if [ ! -f "$file" ] && [ -f "${BACKUP_DIR}/${file}" ]; then
+        file="${BACKUP_DIR}/${file}"
+    fi
+    [ -f "$file" ] || die "backup file not found: $1"
+    [ -f "$ENV_FILE" ] || die "config not found: $ENV_FILE (not installed?)"
+    if [ "$(db_backend)" = "postgres" ]; then
+        case "$file" in
+            *.sql) ;;
+            *) die "$file is not a PostgreSQL dump (.sql), but the current backend is PostgreSQL" ;;
+        esac
+        command -v psql >/dev/null 2>&1 || die "psql not found (install the postgresql-client package) — cannot restore PostgreSQL"
+    else
+        case "$file" in
+            *.sql) die "$file is a PostgreSQL dump, but the current backend is SQLite; switch the database first (menu: 数据库切换)" ;;
+        esac
+    fi
+
+    log "Stopping services for the restore"
+    svc stop "$WEB_UNIT" "$API_UNIT"
+    local ts pre
+    ts="$(date +%Y%m%d%H%M%S)"
+    if [ "$(db_backend)" = "postgres" ]; then
+        pre="${BACKUP_DIR}/db-pre-restore-${ts}.sql"
+    else
+        pre="${BACKUP_DIR}/db-pre-restore-${ts}.sqlite"
+    fi
+    if backup_db_to "$pre"; then
+        log "Current database snapshotted first: $pre"
+    else
+        warn "could not snapshot the current database; continuing without a pre-restore backup"
+        pre=""
+    fi
+
+    if [ "$(db_backend)" = "postgres" ]; then
+        if ! psql "$(env_value DATABASE_URL)" -v ON_ERROR_STOP=1 -q -f "$file"; then
+            warn "PostgreSQL restore failed partway. Pre-restore snapshot: ${pre:-none}"
+            restart_services
+            wait_health || true
+            die "restore failed; services were restarted — check the state before trying again"
+        fi
+    else
+        local db real_db
+        db="$(sqlite_db_path)"
+        real_db="${PREFIX}${db}"
+        mkdir -p "$(dirname "$real_db")"
+        cp -a "$file" "$real_db" || die "failed to write the restored database to $db"
+        # A WAL from the pre-restore database must not be replayed
+        # over the restored file; the backup's own sidecars (taken by
+        # the raw-copy fallback) belong to the backup and do apply.
+        if [ -f "${file}-wal" ]; then
+            cp -a "${file}-wal" "${real_db}-wal"
+            [ -f "${file}-shm" ] && cp -a "${file}-shm" "${real_db}-shm"
+        else
+            rm -f "${real_db}-wal" "${real_db}-shm"
+        fi
+        fix_permissions
+    fi
+    restart_services
+    if wait_health; then
+        log "Restored database from $file"
+    else
+        warn "restore applied but the health check failed; pre-restore snapshot: ${pre:-none}; logs: journalctl -u $API_UNIT -n 100"
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------- selfcheck
+
+# pg_reachable — TCP-level reachability of the configured PostgreSQL.
+pg_reachable() {
+    local url rest hostport host port
+    url="$(env_value DATABASE_URL)"
+    rest="${url#*://}"
+    rest="${rest#*@}"
+    hostport="${rest%%/*}"
+    host="${hostport%%:*}"
+    if [ "$hostport" != "$host" ]; then port="${hostport##*:}"; else port="5432"; fi
+    [ -n "$host" ] || return 1
+    if command -v pg_isready >/dev/null 2>&1; then
+        pg_isready -h "$host" -p "$port" -t 3 >/dev/null 2>&1
+    else
+        timeout 3 bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null
+    fi
+}
+
+# do_selfcheck — one pass over everything an operator would check by
+# hand. Returns non-zero when any hard check fails.
+do_selfcheck() {
+    local fail=0 ap wp
+    ap="$(resolve_api_port)"
+    wp="$(resolve_web_port)"
+    echo "DHTSearch 自检（$(date '+%Y-%m-%d %H:%M:%S')）"
+    echo "版本：    $(installed_version)"
+    if have_systemd; then
+        local a w
+        a="$(systemctl is-active "$API_UNIT" 2>/dev/null || echo unknown)"
+        w="$(systemctl is-active "$WEB_UNIT" 2>/dev/null || echo unknown)"
+        echo "服务：    API $a / Web $w"
+        if [ "$a" != "active" ] || [ "$w" != "active" ]; then fail=1; fi
+    else
+        echo "服务：    无 systemd，跳过状态检查"
+    fi
+    if [ -n "$(port_listeners "$ap")" ]; then
+        echo "端口：    API $ap 监听中"
+    else
+        echo "端口：    API $ap 无监听"; fail=1
+    fi
+    if [ -n "$(port_listeners "$wp")" ]; then
+        echo "端口：    Web $wp 监听中"
+    else
+        echo "端口：    Web $wp 无监听"; fail=1
+    fi
+    if curl -fsS "http://127.0.0.1:${ap}/api/healthz" >/dev/null 2>&1; then
+        echo "健康：    API healthz OK"
+    else
+        echo "健康：    API healthz 无响应"; fail=1
+    fi
+    if curl -fsS "http://127.0.0.1:${wp}/" >/dev/null 2>&1; then
+        echo "健康：    Web OK"
+    else
+        echo "健康：    Web 无响应"; fail=1
+    fi
+    if [ -d "$DATA_DIR" ]; then
+        echo "磁盘：    数据目录所在盘 $(df -h "$DATA_DIR" | awk 'NR==2 {print $4 " 可用 / 共 " $2 "（已用 " $5 "）"}')"
+    else
+        echo "磁盘：    数据目录不存在（$DATA_DIR）"; fail=1
+    fi
+    if [ "$(db_backend)" = "postgres" ]; then
+        if pg_reachable; then
+            echo "数据库：  PostgreSQL 可连接（$(mask_pg_url "$(env_value DATABASE_URL)")）"
+        else
+            echo "数据库：  PostgreSQL 连接失败（$(mask_pg_url "$(env_value DATABASE_URL)")）"; fail=1
+        fi
+    else
+        local db real_db
+        db="$(sqlite_db_path)"
+        real_db="${PREFIX}${db}"
+        if [ -f "$real_db" ]; then
+            echo "数据库：  SQLite 文件正常（$db，$(du -h "$real_db" | cut -f1)）"
+        else
+            echo "数据库：  SQLite 文件不存在（$db）"; fail=1
+        fi
+    fi
+    if have_systemd; then
+        local errs=""
+        errs="$(journalctl -u "$API_UNIT" -u "$WEB_UNIT" -p err --since "-24 hours" --no-pager -q 2>/dev/null | wc -l)" || errs="?"
+        echo "日志：    近 24 小时 error 级别日志 $errs 条"
+        if [ "$errs" != "?" ] && [ "$errs" -gt 0 ]; then
+            journalctl -u "$API_UNIT" -u "$WEB_UNIT" -p err --since "-24 hours" --no-pager -q 2>/dev/null | tail -3 | sed 's/^/          /' || true
+        fi
+    fi
+    echo "开机自启：$(autostart_state)"
+    echo "自动更新：$(au_status_line)"
+    if [ "$fail" -eq 0 ]; then
+        echo "结论：    全部正常"
+    else
+        echo "结论：    有异常项（见上）"
+    fi
+    return "$fail"
 }
 
 # ------------------------------------------------------- interactive menu
@@ -1337,6 +1935,216 @@ menu_switch_db() {
     menu_pause
 }
 
+menu_start() {
+    if ! confirm "确认启动 API 和 Web 两个服务？"; then menu_pause; return 0; fi
+    do_start || warn "启动未成功，请看日志：journalctl -u $API_UNIT -n 50"
+    menu_pause
+}
+
+menu_stop() {
+    echo "停止后网站将无法访问，直到再次启动。"
+    if ! confirm "确认停止 API 和 Web 两个服务？"; then menu_pause; return 0; fi
+    do_stop || warn "停止未成功，请看日志：journalctl -u $API_UNIT -n 50"
+    menu_pause
+}
+
+menu_autostart() {
+    echo "开机自启：当前为 $(autostart_state)（$API_UNIT / $WEB_UNIT）"
+    echo "  1) 开启开机自启"
+    echo "  2) 关闭开机自启"
+    echo "  0) 返回"
+    printf '选择： '
+    local c
+    read -r c || return 0
+    case "$c" in
+        1)
+            svc enable "$API_UNIT" "$WEB_UNIT" || warn "开启失败"
+            echo "开机自启：$(autostart_state)"
+            ;;
+        2)
+            svc disable "$API_UNIT" "$WEB_UNIT" || warn "关闭失败"
+            echo "开机自启：$(autostart_state)"
+            ;;
+        *) return 0 ;;
+    esac
+    menu_pause
+}
+
+menu_config() {
+    require_root
+    if [ ! -f "$ENV_FILE" ]; then
+        echo "尚未安装（找不到 $ENV_FILE），请先选「安装」。"
+        menu_pause
+        return 0
+    fi
+    local c t v ed
+    while true; do
+        echo
+        echo "配置管理（$ENV_FILE）"
+        echo "  1) 查看当前配置（密钥脱敏）"
+        echo "  2) 设置 / 重置 ADMIN_TOKEN"
+        echo "  3) 编辑配置文件（改完需重启服务生效）"
+        echo "  0) 返回"
+        printf '选择： '
+        if ! read -r c; then return 0; fi
+        case "$c" in
+            1)
+                mask_config_text
+                menu_pause
+                ;;
+            2)
+                echo "  1) 随机生成一个新令牌"
+                echo "  2) 手动输入令牌"
+                printf '选择（默认 1）： '
+                read -r t || t="1"
+                case "$t" in
+                    2)
+                        printf '输入 ADMIN_TOKEN（空则取消）: '
+                        read -r v || v=""
+                        if [ -n "$v" ]; then
+                            do_set_token "$v"
+                        else
+                            echo "已取消。"
+                        fi
+                        ;;
+                    *) do_set_token ;;
+                esac
+                if confirm "现在重启两个服务让新令牌生效？"; then
+                    restart_services
+                    wait_health || true
+                fi
+                menu_pause
+                ;;
+            3)
+                ed="${EDITOR:-vi}"
+                if command -v "$ed" >/dev/null 2>&1; then
+                    "$ed" "$ENV_FILE" || true
+                    chmod 600 "$ENV_FILE" || true
+                    echo "配置已保存。多数改动需要重启服务才生效。"
+                    if confirm "现在重启两个服务？"; then
+                        restart_services
+                        wait_health || true
+                    fi
+                else
+                    echo "找不到编辑器 $ed，请手动编辑：$ENV_FILE"
+                fi
+                menu_pause
+                ;;
+            0) return 0 ;;
+            *) echo "未知选择：$c" ;;
+        esac
+    done
+}
+
+menu_restore() {
+    local files=() f i c target
+    while IFS= read -r f; do
+        [ -n "$f" ] && files+=("$f")
+    done <<EOF
+$(list_db_backups)
+EOF
+    if [ "${#files[@]}" -eq 0 ]; then
+        echo "暂无可恢复的备份。"
+        menu_pause
+        return 0
+    fi
+    echo "选择要恢复的备份（当前数据库：$(db_display)）："
+    for i in "${!files[@]}"; do
+        printf '  %d) %s（%s）\n' "$((i + 1))" "${files[$i]}" "$(du -h "${files[$i]}" | cut -f1)"
+    done
+    echo "  0) 取消"
+    printf '选择： '
+    read -r c || return 0
+    case "$c" in
+        ''|*[!0-9]*) echo "已取消。"; menu_pause; return 0 ;;
+    esac
+    if [ "$c" -lt 1 ] || [ "$c" -gt "${#files[@]}" ]; then
+        echo "已取消。"
+        menu_pause
+        return 0
+    fi
+    target="${files[$((c - 1))]}"
+    echo "将从 $target 恢复。恢复前会停服务，并先把当前数据库另存一份 db-pre-restore 备份。"
+    if ! confirm "确认恢复？现有数据将被备份文件覆盖"; then menu_pause; return 0; fi
+    # Subshell: do_restore may die on failure; the menu must survive.
+    ( do_restore "$target" ) || echo "恢复未完成（见上面的输出）。"
+    menu_pause
+}
+
+menu_backup() {
+    require_root
+    if [ ! -f "$ENV_FILE" ]; then
+        echo "尚未安装（找不到 $ENV_FILE），请先选「安装」。"
+        menu_pause
+        return 0
+    fi
+    local c
+    while true; do
+        echo
+        echo "备份与恢复（当前数据库：$(db_display)）"
+        echo "备份目录：$BACKUP_DIR"
+        echo "  1) 立即备份"
+        echo "  2) 备份列表"
+        echo "  3) 从备份恢复"
+        echo "  0) 返回"
+        printf '选择： '
+        if ! read -r c; then return 0; fi
+        case "$c" in
+            1)
+                # Subshell: do_backup may die on failure; the menu
+                # must survive.
+                ( do_backup ) || echo "备份未完成（见上面的输出）。"
+                menu_pause
+                ;;
+            2) do_backups; menu_pause ;;
+            3) menu_restore ;;
+            0) return 0 ;;
+            *) echo "未知选择：$c" ;;
+        esac
+    done
+}
+
+menu_selfcheck() {
+    do_selfcheck || true
+    menu_pause
+}
+
+menu_check_update() {
+    local rc=0
+    do_check_update || rc=$?
+    if [ "$rc" -eq 2 ]; then
+        if confirm "现在升级到最新版本？"; then
+            do_upgrade
+        fi
+    fi
+    menu_pause
+}
+
+menu_auto_update() {
+    require_root
+    local lc c
+    echo "自动更新：当前 $(au_status_line)"
+    lc="$(au_value LAST_CHECK)"
+    if [ -n "$lc" ]; then
+        echo "上次检查：$lc（$(au_value LAST_RESULT)）"
+    fi
+    echo "开启后，systemd 定时器会在凌晨 03:37 前后（带最多 30 分钟随机延迟）"
+    echo "自动执行 upgrade：先备份、健康检查失败自动回滚，和手动升级同一套流程。"
+    echo "  1) 开启（每天）"
+    echo "  2) 开启（每周一）"
+    echo "  3) 关闭"
+    echo "  0) 返回"
+    printf '选择： '
+    read -r c || return 0
+    case "$c" in
+        1) au_set on daily ;;
+        2) au_set on weekly ;;
+        3) au_set off ;;
+        *) return 0 ;;
+    esac
+    menu_pause
+}
+
 menu_uninstall() {
     local c
     echo "卸载方式： 1) 保留配置和数据   2) 全部删除（--purge，连数据库一起删）   0) 取消"
@@ -1370,6 +2178,14 @@ menu() {
         echo "  6) 修改端口"
         echo "  7) 数据库切换"
         echo "  8) 卸载"
+        echo "  9) 启动服务"
+        echo "  10) 停止服务"
+        echo "  11) 开机自启"
+        echo "  12) 配置管理"
+        echo "  13) 备份与恢复"
+        echo "  14) 自检"
+        echo "  15) 检查更新"
+        echo "  16) 自动更新"
         echo "  0) 退出"
         printf '选择： '
         if ! read -r choice; then exit 0; fi
@@ -1382,6 +2198,14 @@ menu() {
             6) menu_change_port ;;
             7) menu_switch_db ;;
             8) menu_uninstall ;;
+            9) menu_start ;;
+            10) menu_stop ;;
+            11) menu_autostart ;;
+            12) menu_config ;;
+            13) menu_backup ;;
+            14) menu_selfcheck ;;
+            15) menu_check_update ;;
+            16) menu_auto_update ;;
             0) exit 0 ;;
             *) echo "未知选择：$choice" ;;
         esac
@@ -1420,6 +2244,8 @@ parse_opts() {
                 shift 2 ;;
             --dry-run) DRY_RUN=1; shift ;;
             --purge) PURGE=1; shift ;;
+            --yes) YES_OPT=1; shift ;;
+            --check) CHECK_OPT=1; shift ;;
             -h|--help) usage; exit 0 ;;
             *) die "unknown option: $1 (see: install.sh help)" ;;
         esac
@@ -1433,6 +2259,65 @@ main() {
         upgrade) shift; parse_opts "$@"; do_upgrade ;;
         uninstall) shift; parse_opts "$@"; do_uninstall ;;
         status) do_status ;;
+        start) do_start ;;
+        stop) do_stop ;;
+        restart) do_restart_cmd ;;
+        check-update)
+            local rc=0
+            do_check_update || rc=$?
+            exit "$rc"
+            ;;
+        backup) do_backup ;;
+        backups) do_backups ;;
+        restore)
+            shift
+            local rfile=""
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --yes) YES_OPT=1 ;;
+                    *) rfile="$1" ;;
+                esac
+                shift
+            done
+            # Interactive runs confirm first; --yes (and any
+            # non-terminal caller) skips the prompt.
+            if [ -t 0 ] && [ "$YES_OPT" != "1" ]; then
+                confirm "确认从备份 ${rfile} 恢复数据库？（先停服务，并给当前库留一份 pre-restore 备份）" || exit 1
+            fi
+            do_restore "$rfile"
+            ;;
+        selfcheck)
+            local sc_rc=0
+            do_selfcheck || sc_rc=$?
+            exit "$sc_rc"
+            ;;
+        config) do_config_show ;;
+        set-token) shift; do_set_token "${1:-}" ;;
+        autostart)
+            shift
+            case "${1:-status}" in
+                on) require_root; svc enable "$API_UNIT" "$WEB_UNIT" ;;
+                off) require_root; svc disable "$API_UNIT" "$WEB_UNIT" ;;
+                status) echo "开机自启：$(autostart_state)" ;;
+                *) die "usage: install.sh autostart on|off|status" ;;
+            esac
+            ;;
+        auto-update)
+            shift
+            case "${1:-status}" in
+                on) require_root; au_set on "${2:-}" ;;
+                off) require_root; au_set off ;;
+                status)
+                    echo "自动更新：$(au_status_line)"
+                    local lc
+                    lc="$(au_value LAST_CHECK)"
+                    if [ -n "$lc" ]; then
+                        echo "上次检查：$lc（$(au_value LAST_RESULT)）"
+                    fi
+                    ;;
+                *) die "usage: install.sh auto-update on [daily|weekly]|off|status" ;;
+            esac
+            ;;
         help|-h|--help) usage ;;
         "")
             if [ -t 0 ]; then menu; else usage; exit 2; fi

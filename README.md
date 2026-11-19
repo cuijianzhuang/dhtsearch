@@ -466,7 +466,7 @@ DEPLOY_HOST=user@example.com ./deploy.sh
 bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main/scripts/install.sh) install
 ```
 
-子命令：`install` / `upgrade` / `status` / `uninstall`（无参在终端里运行给交互菜单）。常用选项：`--version vX.Y.Z` 指定版本（默认最新 Release）、`--file <tar.gz>` 用本地包安装、`--from-source` 无 Release 产物时从源码构建兜底（需要 git + Go + Node）、`uninstall --purge` 连配置和数据一起删（默认保留）。
+子命令：`install` / `upgrade` / `status` / `uninstall`，外加运维子命令 `start` / `stop` / `restart`、`check-update`（只查不升，退出码 0 已最新 / 2 有新版 / 1 查询失败）、`backup` / `backups` / `restore`、`selfcheck`、`config`（脱敏打印配置）、`set-token`、`autostart on|off`、`auto-update on|off`（无参在终端里运行给交互菜单，菜单里是同一套能力）。常用选项：`--version vX.Y.Z` 指定版本（默认最新 Release）、`--file <tar.gz>` 用本地包安装、`--from-source` 无 Release 产物时从源码构建兜底（需要 git + Go + Node）、`uninstall --purge` 连配置和数据一起删（默认保留）。
 
 自定义端口：`install --api-port 18080 --web-port 13000`（也可预先设环境变量 `API_PORT` / `WEB_PORT`；优先级为 参数 > 环境变量 > 已有配置 > 默认 8080/3000）。API 端口写进配置文件的 `HTTP_ADDR`，同时生成给前端 unit 的 `API_BASE=http://127.0.0.1:<api-port>`——前端在服务端启动时读这个运行时变量（不写死在构建产物里），所以改后端端口不用重打 Release 包，前端会自动跟过去。upgrade 不带端口参数时保留已有端口不回退默认。启动服务前脚本会先检查两个端口：被其他进程占用会直接报出占用进程并退出，不会等到 120 秒健康检查超时（被本服务自己占着属正常，不误报）。
 
@@ -480,11 +480,15 @@ bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main
 | --- | --- |
 | `dhtsearch.service` / `dhtsearch-web.service` | API+爬虫 / 前端两个 systemd 单元，`enable --now` |
 | `/usr/local/bin/dhtsearch-server`、`/opt/dhtsearch/web/` | 二进制与前端产物 |
-| `/usr/local/bin/dhtsearch` | 管理脚本入口（install 时由 install.sh 自身复制），无参运行开交互菜单：安装 / 升级 / 状态 / 重启 / 日志 / 修改端口 / 数据库切换 / 卸载；与服务二进制 `dhtsearch-server` 是两个文件 |
+| `/usr/local/bin/dhtsearch` | 管理脚本入口（install 时由 install.sh 自身复制），无参运行开交互菜单：安装 / 升级 / 状态 / 重启 / 日志 / 修改端口 / 数据库切换 / 卸载 / 启动 / 停止 / 开机自启 / 配置管理 / 备份与恢复 / 自检 / 检查更新 / 自动更新；与服务二进制 `dhtsearch-server` 是两个文件 |
 | `/etc/dhtsearch/dhtsearch.env` | 配置（端口、数据库：默认 SQLite 的 `DB_PATH`，或 `--db` 写入的 `DATABASE_URL`），权限 600，重复 install / upgrade 不覆盖 |
-| `/var/lib/dhtsearch/` | 数据库、`VERSION`、upgrade 的备份（`backups/`，健康检查失败自动回滚） |
+| `/var/lib/dhtsearch/` | 数据库、`VERSION`、自动更新状态文件 `autoupdate`、备份（`backups/`：upgrade 的回滚备份 + `db-*` 数据库备份） |
 
 交互菜单里选「安装」会依次询问 API 端口和 Web 端口（带默认值、校验 1-65535），新装时还会问数据库（SQLite / PostgreSQL 本机自动装 / PostgreSQL 已有地址），打印汇总确认后才执行；「修改端口」显示当前端口、询问新端口，保存后重启两个服务并跑健康检查；「数据库切换」显示当前后端、选目标、二次确认并提示短暂停机后执行带数据迁移的切换；升级 / 重启 / 改端口 / 切库 / 卸载在菜单里执行前都要二次确认，卸载可选择保留数据或 `--purge` 全删。
+
+菜单和子命令还提供一套日常运维能力：「启动 / 停止」与「重启」分开，「开机自启」开关两个服务的 enable 状态；「配置管理」可脱敏查看当前配置、设置 / 重置 `ADMIN_TOKEN`（随机生成只显示一次）、用编辑器改 env（改完提示重启）；「备份与恢复」按当前后端备份数据库（SQLite 复制文件、PostgreSQL 走 `pg_dump`）到 `backups/db-*`，恢复时先停服并给当前库留一份 `db-pre-restore-*` 快照；「自检」一次跑完服务状态、端口监听、磁盘余量、版本、数据库连通和近 24 小时 error 日志摘要；「检查更新」只查不升并把结果记下来，`status` 会显示上次检查时间和结果。
+
+自动更新默认关闭。在菜单「自动更新」或 `install.sh auto-update on daily|weekly` 开启后，会装一个 systemd 定时器 `dhtsearch-update.timer`（每天或每周一凌晨 03:37，带最多 30 分钟随机延迟，关机错过会在开机后补跑），到点执行 `dhtsearch upgrade --yes`——走的还是手动升级同一套流程（先备份、健康检查、失败自动回滚），没有第二套升级逻辑。开关状态、频率和上次检查结果存在 `/var/lib/dhtsearch/autoupdate`（脚本自己的状态文件，不进服务配置文件），`status` 里能看到；关闭或卸载时定时器会一并移除。注意：管理入口脚本本身随 Release 包更新——从菜单里发起的升级会用新包里的 install.sh 刷新 `/usr/local/bin/dhtsearch`，所以自动更新的定时器永远调到的是与已装版本配套的脚本。
 
 API 默认只听 `127.0.0.1:8080`、前端听 `127.0.0.1:3000`，公网访问请在前面加反向代理。日志：`journalctl -u dhtsearch -f`（前端 `-u dhtsearch-web`）；健康检查：`curl http://127.0.0.1:8080/api/healthz`（install/upgrade 会等它最多 120 秒，失败打印日志尾巴；端口改过的话换成实际端口）。
 
