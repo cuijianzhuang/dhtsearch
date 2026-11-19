@@ -1,24 +1,65 @@
-# DHTSearch
+<h1 align="center">DHTSearch</h1>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+<p align="center">自建索引的磁力链接搜索网站 · DHT 网络实时收录 · 自动过滤成人内容与垃圾信息</p>
 
+<p align="center">
+  <a href="https://github.com/cuijianzhuang/dhtsearch/releases/latest"><img src="https://img.shields.io/github/v/release/cuijianzhuang/dhtsearch?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC&color=0E7490" alt="最新版本"></a>
+  <img src="https://img.shields.io/badge/Go-1.25.6-00ADD8?logo=go&logoColor=white" alt="Go 1.25.6">
+  <a href="https://github.com/cuijianzhuang/dhtsearch/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/cuijianzhuang/dhtsearch/ci.yml?branch=main&label=CI&logo=githubactions&logoColor=white" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+</p>
+
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#功能亮点">功能亮点</a> ·
+  <a href="#api">API</a> ·
+  <a href="#管理端">管理端</a> ·
+  <a href="#部署">部署</a> ·
+  <a href="#开发">开发</a> ·
+  <a href="https://github.com/cuijianzhuang/dhtsearch/releases">版本下载</a> ·
+  <a href="https://github.com/cuijianzhuang/dhtsearch/issues">问题反馈</a>
+</p>
+
+Go 后端通过 DHT 网络爬虫实时采集磁力链接元数据，自动过滤成人内容与垃圾信息，Next.js 前端提供干净的搜索界面。
+
+> 本仓库是 [madeye/dhtsearch](https://github.com/madeye/dhtsearch) 的 fork。改造点：存储层双后端（SQLite / Postgres，安装时可选、装后可带数据切换）、令牌鉴权的管理端与全量配置设置页（含主题）、自定义端口与交互菜单的一键部署、合 main 自动发版。感谢上游作者的工作，许可证保持 MIT（见 [LICENSE](LICENSE)）。
+>
 > Co-authored by [Kimi K3](https://www.kimi.com/).
 
-一个自建索引的磁力链接搜索网站：Go 后端通过 DHT 网络爬虫实时采集磁力链接元数据，自动过滤成人内容与垃圾信息，Next.js 前端提供干净的搜索界面。
+## 目录
 
-> 本仓库是 [madeye/dhtsearch](https://github.com/madeye/dhtsearch) 的 fork，在上游基础上改造：存储层支持 Postgres（默认仍为 SQLite）、新增令牌鉴权的管理端、前端样式统一、一键部署脚本与自动化发版。感谢上游作者的工作，许可证保持 MIT（见 [LICENSE](LICENSE)）。
+- [功能亮点](#功能亮点)
+- [架构](#架构)
+- [快速开始](#快速开始)
+- [API](#api)
+- [管理端](#管理端)
+- [DoS 防护](#dos-防护)
+- [过滤策略](#过滤策略)
+- [部署](#部署)
+- [本地爬虫 + 增量同步（可选）](#本地爬虫--增量同步可选)
+- [开发](#开发)
+- [许可](#许可)
 
-功能清单：
+## 功能亮点
 
-- **DHT 爬虫**：被动监听 + BEP 51 `sample_infohashes` 主动采样发现 infohash，路由表自动维护
-- **元数据获取**：BEP 9 并发获取，获取前先用 BEP 15 tracker scrape 按 seeder 数排序，热门优先
-- **过滤与审核**：入库前静态过滤（成人词表 + 垃圾启发式 + 体积下限），入库后可每小时用 LLM 二次审核并顺带清理标题广告
-- **发布站 RSS**：定时拉动漫花园 / Nyaa 发布 RSS，发布页标题存为别名，罗马音种子也能按中文名搜到
-- **热门榜单**：每小时拉豆瓣热门榜单，首页提供快捷搜索词
-- **搜索前端**：Next.js 服务端渲染，匹配种子名、清理后标题与别名三列
-- **管理端**：`/admin` 概览、种子管理、未审核队列、黑名单、全量配置设置页（含主题），`ADMIN_TOKEN` 鉴权
-- **双数据库**：默认 SQLite 单文件零运维；设 `DATABASE_URL` 可切 Postgres
-- **部署与发版**：一键安装脚本（systemd 双服务）、合 main 自动发版、每小时备份到 Cloudflare R2（脚本自备）
+| 功能 | 说明 |
+| --- | --- |
+| DHT 爬虫 | 被动监听 + BEP 51 `sample_infohashes` 主动采样发现 infohash，路由表自动维护 |
+| 元数据获取 | BEP 9 并发获取；获取前先用 BEP 15 tracker scrape 按 seeder 数排序，热门优先 |
+| 过滤与审核 | 入库前静态过滤（成人词表 + 垃圾启发式 + 体积下限）；入库后可每小时用 LLM 二次审核，并顺带清理标题广告 |
+| 发布站 RSS | 定时拉动漫花园 / Nyaa 发布 RSS，发布页标题存为别名，罗马音种子也能按中文名搜到 |
+| 热门榜单 | 每小时拉豆瓣热门榜单，首页提供快捷搜索词 |
+| 搜索前端 | Next.js 服务端渲染，匹配种子名、清理后标题与别名三列 |
+| 管理端 | `/admin` 概览、种子管理、未审核队列、黑名单；设置页可视化全部 41 项配置（优先级：数据库覆盖 > 环境变量 > 默认值）与主题（站点名、六种主色、三态外观），`ADMIN_TOKEN` 鉴权 |
+| 双数据库 | 默认 SQLite 单文件零运维；可切 Postgres：安装时 `--db` 选库、装后菜单带数据切换，服务二进制自带 `migrate` 子命令双向迁移 |
+| 部署与发版 | 一键安装脚本（自定义端口、交互菜单、systemd 双服务）、合 main 自动发版、每小时备份到 Cloudflare R2（脚本自备） |
+
+## 界面截图
+
+<!-- 仓库暂未收录截图。将截图文件放入 docs/screenshots/ 后，取消下面几行的注释即可显示：
+![搜索首页](docs/screenshots/home.png)
+![管理端设置页](docs/screenshots/admin-settings.png)
+-->
 
 ## 架构
 
@@ -113,7 +154,15 @@ DHT 抽样碰到某个具体字幕组合集的概率很低；而且日剧种子�
 
 ## 快速开始
 
-前置：Go 版本以 `server/go.mod` 为准（当前 1.25.6）；前端开发用 Node 22（与 CI 一致）。
+只想把站点跑起来（单机部署）用一键安装，三条命令内完成（细节见下文「一键部署」）：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main/scripts/install.sh) install
+# 按提示选端口与数据库，装完浏览器打开 http://<服务器>:3000（或反代后的域名）
+dhtsearch   # 装后管理菜单：状态 / 升级 / 改端口 / 数据库切换 / 卸载
+```
+
+下面是从源码运行（开发调试）的说明。前置：Go 版本以 `server/go.mod` 为准（当前 1.25.6）；前端开发用 Node 22（与 CI 一致）。
 
 ### 后端
 
@@ -142,9 +191,6 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | `DHT_SAMPLERS` | `8` | BEP-51 并发采样 worker 数（调大反而降低入库速度，见上） |
 | `META_WORKERS` | `128` | 元数据并发 worker 数（入库速度的主要旋钮） |
 | `META_TIMEOUT` | `45s` | 单个元数据获取超时 |
-| `META_PRESCREEN_ENABLED` | `true` | 元数据早筛：窗口内无任何 peer 连上的 infohash 提前放弃，不占满 `META_TIMEOUT` |
-| `META_PRESCREEN_TIMEOUT` | `10s` | 早筛窗口（包含在 `META_TIMEOUT` 之内，不额外叠加） |
-| `META_PRIORITY_ENABLED` | `true` | 抓取优先级队列：做种数 > 来源 > 新鲜度（关 = 先进先出） |
 | `FETCH_METADATA` | `true` | 是否获取元数据（false 时只收 infohash） |
 | `SCRAPE_ENABLED` | `true` | 是否启用 tracker scrape 排序（见「Tracker 刮削排序」） |
 | `TRACKERS` | 内置列表 | 逗号分隔的 tracker announce URL，既作 scrape 目标也作获取的 peer 提示；完整默认列表见 `env.example` |
@@ -246,7 +292,8 @@ npm run dev                  # 开发，访问 http://localhost:3000
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `NEXT_PUBLIC_API_BASE` | 无 | 后端 API 地址，如 `http://localhost:8080` |
+| `API_BASE` | `http://localhost:8080` | 后端 API 地址，**运行时**读取（改后端端口不用重新构建）；一键安装时由 install.sh 按 API 端口自动写入 web 服务，优先于下面的构建期内联值 |
+| `NEXT_PUBLIC_API_BASE` | `http://localhost:8080` | 构建时内联的回退地址（Release 产物构建时写入 `http://127.0.0.1:8080`）；`API_BASE` 已设置时不生效 |
 | `NEXT_PUBLIC_GA_ID` | 无 | Google Analytics 衡量 ID（`G-XXXXXXXXXX`），留空则不加载任何分析脚本 |
 
 ## API
@@ -260,38 +307,6 @@ npm run dev                  # 开发，访问 http://localhost:3000
 | `GET /api/trending` | 豆瓣热门榜单（欧美电影、美剧、日剧、韩剧四类标题 + 更新时间），供首页快捷搜索词 |
 | `GET /api/healthz` | 健康检查，返回 `{"ok":true}`，不限流 |
 | `GET /api/site` | 站点名称与主题（主色预设、默认外观），供前端渲染，无需鉴权 |
-
-### 公开 API 令牌（可选鉴权）
-
-公开接口默认无鉴权。要把搜索 API 开给外部客户端、又不想完全敞开时，
-可以在管理端「API 令牌」页（`/admin/api-tokens`）签发令牌，并在
-「设置 → 公开 API」里打开 `PUBLIC_API_REQUIRE_TOKEN`：
-
-- **令牌形态**：`dht_` + 64 位十六进制随机串（256 位熵）。创建时明文
-  **只显示一次**，后端只存 SHA-256 哈希（随机令牌熵足够高，快哈希
-  即可防爆破，也省去逐请求校验的 CPU 开销）；列表里只显示前缀
-  （`dht_` + 前 8 位）用于区分。禁用立即生效（403），删除立即失效
-  （401）。
-- **携带方式**：`Authorization: Bearer <token>` 或 `X-API-Key: <token>`。
-- **错误码**：无令牌/错令牌 `401`、令牌被禁用 `403`、超令牌配额
-  `429`、公开 API 总开关（`PUBLIC_API_ENABLED`）关闭时 `503`。
-  `/api/healthz` 永远不鉴权、不限流。
-- **限速叠加**：每 IP 令牌桶（默认 3 req/s）对所有请求照常生效；
-  令牌另有自己的每分钟配额（新建默认 600 次/分钟，可在设置里改
-  默认值，也可在令牌页逐个改，0 = 不限）。两道都过才放行，任一
-  触发都是 `429`。
-- **未开启强制时**：接口保持匿名可用，但请求若带了有效令牌会被
-  计数（令牌页能看调用量与最后使用时间），可先观察再切换强制。
-- **注意**：自带前台也是匿名调用这些接口的，开启强制后前台搜索
-  会一并被拦——该开关适合「只对外提供 API」的部署。
-
-```bash
-# 带令牌调用（开启 PUBLIC_API_REQUIRE_TOKEN 后必需）
-curl -H "Authorization: Bearer dht_xxxxxxxx..." \
-  "https://your-host/api/search?q=ubuntu&page=1"
-curl -H "X-API-Key: dht_xxxxxxxx..." \
-  "https://your-host/api/stats"
-```
 
 管理接口（全部需要 `Authorization: Bearer <ADMIN_TOKEN>`，未配置令牌时整体 503，见「管理端」）：
 
@@ -309,17 +324,11 @@ curl -H "X-API-Key: dht_xxxxxxxx..." \
 | `DELETE /api/admin/blocked/{hash}` | 取消拉黑 |
 | `GET /api/admin/settings` | 全量配置：分组、每项生效值、来源（数据库/环境变量/默认）、敏感项脱敏 |
 | `PUT /api/admin/settings` | 批量保存运行配置：整批类型/范围校验，任一项非法整批拒绝并逐项报错 |
-| `GET /api/admin/api-tokens` | 公开 API 令牌列表（名称、前缀、状态、限速、调用量、最后使用；不含明文与哈希） |
-| `POST /api/admin/api-tokens` | 创建令牌：响应里带一次性明文 `token`，之后只能按前缀识别 |
-| `POST /api/admin/api-tokens/{id}/enable`、`.../disable` | 启用 / 禁用令牌（立即生效） |
-| `PUT /api/admin/api-tokens/{id}/rate` | 改单个令牌的每分钟配额（0 = 不限） |
-| `DELETE /api/admin/api-tokens/{id}` | 删除令牌（立即失效） |
 
 ## 管理端
 
 入口：前端 `/admin`（概览 `/admin`、种子管理 `/admin/torrents`、未审核队列
-`/admin/review`、黑名单 `/admin/blocked`、设置 `/admin/settings`、API 令牌
-`/admin/api-tokens`）。默认关闭：后端设置环境变量
+`/admin/review`、黑名单 `/admin/blocked`、设置 `/admin/settings`）。默认关闭：后端设置环境变量
 `ADMIN_TOKEN`（足够长的随机串，如 `openssl rand -hex 32`）并重启后启用；
 未设置时后端在启动日志里打印 `admin: disabled`，所有 `/api/admin/*`
 返回 503，前端显示「管理端未启用」提示。
@@ -333,8 +342,6 @@ curl -H "X-API-Key: dht_xxxxxxxx..." \
   （只删记录，可被重新收录）。
 - **未审核队列**：只看未审核，支持多选批量通过 / 批量拉黑。
 - **黑名单**：查看 blocked 表，逐条取消拉黑。
-- **API 令牌**：给公开接口签发/禁用/删除调用令牌，逐个设每分钟
-  配额，看每个令牌的调用量与最后使用时间（见「公开 API 令牌」）。
 - **设置**：全部配置可视化。启动配置（监听地址、数据库路径/连接串、
   管理令牌）只读展示，改 env 文件后重启生效；运行配置（爬虫、元数据、
   刮削、审核与过滤、热门榜单、订阅源、限流）在线可改，存数据库覆盖层，
@@ -466,11 +473,11 @@ DEPLOY_HOST=user@example.com ./deploy.sh
 bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main/scripts/install.sh) install
 ```
 
-子命令：`install` / `upgrade` / `status` / `uninstall`，外加运维子命令 `start` / `stop` / `restart`、`check-update`（只查不升，退出码 0 已最新 / 2 有新版 / 1 查询失败）、`backup` / `backups` / `restore`、`selfcheck`、`config`（脱敏打印配置）、`set-token`、`autostart on|off`、`auto-update on|off`（无参在终端里运行给交互菜单，菜单里是同一套能力）。常用选项：`--version vX.Y.Z` 指定版本（默认最新 Release）、`--file <tar.gz>` 用本地包安装、`--from-source` 无 Release 产物时从源码构建兜底（需要 git + Go + Node）、`uninstall --purge` 连配置和数据一起删（默认保留）。
+子命令：`install` / `upgrade` / `status` / `uninstall`（无参在终端里运行给交互菜单）。常用选项：`--version vX.Y.Z` 指定版本（默认最新 Release）、`--file <tar.gz>` 用本地包安装、`--from-source` 无 Release 产物时从源码构建兜底（需要 git + Go + Node）、`--dry-run` 只写配置与 unit 文件、不动 systemd（自检/排障用）、`uninstall --purge` 连配置和数据一起删（默认保留）。
 
 自定义端口：`install --api-port 18080 --web-port 13000`（也可预先设环境变量 `API_PORT` / `WEB_PORT`；优先级为 参数 > 环境变量 > 已有配置 > 默认 8080/3000）。API 端口写进配置文件的 `HTTP_ADDR`，同时生成给前端 unit 的 `API_BASE=http://127.0.0.1:<api-port>`——前端在服务端启动时读这个运行时变量（不写死在构建产物里），所以改后端端口不用重打 Release 包，前端会自动跟过去。upgrade 不带端口参数时保留已有端口不回退默认。启动服务前脚本会先检查两个端口：被其他进程占用会直接报出占用进程并退出，不会等到 120 秒健康检查超时（被本服务自己占着属正常，不误报）。
 
-数据库选择：`install --db sqlite|postgres-local|postgres-url`（交互安装时在端口之后也会问）。默认 `sqlite`；`postgres-local` 在本机自动安装并配置 PostgreSQL（Debian/Ubuntu 走 apt，其他发行版会停下来给手动指引）：检测到已有可用的本机 PG 就复用，否则自动安装，建 `dhtsearch` 角色和同名库、生成随机密码，把 `DATABASE_URL` 写进配置文件，安装汇总里把完整连接地址（含密码）只打印一次请保存；`postgres-url --database-url postgres://...` 用已有 PG，写配置前先实测连通性（用发布包里的二进制跑一次空迁移），连不上直接中止、不写配置。已有配置的机器重复 install 时后端保持不变（除非显式给 `--db`），upgrade 永远不动数据库选择。配置文件因为可能带数据库密码，权限收紧为 600（root 专属；systemd 以 root 读 EnvironmentFile 后注入进程环境，服务不受影响）。
+数据库选择：`install --db sqlite|postgres-local|postgres-url`（交互安装时在端口之后也会问）。默认 `sqlite`；`postgres-local` 在本机自动安装并配置 PostgreSQL（Debian/Ubuntu 走 apt，其他发行版会停下来给手动指引）：检测到已有可用的本机 PG 就复用，否则自动安装，建 `dhtsearch` 角色和同名库、生成随机密码，把 `DATABASE_URL` 写进配置文件，安装汇总里把完整连接地址（含密码）只打印一次请保存；`postgres-url --database-url postgres://...` 用已有 PG，写配置前先实测连通性（用发布包里的二进制跑一次空迁移），连不上直接中止、不写配置。已有配置的机器重复 install 时数据库后端保持不变（除非显式给 `--db`），upgrade 永远不动数据库选择。配置文件因为可能带数据库密码，权限收紧为 600（root 专属；systemd 以 root 读 EnvironmentFile 后注入进程环境，服务不受影响）。
 
 装后切换数据库用 `dhtsearch` 菜单的「数据库切换」：显示当前后端（SQLite 给文件路径，PG 给脱敏后的 URL），选目标（切 PG 同样有本机自动装 / 已有地址两条路），确认后严格按 停服务 → `dhtsearch-server migrate` 迁数据并核对行数 → 改 `DATABASE_URL` → 启服务 → 健康检查 的顺序执行；迁移失败或行数对不上就不改配置、按原配置把服务拉回来，新后端健康检查不过同样回滚。切回 SQLite 时数据从 PG 迁回 `DB_PATH` 文件（文件里已有的同 hash 旧行不覆盖）。
 
@@ -480,15 +487,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main
 | --- | --- |
 | `dhtsearch.service` / `dhtsearch-web.service` | API+爬虫 / 前端两个 systemd 单元，`enable --now` |
 | `/usr/local/bin/dhtsearch-server`、`/opt/dhtsearch/web/` | 二进制与前端产物 |
-| `/usr/local/bin/dhtsearch` | 管理脚本入口（install 时由 install.sh 自身复制），无参运行开交互菜单：安装 / 升级 / 状态 / 重启 / 日志 / 修改端口 / 数据库切换 / 卸载 / 启动 / 停止 / 开机自启 / 配置管理 / 备份与恢复 / 自检 / 检查更新 / 自动更新；与服务二进制 `dhtsearch-server` 是两个文件 |
+| `/usr/local/bin/dhtsearch` | 管理脚本入口（install 时由 install.sh 自身复制），无参运行开交互菜单：安装 / 升级 / 状态 / 重启 / 日志 / 修改端口 / 数据库切换 / 卸载；与服务二进制 `dhtsearch-server` 是两个文件 |
 | `/etc/dhtsearch/dhtsearch.env` | 配置（端口、数据库：默认 SQLite 的 `DB_PATH`，或 `--db` 写入的 `DATABASE_URL`），权限 600，重复 install / upgrade 不覆盖 |
-| `/var/lib/dhtsearch/` | 数据库、`VERSION`、自动更新状态文件 `autoupdate`、备份（`backups/`：upgrade 的回滚备份 + `db-*` 数据库备份） |
+| `/var/lib/dhtsearch/` | 数据库、`VERSION`、upgrade 的备份（`backups/`，健康检查失败自动回滚） |
 
 交互菜单里选「安装」会依次询问 API 端口和 Web 端口（带默认值、校验 1-65535），新装时还会问数据库（SQLite / PostgreSQL 本机自动装 / PostgreSQL 已有地址），打印汇总确认后才执行；「修改端口」显示当前端口、询问新端口，保存后重启两个服务并跑健康检查；「数据库切换」显示当前后端、选目标、二次确认并提示短暂停机后执行带数据迁移的切换；升级 / 重启 / 改端口 / 切库 / 卸载在菜单里执行前都要二次确认，卸载可选择保留数据或 `--purge` 全删。
-
-菜单和子命令还提供一套日常运维能力：「启动 / 停止」与「重启」分开，「开机自启」开关两个服务的 enable 状态；「配置管理」可脱敏查看当前配置、设置 / 重置 `ADMIN_TOKEN`（随机生成只显示一次）、用编辑器改 env（改完提示重启）；「备份与恢复」按当前后端备份数据库（SQLite 复制文件、PostgreSQL 走 `pg_dump`）到 `backups/db-*`，恢复时先停服并给当前库留一份 `db-pre-restore-*` 快照；「自检」一次跑完服务状态、端口监听、磁盘余量、版本、数据库连通和近 24 小时 error 日志摘要；「检查更新」只查不升并把结果记下来，`status` 会显示上次检查时间和结果。
-
-自动更新默认关闭。在菜单「自动更新」或 `install.sh auto-update on daily|weekly` 开启后，会装一个 systemd 定时器 `dhtsearch-update.timer`（每天或每周一凌晨 03:37，带最多 30 分钟随机延迟，关机错过会在开机后补跑），到点执行 `dhtsearch upgrade --yes`——走的还是手动升级同一套流程（先备份、健康检查、失败自动回滚），没有第二套升级逻辑。开关状态、频率和上次检查结果存在 `/var/lib/dhtsearch/autoupdate`（脚本自己的状态文件，不进服务配置文件），`status` 里能看到；关闭或卸载时定时器会一并移除。注意：管理入口脚本本身随 Release 包更新——从菜单里发起的升级会用新包里的 install.sh 刷新 `/usr/local/bin/dhtsearch`，所以自动更新的定时器永远调到的是与已装版本配套的脚本。
 
 API 默认只听 `127.0.0.1:8080`、前端听 `127.0.0.1:3000`，公网访问请在前面加反向代理。日志：`journalctl -u dhtsearch -f`（前端 `-u dhtsearch-web`）；健康检查：`curl http://127.0.0.1:8080/api/healthz`（install/upgrade 会等它最多 120 秒，失败打印日志尾巴；端口改过的话换成实际端口）。
 
