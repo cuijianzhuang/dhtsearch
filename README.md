@@ -34,7 +34,7 @@ flowchart TB
     Blocked -.->|rejected on insert, no resurrection| DB
 ```
 
-- `server/` — Go 后端：DHT 爬虫（anacrolix/dht/v2）、BEP-9 元数据获取（anacrolix/torrent）、过滤引擎（中英文成人词表 + 垃圾启发式）、SQLite 存储（modernc.org/sqlite，无 cgo）、REST API（标准库 net/http）
+- `server/` — Go 后端：DHT 爬虫（anacrolix/dht/v2）、BEP-9 元数据获取（anacrolix/torrent）、过滤引擎（中英文成人词表 + 垃圾启发式）、存储层（默认 SQLite / modernc.org/sqlite，无 cgo；可选 Postgres / pgx，见 `DATABASE_URL`）、REST API（标准库 net/http）
 - `web/` — Next.js 前端（App Router + Tailwind，服务端渲染搜索结果）
 
 ### 发现速度
@@ -118,7 +118,8 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `HTTP_ADDR` | `:8080` | HTTP 监听地址 |
-| `DB_PATH` | `./dhtsearch.db` | SQLite 路径 |
+| `DB_PATH` | `./dhtsearch.db` | SQLite 路径（设置 `DATABASE_URL` 后忽略） |
+| `DATABASE_URL` | 无 | 设为 `postgres://` / `postgresql://` 连接串时改用 Postgres（pgx 驱动），见下文「Postgres」；不设则默认 SQLite |
 | `CRAWL_ENABLED` | `true` | 是否启动 DHT 爬虫 |
 | `DHT_PORT` | `0`（随机） | DHT UDP 端口 |
 | `DHT_SAMPLERS` | `8` | BEP-51 并发采样 worker 数（调大反而降低入库速度，见上） |
@@ -131,6 +132,27 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | `RATE_LIMIT_BURST` | `30` | 令牌桶突发容量 |
 | `SEARCH_MAX_INFLIGHT` | `16` | 并发搜索上限，超出直接 503 甩负载 |
 | `SEARCH_TIMEOUT` | `10s` | 单次搜索的数据库时间预算 |
+
+### Postgres（可选，`DATABASE_URL`）
+
+默认 SQLite 单文件、零运维。需要多写并发、把库和服务拆开部署，或者表长到
+LIKE 全表扫描扛不住时，可以切 Postgres，行为和 API 不变：
+
+```bash
+DATABASE_URL='postgres://user:pass@127.0.0.1:5432/dhtsearch?sslmode=disable' go run ./cmd/server
+```
+
+- 驱动是 `jackc/pgx/v5`（stdlib 模式）；方言差异全部收敛在
+  `server/internal/store/dialect.go`：占位符 `?`→`$n`、`BLOB`→`BYTEA`、
+  整型→`BIGINT`、`INSERT OR IGNORE`→`ON CONFLICT DO NOTHING`、
+  `IIF`→`CASE WHEN`、搜索 `LIKE`→`ILIKE`（保持与 SQLite 一致的大小写
+  不敏感语义）。
+- 启动时自动建表/补列（与 SQLite 同一套迁移逻辑）；若当前角色能建扩展，
+  还会建 `pg_trgm` 扩展和 name/clean_name/alias 三列的 GIN 三元组索引，
+  子串搜索可走索引；建不了扩展时自动退化为顺序扫描，不阻塞启动。
+- 连接池默认 10（SQLite 是单连接）；数据不自动从 SQLite 迁移，需要搬库
+  请单独导数。
+- 集成测试：`DHTSEARCH_TEST_POSTGRES_URL=postgres://localhost/dhtsearch_test?sslmode=disable go test ./internal/store/ -run TestPostgresStore -v`（未设置该变量时自动跳过）。
 
 LLM 审核相关（见下文「LLM 二次审核」）：
 

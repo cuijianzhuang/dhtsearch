@@ -181,7 +181,9 @@ func main() {
 	}
 
 	addr := flag.String("addr", envDefault("HTTP_ADDR", ":8080"), "HTTP listen address")
-	dbPath := flag.String("db", envDefault("DB_PATH", "./dhtsearch.db"), "SQLite database path")
+	dbPath := flag.String("db", envDefault("DB_PATH", "./dhtsearch.db"), "SQLite database path (ignored when DATABASE_URL is set)")
+	databaseURL := flag.String("database-url", envDefault("DATABASE_URL", ""),
+		"database URL: postgres:// or postgresql:// selects Postgres; empty uses the SQLite file at DB_PATH")
 	crawlEnabled := flag.Bool("crawl", envBool("CRAWL_ENABLED", true), "enable the DHT crawler")
 	dhtPort := flag.Int("dht-port", envInt("DHT_PORT", 0), "DHT UDP listen port (0 = random)")
 	samplers := flag.Int("dht-samplers", envInt("DHT_SAMPLERS", 8), "concurrent BEP 51 sampling workers")
@@ -249,7 +251,13 @@ func main() {
 
 	filter.MinTotalSize = *minSize
 
-	st, err := store.Open(*dbPath)
+	var st *store.Store
+	var err error
+	if *databaseURL != "" {
+		st, err = store.OpenURL(*databaseURL)
+	} else {
+		st, err = store.Open(*dbPath)
+	}
 	if err != nil {
 		logger.Fatalf("store: %v", err)
 	}
@@ -515,8 +523,13 @@ func main() {
 		defer cancel()
 		srv.Shutdown(shutdownCtx)
 	}()
+	dbDesc := *dbPath
+	if *databaseURL != "" {
+		// Never log the URL itself: it carries the password.
+		dbDesc = st.Dialect()
+	}
 	logger.Printf("http: listening on %s (db=%s crawl=%v fetch-metadata=%v)",
-		*addr, *dbPath, *crawlEnabled, *fetchMetadata)
+		*addr, dbDesc, *crawlEnabled, *fetchMetadata)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		logger.Fatalf("http: %v", err)
 	}
