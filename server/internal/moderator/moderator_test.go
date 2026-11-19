@@ -384,3 +384,57 @@ func TestRequestTimeoutRetriesAndRecovers(t *testing.T) {
 		t.Fatalf("attempts=%d", calls.Load())
 	}
 }
+
+// TestDynamicConfigAppliesPerSweep proves a ConfigFunc snapshot is
+// re-read for every sweep: with MaxBatches=1/BatchSize=1 only one of
+// two pending rows is reviewed; after the func's values change, the
+// next sweep takes the rest.
+func TestDynamicConfigAppliesPerSweep(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "Movie One 2024", "Movie Two 2024")
+	srv := fakeAPI(t, func(string) string { return "ok" }, nil)
+
+	maxBatches, batchSize := 1, 1
+	m, err := New(st, Config{
+		Logger: discardLogger(),
+		ConfigFunc: func() Config {
+			return Config{
+				Enabled: true, BaseURL: srv.URL, APIKey: "test-key", Model: "m",
+				BatchSize: batchSize, MaxBatches: maxBatches, Logger: discardLogger(),
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum, err := m.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Reviewed != 1 {
+		t.Fatalf("first sweep reviewed %d, want 1", sum.Reviewed)
+	}
+	maxBatches, batchSize = 0, 10
+	sum, err = m.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Reviewed != 1 {
+		t.Fatalf("second sweep reviewed %d, want the remaining 1", sum.Reviewed)
+	}
+}
+
+// TestDynamicModeratorRequiresKeyInSnapshot: New accepts a keyless
+// dynamic config (the pass idles in Run), where the static path
+// still refuses.
+func TestDynamicModeratorRequiresKeyInSnapshot(t *testing.T) {
+	st := newStore(t)
+	if _, err := New(st, Config{Logger: discardLogger(), ConfigFunc: func() Config {
+		return Config{Enabled: true, Logger: discardLogger()}
+	}}); err != nil {
+		t.Fatalf("dynamic New with keyless snapshot: %v", err)
+	}
+	if _, err := New(st, Config{Logger: discardLogger()}); err == nil {
+		t.Fatal("static New without key must still fail")
+	}
+}

@@ -1,15 +1,18 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import LoginForm from "@/components/admin/LoginForm";
+import SiteLogo from "@/components/SiteLogo";
+import { fetchSiteConfig } from "@/lib/site";
 
 export const metadata: Metadata = { title: "管理端登录" };
 
-export default function AdminLoginPage() {
+export default async function AdminLoginPage() {
+  const site = await fetchSiteConfig();
   return (
     <main className="mx-auto flex w-full max-w-md flex-1 flex-col px-4 py-16">
       <div className="rounded-xl border border-line bg-surface p-6 shadow-card">
         <p className="text-xl font-bold tracking-tight">
-          DHT<span className="text-accent-ink">Search</span>
+          <SiteLogo name={site.name} />
           <span className="ml-3 rounded-md bg-accent-soft px-2 py-1 align-middle text-xs font-medium text-accent-ink">
             管理端
           </span>

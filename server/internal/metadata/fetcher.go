@@ -36,6 +36,10 @@ type Config struct {
 	Workers int
 	// Timeout is how long to wait for one torrent's info before giving up.
 	Timeout time.Duration
+	// TimeoutFunc, when non-nil, supplies the timeout per fetch,
+	// overriding Timeout — the settings system uses it so META_TIMEOUT
+	// changes apply without rebuilding the fetcher.
+	TimeoutFunc func() time.Duration
 	// MaxFiles caps how many file entries are kept per torrent.
 	MaxFiles int
 	// Trackers are announce URLs appended to every magnet. Tracker announces
@@ -162,9 +166,15 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 	}
 	defer t.Drop()
 
+	timeout := f.cfg.Timeout
+	if f.cfg.TimeoutFunc != nil {
+		if d := f.cfg.TimeoutFunc(); d > 0 {
+			timeout = d
+		}
+	}
 	select {
 	case <-t.GotInfo():
-	case <-time.After(f.cfg.Timeout):
+	case <-time.After(timeout):
 		f.count(&f.timedOut)
 		return rec, false
 	case <-ctx.Done():

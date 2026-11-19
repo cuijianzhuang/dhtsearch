@@ -136,7 +136,25 @@ func (d dialect) schemaStatements() []string {
 			name       TEXT NOT NULL,
 			created_at ` + intType + ` NOT NULL
 		)`,
+		// Operator overrides for runtime configuration, written by the
+		// admin settings API (see internal/settings). Only keys the
+		// settings registry marks editable ever land here; the effective
+		// value of a setting is this table's row when present, else the
+		// environment, else the built-in default.
+		`CREATE TABLE IF NOT EXISTS settings (
+			key        TEXT PRIMARY KEY,
+			value      TEXT NOT NULL,
+			updated_at ` + intType + ` NOT NULL
+		)`,
 	}
+}
+
+// upsertSetting writes one settings row. The right-hand side references
+// only excluded.*, which both backends accept (see incrStat for the
+// Postgres ambiguity this avoids).
+func (d dialect) upsertSetting() string {
+	return `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
 }
 
 // insertTorrent is Upsert's statement: insert unless the hash is already

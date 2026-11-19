@@ -101,7 +101,7 @@ func TestEmptySubjectsIsError(t *testing.T) {
 	defer srv.Close()
 
 	svc := New(Config{BaseURL: srv.URL})
-	if _, err := svc.fetchList(context.Background(), "movie", "欧美", true); err == nil {
+	if _, err := svc.fetchList(context.Background(), svc.cfgNow(), "movie", "欧美", true); err == nil {
 		t.Fatal("expected error for empty subjects")
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"dhtsearch/server/internal/metadata"
 	"dhtsearch/server/internal/moderator"
 	"dhtsearch/server/internal/scraper"
+	"dhtsearch/server/internal/settings"
 	"dhtsearch/server/internal/store"
 	"dhtsearch/server/internal/trending"
 )
@@ -251,8 +252,6 @@ func main() {
 		"also strip advertising from torrent titles during the moderation pass")
 	flag.Parse()
 
-	filter.MinTotalSize = *minSize
-
 	var st *store.Store
 	var err error
 	if *databaseURL != "" {
@@ -269,14 +268,85 @@ func main() {
 		seed(st, logger)
 	}
 
+	// Settings registry (internal/settings): the base layer is what
+	// the flags/env resolved to above; overrides saved from the admin
+	// settings page layer on top and win. Structural values below are
+	// read back out of the manager, so a restart applies whatever the
+	// settings page last saved; live items are read through the
+	// manager at use time by the modules themselves.
+	base := map[string]string{}
+	fromEnv := map[string]bool{}
+	reg := func(key, val string) {
+		base[key] = val
+		fromEnv[key] = os.Getenv(key) != ""
+	}
+	reg(settings.KeyHTTPAddr, *addr)
+	reg(settings.KeyDBPath, *dbPath)
+	reg(settings.KeyDatabaseURL, *databaseURL)
+	reg(settings.KeyAdminToken, *adminToken)
+	reg(settings.KeyEnvFile, envPath)
+	reg(settings.KeySiteName, envDefault("SITE_NAME", "DHTSearch"))
+	reg(settings.KeyThemeColor, envDefault("THEME_COLOR", "teal"))
+	reg(settings.KeyThemeAppearance, envDefault("THEME_APPEARANCE", "system"))
+	reg(settings.KeyCrawlEnabled, strconv.FormatBool(*crawlEnabled))
+	reg(settings.KeyDHTPort, strconv.Itoa(*dhtPort))
+	reg(settings.KeyDHTSamplers, strconv.Itoa(*samplers))
+	reg(settings.KeyFetchMetadata, strconv.FormatBool(*fetchMetadata))
+	reg(settings.KeyMetaWorkers, strconv.Itoa(*metaWorkers))
+	reg(settings.KeyMetaTimeout, metaTimeout.String())
+	reg(settings.KeyMinTorrentSize, strconv.FormatInt(*minSize, 10))
+	reg(settings.KeyScrapeEnabled, strconv.FormatBool(*scrapeEnabled))
+	reg(settings.KeyTrackers, *trackersCSV)
+	reg(settings.KeyModerationEnabled, strconv.FormatBool(*modEnabled))
+	reg(settings.KeyOpenAIAPIKey, os.Getenv("OPENAI_API_KEY"))
+	reg(settings.KeyOpenAIBaseURL, *modBaseURL)
+	reg(settings.KeyOpenAIModel, *modModel)
+	reg(settings.KeyModerationInterval, modInterval.String())
+	reg(settings.KeyModerationTimeout, modTimeout.String())
+	reg(settings.KeyModerationBatchSize, strconv.Itoa(*modBatch))
+	reg(settings.KeyModerationMaxBatches, strconv.Itoa(*modMaxBatches))
+	reg(settings.KeyModerationDryRun, strconv.FormatBool(*modDryRun))
+	reg(settings.KeyModerationTrimTitles, strconv.FormatBool(*modTrim))
+	reg(settings.KeyFilterBlockWords, envDefault("FILTER_BLOCK_WORDS", ""))
+	reg(settings.KeyTrendingEnabled, strconv.FormatBool(*trendEnabled))
+	reg(settings.KeyTrendingInterval, trendInterval.String())
+	reg(settings.KeyTrendingLimit, strconv.Itoa(*trendLimit))
+	reg(settings.KeyFeedsEnabled, strconv.FormatBool(*feedsEnabled))
+	reg(settings.KeyFeeds, *feedsCSV)
+	reg(settings.KeyFeedsKeywordURL, *feedKeywordURL)
+	reg(settings.KeyFeedsInterval, feedsInterval.String())
+	reg(settings.KeyFeedsWorkers, strconv.Itoa(*feedsWorkers))
+	reg(settings.KeyFeedsMetaTimeout, feedsTimeout.String())
+	reg(settings.KeyRateLimitRPS, strconv.FormatFloat(*rateRPS, 'f', -1, 64))
+	reg(settings.KeyRateLimitBurst, strconv.Itoa(*rateBurst))
+	reg(settings.KeySearchMaxInflight, strconv.Itoa(*searchInflight))
+	reg(settings.KeySearchTimeout, searchTimeout.String())
+
+	mgr, err := settings.New(base, fromEnv, st, logger)
+	if err != nil {
+		logger.Fatalf("settings: %v", err)
+	}
+
+	// The content filter keeps package-level state; push its two live
+	// settings now and on every accepted settings update.
+	applyFilter := func() {
+		filter.SetMinTotalSize(mgr.Int64(settings.KeyMinTorrentSize))
+		filter.SetBlockWords(mgr.List(settings.KeyFilterBlockWords))
+	}
+	applyFilter()
+	mgr.SetOnChange(func([]string) { applyFilter() })
+
+	crawlOn := mgr.Bool(settings.KeyCrawlEnabled)
+	fetchMeta := mgr.Bool(settings.KeyFetchMetadata)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// Crawler.
 	cr, err := crawler.Start(crawler.Config{
-		Port:     *dhtPort,
-		Enabled:  *crawlEnabled,
-		Samplers: *samplers,
+		Port:     mgr.Int(settings.KeyDHTPort),
+		Enabled:  crawlOn,
+		Samplers: mgr.Int(settings.KeyDHTSamplers),
 		Logger:   logger,
 	})
 	if err != nil {
@@ -284,36 +354,44 @@ func main() {
 	}
 	defer cr.Close()
 
-	trackerList := splitCSV(*trackersCSV)
+	trackerList := mgr.List(settings.KeyTrackers)
 
-	var trendSvc *trending.Service
-	if *trendEnabled {
-		trendSvc = trending.New(trending.Config{
-			Interval: *trendInterval,
-			Limit:    *trendLimit,
-			Logger:   logger,
-		})
-	}
+	// Trending runs in dynamic mode: the enable gate and the
+	// interval/limit are re-read from the settings registry each
+	// cycle, so the settings page controls it live.
+	trendSvc := trending.New(trending.Config{
+		Interval: *trendInterval,
+		Limit:    *trendLimit,
+		Logger:   logger,
+		ConfigFunc: func() trending.Config {
+			return trending.Config{
+				Interval: mgr.Duration(settings.KeyTrendingInterval),
+				Limit:    mgr.Int(settings.KeyTrendingLimit),
+			}
+		},
+		EnabledFunc: func() bool { return mgr.Bool(settings.KeyTrendingEnabled) },
+	})
 
 	// Pipeline: infohashes -> scrape ranking -> metadata -> filter -> store.
 	var fetcher *metadata.Fetcher
 	var scr *scraper.Scraper
 	var feedSvc *feeds.Service
 	var feedFetch *metadata.Fetcher
-	if *fetchMetadata {
+	if fetchMeta {
 		var err error
 		fetcher, err = metadata.NewFetcher(metadata.Config{
-			Workers:  *metaWorkers,
-			Timeout:  *metaTimeout,
-			Trackers: trackerList,
-			Logger:   logger,
+			Workers:     mgr.Int(settings.KeyMetaWorkers),
+			Timeout:     mgr.Duration(settings.KeyMetaTimeout),
+			TimeoutFunc: func() time.Duration { return mgr.Duration(settings.KeyMetaTimeout) },
+			Trackers:    trackerList,
+			Logger:      logger,
 		})
 		if err != nil {
 			logger.Fatalf("metadata: %v", err)
 		}
 		defer fetcher.Close()
 		feed := cr.Infohashes()
-		if *scrapeEnabled && len(trackerList) > 0 && feed != nil {
+		if mgr.Bool(settings.KeyScrapeEnabled) && len(trackerList) > 0 && feed != nil {
 			scr, err = scraper.New(scraper.Config{
 				Trackers: trackerList,
 				Logger:   logger,
@@ -330,46 +408,52 @@ func main() {
 		// main one's queue: the main client runs META_WORKERS concurrent
 		// fetches of mostly dead DHT hashes, and a live fansub swarm that a
 		// standalone client fetches in seconds times out inside it.
-		var feedFetcher *metadata.Fetcher
-		if *feedsEnabled {
-			cfg := feeds.Config{
-				Feeds:    splitCSV(*feedsCSV),
-				Interval: *feedsInterval,
-				Store:    st,
-				Logger:   logger,
-			}
-			if trendSvc != nil && *feedKeywordURL != "" {
-				cfg.KeywordURL = *feedKeywordURL
-				cfg.Keywords = func() []string {
-					snap := trendSvc.Get()
-					return append(append([]string(nil), snap.TVJP...), snap.TVKR...)
-				}
-			}
-			feedSvc = feeds.New(cfg)
-			go func(fs *feeds.Service) {
-				// Let trending load first so the opening poll already
-				// searches the chip titles; bounded in case Douban hangs.
-				if trendSvc != nil {
-					select {
-					case <-trendSvc.Ready():
-					case <-time.After(2 * time.Minute):
-					case <-ctx.Done():
-						return
-					}
-				}
-				fs.Run(ctx)
-			}(feedSvc)
-			feedFetcher, err = metadata.NewFetcher(metadata.Config{
-				Workers:  *feedsWorkers,
-				Timeout:  *feedsTimeout,
-				Trackers: trackerList,
-				Logger:   logger,
-			})
-			if err != nil {
-				logger.Fatalf("feeds metadata: %v", err)
-			}
-			defer feedFetcher.Close()
+		// The service is built unconditionally in dynamic mode: the
+		// enable gate, feed list, keyword URL and interval are re-read
+		// from the settings registry every poll.
+		feedKeywords := func() []string {
+			snap := trendSvc.Get()
+			return append(append([]string(nil), snap.TVJP...), snap.TVKR...)
 		}
+		feedSvc = feeds.New(feeds.Config{
+			Feeds:      mgr.List(settings.KeyFeeds),
+			KeywordURL: mgr.Get(settings.KeyFeedsKeywordURL),
+			Keywords:   feedKeywords,
+			Interval:   mgr.Duration(settings.KeyFeedsInterval),
+			Store:      st,
+			Logger:     logger,
+			ConfigFunc: func() feeds.Config {
+				return feeds.Config{
+					Feeds:      mgr.List(settings.KeyFeeds),
+					KeywordURL: mgr.Get(settings.KeyFeedsKeywordURL),
+					Keywords:   feedKeywords,
+					Interval:   mgr.Duration(settings.KeyFeedsInterval),
+				}
+			},
+			EnabledFunc: func() bool { return mgr.Bool(settings.KeyFeedsEnabled) },
+		})
+		go func(fs *feeds.Service) {
+			// Let trending load first so the opening poll already
+			// searches the chip titles; bounded in case Douban hangs.
+			select {
+			case <-trendSvc.Ready():
+			case <-time.After(2 * time.Minute):
+			case <-ctx.Done():
+				return
+			}
+			fs.Run(ctx)
+		}(feedSvc)
+		feedFetcher, err := metadata.NewFetcher(metadata.Config{
+			Workers:     mgr.Int(settings.KeyFeedsWorkers),
+			Timeout:     mgr.Duration(settings.KeyFeedsMetaTimeout),
+			TimeoutFunc: func() time.Duration { return mgr.Duration(settings.KeyFeedsMetaTimeout) },
+			Trackers:    trackerList,
+			Logger:      logger,
+		})
+		if err != nil {
+			logger.Fatalf("feeds metadata: %v", err)
+		}
+		defer feedFetcher.Close()
 		onRecord := func(rec metadata.Record) {
 			res := filter.Check(rec.Name, rec.Files, rec.TotalSize)
 			if res.Adult {
@@ -422,48 +506,48 @@ func main() {
 	}
 
 	// Periodic LLM moderation pass over rows the static filter admitted.
-	if *modEnabled {
-		key := os.Getenv("OPENAI_API_KEY")
-		if key == "" {
-			logger.Printf("moderator: disabled (OPENAI_API_KEY not set; see env.example)")
-		} else {
-			mod, err := moderator.New(st, moderator.Config{
-				BaseURL:    *modBaseURL,
-				APIKey:     key,
-				Model:      *modModel,
-				Interval:   *modInterval,
-				BatchSize:  *modBatch,
-				MaxBatches: *modMaxBatches,
-				Timeout:    *modTimeout,
-				DryRun:     *modDryRun,
-				TrimTitles: *modTrim,
+	// Always running in dynamic mode: it idles while disabled or keyless
+	// and picks up settings changes — including the API key itself —
+	// without a restart.
+	mod, err := moderator.New(st, moderator.Config{
+		Logger: logger,
+		ConfigFunc: func() moderator.Config {
+			return moderator.Config{
+				Enabled:    mgr.Bool(settings.KeyModerationEnabled),
+				BaseURL:    mgr.Get(settings.KeyOpenAIBaseURL),
+				APIKey:     mgr.Get(settings.KeyOpenAIAPIKey),
+				Model:      mgr.Get(settings.KeyOpenAIModel),
+				Interval:   mgr.Duration(settings.KeyModerationInterval),
+				BatchSize:  mgr.Int(settings.KeyModerationBatchSize),
+				MaxBatches: mgr.Int(settings.KeyModerationMaxBatches),
+				Timeout:    mgr.Duration(settings.KeyModerationTimeout),
+				DryRun:     mgr.Bool(settings.KeyModerationDryRun),
+				TrimTitles: mgr.Bool(settings.KeyModerationTrimTitles),
 				Logger:     logger,
-			})
-			if err != nil {
-				logger.Fatalf("moderator: %v", err)
 			}
-			go mod.Run(ctx)
-		}
+		},
+	})
+	if err != nil {
+		logger.Fatalf("moderator: %v", err)
 	}
+	go mod.Run(ctx)
 
 	// Douban trending fetcher for the homepage quick-search chips.
-	var trendFn func() api.Trending
-	if trendSvc != nil {
-		svc := trendSvc
-		go svc.Run(ctx)
-		trendFn = func() api.Trending {
-			snap := svc.Get()
-			t := api.Trending{
-				Movies: snap.Movies,
-				TV:     snap.TV,
-				TVJP:   snap.TVJP,
-				TVKR:   snap.TVKR,
-			}
-			if !snap.UpdatedAt.IsZero() {
-				t.UpdatedAt = snap.UpdatedAt.Unix()
-			}
+	// The enable gate is consulted per request: disabled means the
+	// endpoint serves empty lists even though the service keeps its
+	// last snapshot.
+	go trendSvc.Run(ctx)
+	trendFn := func() api.Trending {
+		t := api.Trending{Movies: []string{}, TV: []string{}, TVJP: []string{}, TVKR: []string{}}
+		if !mgr.Bool(settings.KeyTrendingEnabled) {
 			return t
 		}
+		snap := trendSvc.Get()
+		t.Movies, t.TV, t.TVJP, t.TVKR = snap.Movies, snap.TV, snap.TVJP, snap.TVKR
+		if !snap.UpdatedAt.IsZero() {
+			t.UpdatedAt = snap.UpdatedAt.Unix()
+		}
+		return t
 	}
 
 	// Mirror the crawler's in-memory seen count and the fetch outcome
@@ -513,6 +597,7 @@ func main() {
 			FeedsStatus:   feedsStatus(feedSvc, feedFetch),
 			Trending:      trendFn,
 			AdminToken:    *adminToken,
+			Settings:      mgr,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -537,7 +622,7 @@ func main() {
 		logger.Printf("admin: enabled (console API at /api/admin/*, UI at the web app's /admin)")
 	}
 	logger.Printf("http: listening on %s (db=%s crawl=%v fetch-metadata=%v)",
-		*addr, dbDesc, *crawlEnabled, *fetchMetadata)
+		*addr, dbDesc, crawlOn, fetchMeta)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		logger.Fatalf("http: %v", err)
 	}

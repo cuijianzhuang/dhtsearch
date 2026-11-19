@@ -1,23 +1,28 @@
 import Link from "next/link";
 import LogoutButton from "./LogoutButton";
+import SiteLogo from "@/components/SiteLogo";
+import AppearanceSwitcher from "@/components/AppearanceSwitcher";
+import { fetchSiteConfig } from "@/lib/site";
 
 const TABS = [
   { key: "overview", href: "/admin", label: "概览" },
   { key: "torrents", href: "/admin/torrents", label: "种子管理" },
   { key: "review", href: "/admin/review", label: "未审核队列" },
   { key: "blocked", href: "/admin/blocked", label: "黑名单" },
+  { key: "settings", href: "/admin/settings", label: "设置" },
 ] as const;
 
 export type AdminTabKey = (typeof TABS)[number]["key"];
 
 /** Shared chrome for the protected admin pages: title, tab nav, logout. */
-export default function AdminShell({
+export default async function AdminShell({
   active,
   children,
 }: {
   active: AdminTabKey;
   children: React.ReactNode;
 }) {
+  const site = await fetchSiteConfig();
   return (
     <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-6">
       <header className="flex flex-wrap items-center gap-3">
@@ -25,12 +30,13 @@ export default function AdminShell({
           href="/admin"
           className="inline-flex min-h-11 items-center text-xl font-bold tracking-tight"
         >
-          DHT<span className="text-accent-ink">Search</span>
+          <SiteLogo name={site.name} />
           <span className="ml-3 rounded-md bg-accent-soft px-2 py-1 text-xs font-medium text-accent-ink">
             管理端
           </span>
         </Link>
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
+          <AppearanceSwitcher defaultAppearance={site.themeAppearance} />
           <LogoutButton />
         </div>
       </header>
@@ -58,7 +64,7 @@ export default function AdminShell({
       </nav>
       <div className="mt-6 flex flex-1 flex-col">{children}</div>
       <footer className="mt-auto pt-10 text-center text-xs text-faint">
-        DHTSearch 管理端 · 数据来自后端 /api/admin
+        {site.name} 管理端 · 数据来自后端 /api/admin
       </footer>
     </main>
   );

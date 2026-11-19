@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"dhtsearch/server/internal/feeds"
+	"dhtsearch/server/internal/settings"
 	"dhtsearch/server/internal/store"
 )
 
@@ -64,6 +65,13 @@ type Options struct {
 	// 503 and the startup log says so. The token comes from the
 	// environment only — never stored, never logged.
 	AdminToken string
+	// Settings, when non-nil, is the live configuration registry: it
+	// backs /api/site and /api/admin/settings, and the DoS knobs above
+	// (RateRPS, RateBurst, MaxInflight, SearchTimeout) are re-read
+	// from it whenever its version moves, so admin edits apply
+	// without a restart. The static fields remain the fallback for
+	// tests and settings-free wiring.
+	Settings *settings.Manager
 }
 
 // Trending is the payload for /api/trending: Douban's current hot movie and
@@ -113,6 +121,14 @@ type Server struct {
 	limiter   *ipLimiter    // nil when rate limiting is disabled
 	searchSem chan struct{} // admission gate for search queries
 
+	// Dynamic-limit state, guarded by dynMu. When Options.Settings is
+	// wired, syncSettings rebuilds limiter/searchSem/dynSearchTimeout
+	// from the registry whenever its version moves; reads go through
+	// the helpers below so a rebuild never races a request.
+	dynMu            sync.RWMutex
+	dynVersion       int64
+	dynSearchTimeout time.Duration
+
 	// loginLimiter throttles /api/admin/login attempts per client,
 	// independent of (and stricter than) the general API limiter: a
 	// guessed-token endpoint must not be brute-forceable at search speed.
@@ -158,14 +174,74 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 		}
 		s.limiter = newIPLimiter(opts.RateRPS, burst)
 	}
+	if opts.Settings != nil {
+		// Force the first request (and this constructor) to sync the
+		// dynamic limits from the registry.
+		s.dynVersion = -1
+		s.syncSettings()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/search", s.handleSearch)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
 	mux.HandleFunc("GET /api/trending", s.handleTrending)
 	mux.HandleFunc("GET /api/healthz", s.handleHealth)
+	mux.HandleFunc("GET /api/site", s.handleSite)
 	s.registerAdminRoutes(mux)
 	s.mux = mux
 	return s
+}
+
+// syncSettings rebuilds the dynamic DoS knobs from the settings
+// registry when its version has moved since the last sync. Cheap on
+// the no-change path (one version comparison under a read lock).
+func (s *Server) syncSettings() {
+	if s.opts.Settings == nil {
+		return
+	}
+	v := s.opts.Settings.Version()
+	s.dynMu.Lock()
+	defer s.dynMu.Unlock()
+	if v == s.dynVersion {
+		return
+	}
+	s.dynVersion = v
+	mgr := s.opts.Settings
+	if rps := mgr.Float(settings.KeyRateLimitRPS); rps > 0 {
+		burst := mgr.Int(settings.KeyRateLimitBurst)
+		if burst <= 0 {
+			burst = int(rps*10) + 1
+		}
+		s.limiter = newIPLimiter(rps, burst)
+	} else {
+		s.limiter = nil
+	}
+	s.searchSem = make(chan struct{}, mgr.Int(settings.KeySearchMaxInflight))
+	s.dynSearchTimeout = mgr.Duration(settings.KeySearchTimeout)
+}
+
+// rateLimiter returns the current limiter (nil when disabled).
+func (s *Server) rateLimiter() *ipLimiter {
+	s.dynMu.RLock()
+	defer s.dynMu.RUnlock()
+	return s.limiter
+}
+
+// searchSemaphore returns the current admission-gate channel.
+func (s *Server) searchSemaphore() chan struct{} {
+	s.dynMu.RLock()
+	defer s.dynMu.RUnlock()
+	return s.searchSem
+}
+
+// searchTimeout returns the per-request database budget: the live
+// registry value when settings are wired, else the static option.
+func (s *Server) searchTimeout() time.Duration {
+	s.dynMu.RLock()
+	defer s.dynMu.RUnlock()
+	if s.dynSearchTimeout > 0 {
+		return s.dynSearchTimeout
+	}
+	return s.opts.SearchTimeout
 }
 
 // Handler returns the root handler with CORS/OPTIONS support and per-client
@@ -180,7 +256,8 @@ func (s *Server) Handler() http.Handler {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		if s.limiter != nil && r.URL.Path != "/api/healthz" && !s.limiter.allow(clientKey(r)) {
+		s.syncSettings()
+		if lim := s.rateLimiter(); lim != nil && r.URL.Path != "/api/healthz" && !lim.allow(clientKey(r)) {
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return
@@ -220,9 +297,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// Admission gate: the store serializes queries on one connection, so
 	// when all slots are busy piling on more requests only grows the queue.
 	// Wait briefly for a slot, then shed load instead of stacking up.
+	s.syncSettings()
+	sem := s.searchSemaphore()
 	select {
-	case s.searchSem <- struct{}{}:
-		defer func() { <-s.searchSem }()
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
 	case <-r.Context().Done():
 		return
 	case <-time.After(admissionWait):
@@ -233,7 +312,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	// The context bounds database time and dies with the client connection,
 	// so queries for hung-up clients stop consuming the SQLite handle.
-	ctx, cancel := context.WithTimeout(r.Context(), s.opts.SearchTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), s.searchTimeout())
 	defer cancel()
 
 	var (
@@ -311,7 +390,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		writeRawJSON(w, http.StatusOK, s.statsBody)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), s.opts.SearchTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), s.searchTimeout())
 	defer cancel()
 
 	total, err := s.st.Count(ctx)

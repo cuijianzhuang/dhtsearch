@@ -76,6 +76,14 @@ type Config struct {
 	Logger *log.Logger
 	// Client overrides the HTTP client (tests).
 	Client *http.Client
+	// ConfigFunc, when non-nil, supplies fresh Feeds/KeywordURL/
+	// Keywords/Interval values before every poll (the settings
+	// system's live view). Store, Logger, Client and Buffer stay from
+	// the initial Config — wiring, not operator knobs.
+	ConfigFunc func() Config
+	// EnabledFunc, when non-nil, gates polling: false skips the poll.
+	// Nil means always enabled.
+	EnabledFunc func() bool
 }
 
 // Stats counts poller activity.
@@ -103,6 +111,11 @@ type Service struct {
 	cfg Config
 	out chan string
 
+	// cfgFn/enabledFn mirror Config's dynamic hooks (nil in static
+	// wiring). Only the Run goroutine reads them.
+	cfgFn     func() Config
+	enabledFn func() bool
+
 	mu      sync.Mutex
 	entries map[string]*entry
 	stats   Stats
@@ -124,11 +137,32 @@ func New(cfg Config) *Service {
 		cfg.Client = &http.Client{Timeout: fetchTimeout}
 	}
 	return &Service{
-		cfg:     cfg,
-		out:     make(chan string, cfg.Buffer),
-		entries: make(map[string]*entry),
-		now:     time.Now,
+		cfg:       cfg,
+		out:       make(chan string, cfg.Buffer),
+		entries:   make(map[string]*entry),
+		now:       time.Now,
+		cfgFn:     cfg.ConfigFunc,
+		enabledFn: cfg.EnabledFunc,
 	}
+}
+
+// cfgNow resolves the configuration for the next poll: dynamic
+// feed-list/keyword/interval values when a ConfigFunc is wired, the
+// static Config otherwise.
+func (s *Service) cfgNow() Config {
+	cfg := s.cfg
+	if s.cfgFn != nil {
+		dyn := s.cfgFn()
+		cfg.Feeds, cfg.KeywordURL, cfg.Keywords, cfg.Interval = dyn.Feeds, dyn.KeywordURL, dyn.Keywords, dyn.Interval
+		if cfg.Interval <= 0 {
+			cfg.Interval = defaultInterval
+		}
+	}
+	return cfg
+}
+
+func (s *Service) enabled() bool {
+	return s.enabledFn == nil || s.enabledFn()
 }
 
 // Out carries hex infohashes to fetch.
@@ -152,31 +186,35 @@ func (s *Service) Stats() Stats {
 }
 
 // Run polls immediately and then every Interval until ctx is done.
+// The interval is re-read each cycle, and a disabled gate skips the
+// poll, so settings changes apply without a restart.
 func (s *Service) Run(ctx context.Context) {
-	s.poll(ctx)
-	t := time.NewTicker(s.cfg.Interval)
-	defer t.Stop()
 	for {
+		if s.enabled() {
+			s.poll(ctx)
+		}
+		t := time.NewTimer(s.cfgNow().Interval)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
 		case <-t.C:
-			s.poll(ctx)
 		}
 	}
 }
 
 func (s *Service) poll(ctx context.Context) {
-	urls := append([]string(nil), s.cfg.Feeds...)
-	if s.cfg.KeywordURL != "" && s.cfg.Keywords != nil {
-		for _, kw := range s.cfg.Keywords() {
+	cfg := s.cfgNow()
+	urls := append([]string(nil), cfg.Feeds...)
+	if cfg.KeywordURL != "" && cfg.Keywords != nil {
+		for _, kw := range cfg.Keywords() {
 			if kw = strings.TrimSpace(kw); kw != "" {
-				urls = append(urls, fmt.Sprintf(s.cfg.KeywordURL, url.QueryEscape(kw)))
+				urls = append(urls, fmt.Sprintf(cfg.KeywordURL, url.QueryEscape(kw)))
 			}
 		}
 	}
 	for i, u := range urls {
-		if i >= len(s.cfg.Feeds) {
+		if i >= len(cfg.Feeds) {
 			select {
 			case <-ctx.Done():
 				return

@@ -53,6 +53,15 @@ type Config struct {
 	// BaseURL overrides the Douban origin (tests point it at a stub).
 	BaseURL string
 	Logger  *log.Logger
+	// ConfigFunc, when non-nil, supplies fresh Interval/Limit values
+	// before every refresh (the settings system's live view). BaseURL
+	// and Logger stay from the initial Config — they are wiring, not
+	// operator knobs.
+	ConfigFunc func() Config
+	// EnabledFunc, when non-nil, gates refreshing: false skips the
+	// fetch entirely (the last snapshot stays, and callers that check
+	// the same gate serve empty lists). Nil means always enabled.
+	EnabledFunc func() bool
 }
 
 // Snapshot is the current trending state.
@@ -68,6 +77,11 @@ type Snapshot struct {
 type Service struct {
 	cfg    Config
 	client *http.Client
+
+	// cfgFn/enabledFn mirror Config's dynamic hooks (nil in static
+	// wiring). Only the Run goroutine reads them.
+	cfgFn     func() Config
+	enabledFn func() bool
 
 	mu   sync.RWMutex
 	snap Snapshot
@@ -98,11 +112,35 @@ func New(cfg Config) *Service {
 		cfg.Logger = log.Default()
 	}
 	return &Service{
-		cfg:    cfg,
-		client: &http.Client{Timeout: fetchTimeout},
-		names:  make(map[string]string),
-		ready:  make(chan struct{}),
+		cfg:       cfg,
+		client:    &http.Client{Timeout: fetchTimeout},
+		names:     make(map[string]string),
+		ready:     make(chan struct{}),
+		cfgFn:     cfg.ConfigFunc,
+		enabledFn: cfg.EnabledFunc,
 	}
+}
+
+// cfgNow resolves the configuration for the next refresh: dynamic
+// Interval/Limit when a ConfigFunc is wired, the static Config
+// otherwise.
+func (s *Service) cfgNow() Config {
+	cfg := s.cfg
+	if s.cfgFn != nil {
+		dyn := s.cfgFn()
+		cfg.Interval, cfg.Limit = dyn.Interval, dyn.Limit
+		if cfg.Interval <= 0 {
+			cfg.Interval = defaultInterval
+		}
+		if cfg.Limit <= 0 {
+			cfg.Limit = defaultLimit
+		}
+	}
+	return cfg
+}
+
+func (s *Service) enabled() bool {
+	return s.enabledFn == nil || s.enabledFn()
 }
 
 // Ready is closed after the first refresh attempt, successful or not.
@@ -115,18 +153,21 @@ func (s *Service) Get() Snapshot {
 	return s.snap
 }
 
-// Run refreshes immediately and then every Interval until ctx is done.
+// Run refreshes immediately and then every Interval until ctx is
+// done. The interval is re-read each cycle, and a disabled gate skips
+// the fetch, so settings changes apply without a restart.
 func (s *Service) Run(ctx context.Context) {
-	s.refresh(ctx)
-	s.readyOnce.Do(func() { close(s.ready) })
-	t := time.NewTicker(s.cfg.Interval)
-	defer t.Stop()
 	for {
+		if s.enabled() {
+			s.refresh(ctx)
+		}
+		s.readyOnce.Do(func() { close(s.ready) })
+		t := time.NewTimer(s.cfgNow().Interval)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
 		case <-t.C:
-			s.refresh(ctx)
 		}
 	}
 }
@@ -149,15 +190,16 @@ var charts = []struct {
 // refresh fetches every chart. A chart that fails keeps its previous value,
 // so one bad response never blanks a homepage row.
 func (s *Service) refresh(ctx context.Context) {
+	cfg := s.cfgNow()
 	type result struct {
 		apply  func(*Snapshot, []string)
 		titles []string
 	}
 	var ok []result
 	for _, c := range charts {
-		titles, err := s.fetchList(ctx, c.typ, c.tag, c.english)
+		titles, err := s.fetchList(ctx, cfg, c.typ, c.tag, c.english)
 		if err != nil {
-			s.cfg.Logger.Printf("trending: %s/%s fetch: %v", c.typ, c.tag, err)
+			cfg.Logger.Printf("trending: %s/%s fetch: %v", c.typ, c.tag, err)
 			continue
 		}
 		ok = append(ok, result{c.apply, titles})
@@ -180,9 +222,9 @@ type subject struct {
 
 // fetchList pulls one chart and returns its titles; english resolves each
 // title to the subject's English name where one exists.
-func (s *Service) fetchList(ctx context.Context, typ, tag string, english bool) ([]string, error) {
+func (s *Service) fetchList(ctx context.Context, cfg Config, typ, tag string, english bool) ([]string, error) {
 	u := fmt.Sprintf("%s/j/search_subjects?type=%s&tag=%s&page_limit=%d&page_start=0",
-		s.cfg.BaseURL, typ, url.QueryEscape(tag), s.cfg.Limit)
+		cfg.BaseURL, typ, url.QueryEscape(tag), cfg.Limit)
 	body, err := s.get(ctx, u)
 	if err != nil {
 		return nil, err
