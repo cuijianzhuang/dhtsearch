@@ -202,3 +202,31 @@ func (s *Store) CountCreatedSince(ctx context.Context, since int64) (int, error)
 	err := s.queryRowContext(ctx, `SELECT COUNT(*) FROM torrents WHERE created_at >= ?`, since).Scan(&n)
 	return n, err
 }
+
+// CreatedBuckets counts torrents per fixed-width time bucket over the
+// window [start, start+buckets*bucketSec): bucket i covers
+// [start+i*bucketSec, start+(i+1)*bucketSec). The result maps bucket
+// index to count; empty buckets are absent, so callers materialise the
+// full series themselves. The bucket index is integer division in SQL:
+// for the non-negative offsets involved here (created_at >= start)
+// SQLite and Postgres truncate identically, so one query serves both
+// dialects — the trends endpoint depends on that parity.
+func (s *Store) CreatedBuckets(ctx context.Context, start, bucketSec int64, buckets int) (map[int]int64, error) {
+	rows, err := s.queryContext(ctx,
+		`SELECT (created_at - ?) / ? AS b, COUNT(*) FROM torrents WHERE created_at >= ? AND created_at < ? GROUP BY b ORDER BY b`,
+		start, bucketSec, start, start+bucketSec*int64(buckets))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int]int64{}
+	for rows.Next() {
+		var b int
+		var n int64
+		if err := rows.Scan(&b, &n); err != nil {
+			return nil, err
+		}
+		out[b] = n
+	}
+	return out, rows.Err()
+}

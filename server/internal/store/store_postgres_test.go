@@ -194,3 +194,56 @@ func TestPostgresStore(t *testing.T) {
 	}
 	s2.Close()
 }
+
+// TestPostgresCreatedBuckets runs the trends aggregation against real
+// Postgres: the bucket index is integer division in SQL, and the two
+// dialects must agree on it (see CreatedBuckets).
+func TestPostgresCreatedBuckets(t *testing.T) {
+	url := os.Getenv("DHTSEARCH_TEST_POSTGRES_URL")
+	if url == "" {
+		t.Skip("DHTSEARCH_TEST_POSTGRES_URL not set; skipping Postgres integration test")
+	}
+	if !IsPostgresURL(url) {
+		t.Fatalf("DHTSEARCH_TEST_POSTGRES_URL is not a postgres URL: %q", url)
+	}
+	admin, err := sql.Open("pgx", url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS torrents`, `DROP TABLE IF EXISTS stats`, `DROP TABLE IF EXISTS blocked`,
+	} {
+		if _, err := admin.Exec(stmt); err != nil {
+			t.Fatalf("reset test database: %v", err)
+		}
+	}
+	admin.Close()
+
+	s, err := OpenPostgres(url)
+	if err != nil {
+		t.Fatalf("OpenPostgres: %v", err)
+	}
+	defer s.Close()
+	for i, ts := range []int64{999, 1000, 1001, 4600, 8200, 15399, 15400} {
+		r := Torrent{
+			InfoHash: string(rune('a'+i)) + "x", Name: "Bucket Case",
+			TotalSize: 1 << 30, FileCount: 1, CreatedAt: ts,
+		}
+		if err := s.Upsert(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.CreatedBuckets(t.Context(), 1000, 3600, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[int]int64{0: 2, 1: 1, 2: 1, 3: 1}
+	if len(got) != len(want) {
+		t.Fatalf("buckets = %v, want %v", got, want)
+	}
+	for b, n := range want {
+		if got[b] != n {
+			t.Fatalf("bucket %d = %d, want %d (all: %v)", b, got[b], n, got)
+		}
+	}
+}

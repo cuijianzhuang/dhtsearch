@@ -38,6 +38,8 @@
   --on-pri: #ffffff;
   --warn: #d97706;
   --warn-ink: #92400e;
+  --danger: #dc2626;
+  --danger-ink: #b91c1c;
   --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.04);
   --shadow-2:
     0 8px 24px -8px rgba(15, 23, 42, 0.12), 0 2px 6px -2px rgba(15, 23, 42, 0.05);
@@ -64,6 +66,8 @@
   --pri-line: color-mix(in srgb, var(--pri) 40%, var(--card));
   --warn: #f59e0b;
   --warn-ink: #fcd34d;
+  --danger: #f87171;
+  --danger-ink: #fca5a5;
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-2:
     0 8px 24px -8px rgba(0, 0, 0, 0.65), 0 2px 6px -2px rgba(0, 0, 0, 0.4);
@@ -89,6 +93,8 @@
     --pri-line: color-mix(in srgb, var(--pri) 40%, var(--card));
     --warn: #f59e0b;
     --warn-ink: #fcd34d;
+    --danger: #f87171;
+    --danger-ink: #fca5a5;
     --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-2:
       0 8px 24px -8px rgba(0, 0, 0, 0.65), 0 2px 6px -2px rgba(0, 0, 0, 0.4);
@@ -115,6 +121,8 @@
   --color-on-accent: var(--on-pri);
   --color-warn: var(--warn);
   --color-warn-ink: var(--warn-ink);
+  --color-danger: var(--danger);
+  --color-danger-ink: var(--danger-ink);
   --shadow-card: var(--shadow-1);
   --shadow-bar: var(--shadow-2);
 }
@@ -136,5 +144,45 @@
   :focus-visible {
     outline: 2px solid var(--pri);
     outline-offset: 2px;
+  }
+}
+
+/* Admin overview live elements: freshly arrived rows in the "latest
+   ingested" stream slide in; the live indicator dot breathes. Kept as
+   plain classes (not utilities) because the dashboard toggles them by
+   state, not by markup variant. */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.anim-rise-in {
+  animation: rise-in 0.45s ease both;
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.anim-live-dot {
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-rise-in,
+  .anim-live-dot {
+    animation: none;
   }
 }

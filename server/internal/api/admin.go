@@ -39,6 +39,7 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/users/{id}/password", s.handleAdminUserResetPassword)
 	mux.HandleFunc("DELETE /api/admin/users/{id}", s.handleAdminUserDelete)
 	mux.HandleFunc("GET /api/admin/overview", s.handleAdminOverview)
+	mux.HandleFunc("GET /api/admin/trends", s.handleAdminTrends)
 	mux.HandleFunc("GET /api/admin/torrents", s.handleAdminList)
 	mux.HandleFunc("POST /api/admin/torrents/batch", s.handleAdminBatch)
 	mux.HandleFunc("GET /api/admin/torrents/{hash}", s.handleAdminDetail)
@@ -174,6 +175,7 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 			"prescreen_dropped": counters["prescreen_dropped"],
 		},
 		"moderation": map[string]any{
+			"enabled":       s.moderationEnabled(),
 			"reviewed":      counters["llm_reviewed"],
 			"adult_removed": counters["llm_adult_removed"],
 			"spam_removed":  counters["llm_spam_removed"],
@@ -228,6 +230,78 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		resp["trending"] = sec
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// moderationEnabled reports whether the LLM moderation pass can
+// actually run: the same gate the moderator itself applies (feature
+// switch on AND an API key present), read from the live settings
+// registry. Without a registry (bare test wiring) the pass cannot be
+// configured, so it reports false; the console uses this to show a
+// "not enabled" state instead of a wall of zeros.
+func (s *Server) moderationEnabled() bool {
+	if s.opts.Settings == nil {
+		return false
+	}
+	return s.opts.Settings.Bool(settings.KeyModerationEnabled) &&
+		s.opts.Settings.Get(settings.KeyOpenAIAPIKey) != ""
+}
+
+type trendBucket struct {
+	Start int64 `json:"start"`
+	Count int64 `json:"count"`
+}
+
+// handleAdminTrends serves the ingest time series behind the console's
+// overview chart: torrent counts per hour over the last 24 hours
+// (range=24h, the default) or per day over the last 14 days
+// (range=14d). Windows align to the server's local hour / midnight so
+// the last bucket is always the current, still-filling period, and
+// empty buckets are materialised as zeros — the frontend draws the
+// series verbatim.
+func (s *Server) handleAdminTrends(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	now := time.Now()
+	loc := now.Location()
+	var start time.Time
+	var bucketSec int64
+	var buckets int
+	rng := r.URL.Query().Get("range")
+	switch rng {
+	case "", "24h":
+		rng = "24h"
+		bucketSec, buckets = 3600, 24
+		start = time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, loc).
+			Add(-time.Duration(buckets-1) * time.Hour)
+	case "14d":
+		bucketSec, buckets = 86400, 14
+		start = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).
+			AddDate(0, 0, -(buckets - 1))
+	default:
+		writeError(w, http.StatusBadRequest, "invalid range")
+		return
+	}
+	ctx, cancel := s.adminCtx(r)
+	defer cancel()
+	counts, err := s.st.CreatedBuckets(ctx, start.Unix(), bucketSec, buckets)
+	if err != nil {
+		s.logger.Printf("api: admin trends: %v", err)
+		writeError(w, http.StatusInternalServerError, "trends failed")
+		return
+	}
+	out := make([]trendBucket, buckets)
+	for i := range out {
+		out[i] = trendBucket{
+			Start: start.Add(time.Duration(i) * time.Duration(bucketSec) * time.Second).Unix(),
+			Count: counts[i],
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"range":          rng,
+		"bucket_seconds": bucketSec,
+		"buckets":        out,
+	})
 }
 
 type adminItem struct {

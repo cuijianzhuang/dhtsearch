@@ -4,14 +4,42 @@ import AdminShell, {
   AdminBackendErrorNotice,
   AdminDisabledNotice,
 } from "@/components/admin/AdminShell";
-import { fetchAdminOverview } from "@/lib/admin";
+import OverviewDashboard from "@/components/admin/overview/OverviewDashboard";
+import {
+  fetchAdminOverview,
+  fetchAdminTorrents,
+  fetchAdminTrends,
+  type AdminListResponse,
+  type AdminTrends,
+} from "@/lib/admin";
 import { adminPageFetch } from "@/lib/admin-page";
-import { formatCount, formatDate } from "@/lib/format";
 
 export const metadata: Metadata = { title: "管理端概览" };
 
+// Fallbacks for the two secondary fetches: the overview is the page's
+// reason to exist, but a failed trends/latest call must not take the
+// whole console down — the dashboard's poll retries them within
+// seconds and fills the panels in.
+const EMPTY_TRENDS: AdminTrends = { range: "24h", bucket_seconds: 3600, buckets: [] };
+const EMPTY_LATEST: AdminListResponse = {
+  total: 0,
+  page: 1,
+  page_size: 10,
+  results: [],
+};
+
 export default async function AdminOverviewPage() {
-  const outcome = await adminPageFetch((token) => fetchAdminOverview(token));
+  const outcome = await adminPageFetch(async (token) => {
+    const overview = await fetchAdminOverview(token);
+    const trends = await fetchAdminTrends(token, "24h").catch(
+      () => EMPTY_TRENDS
+    );
+    const latest = await fetchAdminTorrents(token, {
+      page: 1,
+      pageSize: 10,
+    }).catch(() => EMPTY_LATEST);
+    return { overview, trends, latest };
+  });
   if (!outcome.ok) {
     return outcome.kind === "disabled" ? (
       <AdminDisabledNotice />
@@ -19,187 +47,14 @@ export default async function AdminOverviewPage() {
       <AdminBackendErrorNotice detail={outcome.detail} />
     );
   }
-  const o = outcome.data;
-  const s = o.stats ?? {};
-
-  const cards: { label: string; value: number; href?: string }[] = [
-    { label: "种子总数", value: o.torrents },
-    { label: "今日新增", value: o.today },
-    { label: "未审核", value: o.pending_review },
-    { label: "已审核", value: o.reviewed },
-    { label: "已拉黑", value: o.blocked },
-    // Front-features: pending visitor reports, linking to the queue.
-    { label: "待处理举报", value: o.reports_pending ?? 0, href: "/admin/reports" },
-  ];
-
+  const { overview, trends, latest } = outcome.data;
   return (
     <AdminShell active="overview">
-      {/* Stat cards, the same shape as the Polaris dashboard row. Six
-          cards: 2 rows of 3 on md, one row of 6 on xl — rectangular at
-          every width without a filler cell (DB info has its own
-          section below). */}
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-        {cards.map((c) => {
-          const inner = (
-            <>
-              <p className="text-xs text-mute">{c.label}</p>
-              <p className="mt-2 text-2xl font-semibold tabular-nums text-ink">
-                {formatCount(c.value)}
-              </p>
-            </>
-          );
-          const cls =
-            "rounded-xl border border-line bg-surface p-4 shadow-card";
-          return c.href ? (
-            <Link key={c.label} href={c.href} className={`${cls} transition-colors hover:border-accent`}>
-              {inner}
-            </Link>
-          ) : (
-            <div key={c.label} className={cls}>
-              {inner}
-            </div>
-          );
-        })}
-      </section>
-
-      <div className="mt-6 grid gap-4 lg:grid-cols-2">
-        <Section title="收录管线">
-          <Row label="发现 infohash（seen）" value={s.seen} />
-          <Row label="成功入库（fetched）" value={s.fetched} />
-          <Row label="成人过滤" value={s.adult_filtered} />
-          <Row label="垃圾过滤" value={s.spam_filtered} />
-          <Row label="体积过滤" value={s.size_filtered} />
-          <Row label="元数据超时" value={o.fetch?.timed_out} />
-          <Row label="元数据失败" value={o.fetch?.failed} />
-          <Row label="早筛丢弃" value={o.fetch?.prescreen_dropped} />
-          <Row label="抓取队列深度" value={o.fetch?.queue_depth} />
-        </Section>
-
-        <Section title="LLM 审核">
-          <Row label="已审核" value={o.moderation?.reviewed} />
-          <Row label="成人删除" value={o.moderation?.adult_removed} />
-          <Row label="垃圾删除" value={o.moderation?.spam_removed} />
-          <Row label="审核出错" value={o.moderation?.errors} />
-          <Row label="待审核" value={o.moderation?.pending} />
-          <Row label="黑名单总数" value={o.moderation?.blocked} />
-        </Section>
-
-        {o.filter && (
-          <Section title="内容过滤">
-            <TextRow label="总开关" value={o.filter.enabled ? "开" : "关"} />
-            <TextRow
-              label="成人过滤"
-              value={o.filter.adult_enabled ? "开" : "关"}
-            />
-            <TextRow
-              label="垃圾过滤"
-              value={o.filter.spam_enabled ? "开" : "关"}
-            />
-            <TextRow
-              label="太小过滤"
-              value={o.filter.too_small_enabled ? "开" : "关"}
-            />
-            <Row label="成人累计过滤" value={o.filter.adult_filtered} />
-            <Row label="垃圾累计过滤" value={o.filter.spam_filtered} />
-            <Row label="体积累计过滤" value={o.filter.size_filtered} />
-          </Section>
-        )}
-
-        {o.crawler && (
-          <Section title="爬虫状态">
-            <div className="flex items-baseline justify-between gap-3 py-2">
-              <span className="text-sm text-mute">状态</span>
-              <span className="text-sm font-medium text-ink-2">
-                {o.crawler.enabled ? "运行中" : "已禁用"}
-              </span>
-            </div>
-            <Row label="已见 infohash" value={o.crawler.seen_infohashes} />
-            <Row label="路由表节点" value={o.crawler.nodes} />
-            <Row label="排队节点" value={o.crawler.queued_nodes} />
-            <Row label="采样次数" value={o.crawler.sampled} />
-            <Row label="采样出错" value={o.crawler.sample_errors} />
-            <Row label="采样收获" value={o.crawler.harvested} />
-          </Section>
-        )}
-
-        {o.scraper && (
-          <Section title="Tracker 刮削排序">
-            <Row label="队列深度" value={o.scraper.queue} />
-            <Row label="已刮削" value={o.scraper.scraped} />
-            <Row label="有 seeder" value={o.scraper.seeded} />
-            <Row label="刮削出错" value={o.scraper.scrape_errors} />
-            <Row label="丢弃" value={o.scraper.dropped} />
-            <Row label="被挤出" value={o.scraper.evicted} />
-          </Section>
-        )}
-
-        {o.trending && (
-          <Section title="热门榜单（条数）">
-            <Row label="欧美电影" value={o.trending.movies} />
-            <Row label="美剧" value={o.trending.tv} />
-            <Row label="日剧" value={o.trending.tv_jp} />
-            <Row label="韩剧" value={o.trending.tv_kr} />
-            <div className="flex items-baseline justify-between gap-3 py-2">
-              <span className="text-sm text-mute">更新时间</span>
-              <span className="text-sm tabular-nums text-ink-2">
-                {o.trending.updated_at ? formatDate(o.trending.updated_at) : "-"}
-              </span>
-            </div>
-            {o.trending.failing && (
-              <div className="flex items-baseline justify-between gap-3 py-2">
-                <span className="text-sm text-mute">抓取状态</span>
-                <span className="text-sm font-medium text-red-500">
-                  抓取失败中（已连续 {o.trending.fail_streak ?? 0} 轮，正在展示上次榜单）
-                </span>
-              </div>
-            )}
-          </Section>
-        )}
-
-        <Section title="数据库">
-          <div className="flex items-baseline justify-between gap-3 py-2">
-            <span className="text-sm text-mute">后端</span>
-            <span className="text-sm text-ink-2">{o.dialect}</span>
-          </div>
-          <Row label="种子总数" value={o.torrents} />
-          <Row label="今日新增" value={o.today} />
-        </Section>
-      </div>
+      <OverviewDashboard
+        initialOverview={overview}
+        initialTrends={trends}
+        initialLatest={latest}
+      />
     </AdminShell>
-  );
-}
-
-function Section({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="rounded-xl border border-line bg-surface p-4 shadow-card">
-      <h2 className="text-sm font-semibold text-ink">{title}</h2>
-      <div className="mt-2 divide-y divide-line-2">{children}</div>
-    </section>
-  );
-}
-
-function Row({ label, value }: { label: string; value?: number }) {
-  return (
-    <div className="flex items-baseline justify-between gap-3 py-2">
-      <span className="text-sm text-mute">{label}</span>
-      <span className="text-sm font-medium tabular-nums text-ink-2">
-        {formatCount(value)}
-      </span>
-    </div>
-  );
-}
-
-function TextRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-baseline justify-between gap-3 py-2">
-      <span className="text-sm text-mute">{label}</span>
-      <span className="text-sm font-medium text-ink-2">{value}</span>
-    </div>
   );
 }

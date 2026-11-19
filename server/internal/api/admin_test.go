@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"dhtsearch/server/internal/filter"
 	"dhtsearch/server/internal/store"
@@ -267,5 +268,75 @@ func TestAdminBatchApproveCountsOnlyExisting(t *testing.T) {
 		map[string]any{"hashes": mixed, "action": "approve"})
 	if code != 200 || m["affected"].(float64) != 1 {
 		t.Fatalf("batch approve mixed: %d %v, want affected 1", code, m)
+
+func TestAdminTrends(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	now := time.Now().Unix()
+	// Two in the current hour, one two hours ago, one yesterday
+	// (14d only), one forty days ago (neither window).
+	for i, ts := range []int64{now, now - 600, now - 2*3600, now - 26*3600, now - 40*86400} {
+		if err := st.Upsert(store.Torrent{
+			InfoHash:  strings.Repeat(string(rune('a'+i)), 40),
+			Name:      "Trend Case",
+			TotalSize: 1 << 30,
+			FileCount: 1,
+			Files:     []filter.File{{Path: "t.mkv", Size: 1 << 30}},
+			CreatedAt: ts,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(New(st, nil, nil, Options{AdminToken: testAdminToken}).Handler())
+	t.Cleanup(srv.Close)
+	base := srv.URL
+
+	if code, _ := adminReq(t, "GET", base+"/api/admin/trends", "", nil); code != http.StatusUnauthorized {
+		t.Fatalf("trends without token: %d", code)
+	}
+	if code, _ := adminReq(t, "GET", base+"/api/admin/trends?range=year", testAdminToken, nil); code != http.StatusBadRequest {
+		t.Fatalf("trends bad range: %d", code)
+	}
+
+	sum := func(m map[string]any) float64 {
+		var total float64
+		for _, b := range m["buckets"].([]any) {
+			total += b.(map[string]any)["count"].(float64)
+		}
+		return total
+	}
+	code, m := adminReq(t, "GET", base+"/api/admin/trends?range=24h", testAdminToken, nil)
+	if code != 200 || len(m["buckets"].([]any)) != 24 || sum(m) != 3 {
+		t.Fatalf("trends 24h: code=%d buckets=%v", code, m)
+	}
+	if m["bucket_seconds"].(float64) != 3600 {
+		t.Fatalf("trends 24h bucket_seconds: %v", m["bucket_seconds"])
+	}
+	code, m = adminReq(t, "GET", base+"/api/admin/trends?range=14d", testAdminToken, nil)
+	if code != 200 || len(m["buckets"].([]any)) != 14 || sum(m) != 4 {
+		t.Fatalf("trends 14d: code=%d buckets=%v", code, m)
+	}
+	// Default range is 24h.
+	code, m = adminReq(t, "GET", base+"/api/admin/trends", testAdminToken, nil)
+	if code != 200 || m["range"] != "24h" {
+		t.Fatalf("trends default: code=%d range=%v", code, m["range"])
+	}
+}
+
+func TestAdminOverviewModerationEnabled(t *testing.T) {
+	// No settings registry: the pass cannot be configured -> false.
+	base, _ := adminFixture(t, testAdminToken)
+	_, m := adminReq(t, "GET", base+"/api/admin/overview", testAdminToken, nil)
+	if got := m["moderation"].(map[string]any)["enabled"]; got != false {
+		t.Fatalf("moderation.enabled without settings = %v, want false", got)
+	}
+	// Registry with an API key and the (default-on) feature switch.
+	base, _, _ = settingsFixture(t)
+	_, m = adminReq(t, "GET", base+"/api/admin/overview", testAdminToken, nil)
+	if got := m["moderation"].(map[string]any)["enabled"]; got != true {
+		t.Fatalf("moderation.enabled with key = %v, want true", got)
 	}
 }

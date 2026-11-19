@@ -240,6 +240,8 @@ export interface AdminOverview {
     queue_depth?: number;
   };
   moderation: {
+    /** Whether the LLM pass can run (switch on AND API key set). */
+    enabled: boolean;
     reviewed: number;
     adult_removed: number;
     spam_removed: number;
@@ -349,6 +351,21 @@ export function fetchAdminReports(
 
 export function fetchAdminOverview(token: string): Promise<AdminOverview> {
   return adminFetch<AdminOverview>(token, "/api/admin/overview");
+}
+
+export type AdminTrendsRange = "24h" | "14d";
+
+export interface AdminTrends {
+  range: AdminTrendsRange;
+  bucket_seconds: number;
+  buckets: { start: number; count: number }[];
+}
+
+export function fetchAdminTrends(
+  token: string,
+  range: AdminTrendsRange
+): Promise<AdminTrends> {
+  return adminFetch<AdminTrends>(token, `/api/admin/trends?range=${range}`);
 }
 
 export function fetchAdminTorrents(

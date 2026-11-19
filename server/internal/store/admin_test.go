@@ -122,3 +122,37 @@ func TestCountCreatedSince(t *testing.T) {
 		t.Fatalf("since 301: n=%d err=%v", n, err)
 	}
 }
+
+func TestCreatedBuckets(t *testing.T) {
+	s := openTest(t)
+	ctx := t.Context()
+	// Window: start=1000, hourly buckets x4 -> [1000, 15400).
+	// Edge rows: 999 and 15400 fall outside; 1000 lands in bucket 0.
+	for i, ts := range []int64{999, 1000, 1001, 4600, 8200, 15399, 15400} {
+		r := Torrent{
+			InfoHash: string(rune('a'+i)) + "x", Name: "Bucket Case",
+			TotalSize: 1 << 30, FileCount: 1, CreatedAt: ts,
+		}
+		if err := s.Upsert(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.CreatedBuckets(ctx, 1000, 3600, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[int]int64{0: 2, 1: 1, 2: 1, 3: 1}
+	if len(got) != len(want) {
+		t.Fatalf("buckets = %v, want %v", got, want)
+	}
+	for b, n := range want {
+		if got[b] != n {
+			t.Fatalf("bucket %d = %d, want %d (all: %v)", b, got[b], n, got)
+		}
+	}
+	// A window past all data is an empty (but valid) series.
+	got, err = s.CreatedBuckets(ctx, 1<<40, 3600, 4)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("empty window: %v err=%v", got, err)
+	}
+}
