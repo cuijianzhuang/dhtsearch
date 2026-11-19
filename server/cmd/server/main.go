@@ -343,6 +343,15 @@ func main() {
 	reg(settings.KeyFeedsInterval, feedsInterval.String())
 	reg(settings.KeyFeedsWorkers, strconv.Itoa(*feedsWorkers))
 	reg(settings.KeyFeedsMetaTimeout, feedsTimeout.String())
+	reg(settings.KeyGitHubClientID, envDefault("GITHUB_CLIENT_ID", ""))
+	reg(settings.KeyGitHubClientSecret, os.Getenv("GITHUB_CLIENT_SECRET"))
+	reg(settings.KeyGitHubAllowedUsers, envDefault("GITHUB_ALLOWED_USERS", ""))
+	reg(settings.KeyOIDCIssuer, envDefault("OIDC_ISSUER", ""))
+	reg(settings.KeyOIDCClientID, envDefault("OIDC_CLIENT_ID", ""))
+	reg(settings.KeyOIDCClientSecret, os.Getenv("OIDC_CLIENT_SECRET"))
+	reg(settings.KeyOIDCProviderName, envDefault("OIDC_PROVIDER_NAME", "SSO"))
+	reg(settings.KeyOIDCAllowedEmails, envDefault("OIDC_ALLOWED_EMAILS", ""))
+	reg(settings.KeyOIDCAllowedDomain, envDefault("OIDC_ALLOWED_DOMAIN", ""))
 	reg(settings.KeyRateLimitRPS, strconv.FormatFloat(*rateRPS, 'f', -1, 64))
 	reg(settings.KeyRateLimitBurst, strconv.Itoa(*rateBurst))
 	reg(settings.KeySearchMaxInflight, strconv.Itoa(*searchInflight))
@@ -727,7 +736,15 @@ func main() {
 		dbDesc = st.Dialect()
 	}
 	if *adminToken == "" {
-		logger.Printf("admin: disabled (ADMIN_TOKEN not set; /api/admin/* answers 503, see env.example)")
+		// No recovery token, but the console can still be enabled by
+		// admin accounts or a configured federated login.
+		nUsers, _ := st.CountAdminUsers(context.Background())
+		oauth := mgr.Get(settings.KeyGitHubClientID) != "" || mgr.Get(settings.KeyOIDCIssuer) != ""
+		if nUsers > 0 || oauth {
+			logger.Printf("admin: enabled (account/OAuth login; ADMIN_TOKEN recovery credential not set)")
+		} else {
+			logger.Printf("admin: disabled (ADMIN_TOKEN not set; /api/admin/* answers 503, see env.example)")
+		}
 	} else {
 		logger.Printf("admin: enabled (console API at /api/admin/*, UI at the web app's /admin)")
 	}

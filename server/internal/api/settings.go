@@ -30,14 +30,16 @@ func (s *Server) handleSite(w http.ResponseWriter, r *http.Request) {
 		appearance = s.opts.Settings.Get(settings.KeyThemeAppearance)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
-		"name":              name,
-		"theme_color":       color,
-		"theme_appearance":  appearance,
+		"name":             name,
+		"theme_color":      color,
+		"theme_appearance": appearance,
 	})
 }
 
 func (s *Server) handleAdminSettingsGet(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	// Settings expose the whole deployment configuration (and accept
+	// changes to it): admin role only, reviewers never reach here.
+	if _, ok := s.requireRole(w, r, roleAdmin); !ok {
 		return
 	}
 	if s.opts.Settings == nil {
@@ -50,7 +52,7 @@ func (s *Server) handleAdminSettingsGet(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleAdminSettingsPut(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if _, ok := s.requireRole(w, r, roleAdmin); !ok {
 		return
 	}
 	if s.opts.Settings == nil {

@@ -175,6 +175,19 @@ type Server struct {
 	// report is a write into the operator's queue, so one visitor must
 	// not be able to flood it with duplicates of the same complaint.
 	reportLimiter *ipLimiter
+	// Auth state (see auth.go): the outbound client for OAuth/OIDC
+	// calls, the discovered-provider cache, the memoized account
+	// count behind the admin-enabled check, and the GitHub endpoint
+	// overrides tests use to point at a mock provider.
+	authHTTP       *http.Client
+	oidcMu         sync.Mutex
+	oidcProviders  map[string]*oidcProvider
+	authMu         sync.Mutex
+	userCount      int
+	userCountAt    time.Time
+	userCountErr   error
+	githubTokenURL string
+	githubUserURL  string
 
 	// Cached /api/stats body and empty-query total, both refreshed at most
 	// once per StatsTTL. The mutexes double as single-flight: one request
@@ -217,6 +230,7 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 		loginLimiter: newIPLimiter(adminLoginRate, adminLoginBurst),
 		tokenLimiter: newTokenLimiter(),
 		reportLimiter: newIPLimiter(reportRate, reportBurst),
+		authHTTP:     &http.Client{Timeout: 15 * time.Second},
 	}
 	if opts.RateRPS > 0 {
 		burst := opts.RateBurst

@@ -608,6 +608,21 @@ func validateStringKey(key, v string) error {
 		if v == "" {
 			return fmt.Errorf("must not be empty")
 		}
+	case KeyOIDCIssuer:
+		if v == "" {
+			return nil
+		}
+		u, err := url.Parse(v)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("must be an http(s) URL")
+		}
+	case KeyOIDCAllowedDomain:
+		if v == "" {
+			return nil
+		}
+		if strings.ContainsAny(v, "@/\\ \t") || !strings.Contains(v, ".") {
+			return fmt.Errorf("must be a bare domain like example.com")
+		}
 	case KeyOpenAIBaseURL, KeyFeedsKeywordURL:
 		if v == "" {
 			return nil

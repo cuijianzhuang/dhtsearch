@@ -12,7 +12,7 @@
 // secrets start empty and are only sent when typed into (an empty
 // secret field means "leave unchanged", never "clear").
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { AdminSettingItem, AdminSettingsGroup } from "@/lib/admin";
@@ -23,6 +23,38 @@ const APPEARANCE_LABELS: Record<string, string> = {
   light: "浅色",
   dark: "深色",
 };
+
+/** The exact callback URLs the operator must register with the
+ *  GitHub OAuth App and the OIDC provider. They are derived from the
+ *  origin this page is served on — the same derivation the login
+ *  flow itself uses — so what is shown here is what the providers
+ *  will be called back on. */
+function AuthCallbackInfo() {
+  const origin = useSyncExternalStore(
+    () => () => {},
+    () => window.location.origin,
+    () => ""
+  );
+  if (!origin) return null;
+  const codeClass =
+    "mt-1 block break-all rounded-md bg-soft px-2 py-1 font-mono text-xs text-ink-2";
+  return (
+    <div className="border-b border-line-2 px-4 py-3 text-sm leading-relaxed text-mute">
+      <p>
+        配置第三方登录时，把下面两个地址原样填到对应平台的回调 /
+        重定向地址里：
+      </p>
+      <p className="mt-2">
+        GitHub OAuth App 的 Authorization callback URL
+        <code className={codeClass}>{origin}/api/auth/github/callback</code>
+      </p>
+      <p className="mt-2">
+        OIDC 提供商的 Redirect URI（仅支持 OIDC，不支持 SAML）
+        <code className={codeClass}>{origin}/api/auth/oidc/callback</code>
+      </p>
+    </div>
+  );
+}
 
 function displayValue(item: AdminSettingItem): string {
   if (item.type === "list") {
@@ -382,6 +414,7 @@ export default function SettingsForm({
               </span>
             )}
           </h2>
+          {group.key === "auth" && <AuthCallbackInfo />}
           {group.key === "moderation" ? (
             <div className="px-4 py-4">
               <p className="text-sm leading-relaxed text-mute">

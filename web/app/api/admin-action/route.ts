@@ -31,6 +31,14 @@ interface ActionBody {
   base_url?: string;
   model?: string;
   api_key?: string;
+  /** Account management kinds (see /admin/users). */
+  userId?: string;
+  username?: string;
+  password?: string;
+  role?: string;
+  disabled?: boolean;
+  currentPassword?: string;
+  newPassword?: string;
 }
 
 export async function POST(request: Request) {
@@ -120,6 +128,37 @@ export async function POST(request: Request) {
       path = `/api/admin/reports/${body.id}/${verb}`;
       break;
     }
+    case "create-user":
+      path = `/api/admin/users`;
+      payload = {
+        username: body.username ?? "",
+        password: body.password ?? "",
+        role: body.role ?? "reviewer",
+      };
+      break;
+    case "update-user": {
+      path = `/api/admin/users/${encodeURIComponent(body.userId ?? "")}`;
+      const patch: Record<string, unknown> = {};
+      if (body.role !== undefined) patch.role = body.role;
+      if (body.disabled !== undefined) patch.disabled = body.disabled;
+      payload = patch;
+      break;
+    }
+    case "reset-user-password":
+      path = `/api/admin/users/${encodeURIComponent(body.userId ?? "")}/password`;
+      payload = { password: body.password ?? "" };
+      break;
+    case "delete-user":
+      method = "DELETE";
+      path = `/api/admin/users/${encodeURIComponent(body.userId ?? "")}`;
+      break;
+    case "change-my-password":
+      path = `/api/admin/me/password`;
+      payload = {
+        current_password: body.currentPassword ?? "",
+        new_password: body.newPassword ?? "",
+      };
+      break;
     default:
       return NextResponse.json({ error: "unknown action" }, { status: 400 });
   }
@@ -138,10 +177,22 @@ export async function POST(request: Request) {
     body.kind !== "batch" &&
     body.kind !== "save-settings" &&
     body.kind !== "test-llm" &&
+    body.kind !== "create-user" &&
+    body.kind !== "update-user" &&
+    body.kind !== "reset-user-password" &&
+    body.kind !== "delete-user" &&
+    body.kind !== "change-my-password" &&
     !body.kind?.startsWith("report-") &&
     !body.hash
   ) {
     return NextResponse.json({ error: "hash required" }, { status: 400 });
+  }
+  const needsUser =
+    body.kind === "update-user" ||
+    body.kind === "reset-user-password" ||
+    body.kind === "delete-user";
+  if (needsUser && !body.userId) {
+    return NextResponse.json({ error: "userId required" }, { status: 400 });
   }
 
   let res: Response;

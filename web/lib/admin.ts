@@ -1,11 +1,14 @@
 // Admin console data layer (server-side only).
 //
-// Auth model: the operator's ADMIN_TOKEN lives in an httpOnly cookie
-// (set by /api/admin-session after the Go backend accepts the token at
-// /api/admin/login). Server Components read the cookie and call the Go
-// admin API with it as a Bearer header; browser JavaScript never sees
-// the token, so an XSS anywhere on the site cannot exfiltrate it —
-// unlike sessionStorage, which any script on the page can read.
+// Auth model: a successful login (recovery token, username+password,
+// GitHub OAuth or OIDC SSO) is traded at the Go backend for a
+// server-side session token, and only that session token lives in
+// the httpOnly cookie (set by /api/admin-session or the OAuth
+// callback routes). Server Components read the cookie and call the
+// Go admin API with it as a Bearer header; browser JavaScript never
+// sees any credential, so an XSS anywhere on the site cannot
+// exfiltrate one — unlike sessionStorage, which any script on the
+// page can read.
 
 import { cookies, headers } from "next/headers";
 import { API_BASE } from "./api";
@@ -38,7 +41,7 @@ export async function getAdminToken(): Promise<string | null> {
 // Forward the caller's identity like lib/api.ts does, so the backend's
 // per-client rate limiting (especially the strict login limiter) sees
 // the real visitor instead of the Next server.
-async function clientIPHeaders(): Promise<Record<string, string>> {
+export async function clientIPHeaders(): Promise<Record<string, string>> {
   try {
     const h = await headers();
     const out: Record<string, string> = {};
@@ -79,34 +82,132 @@ export async function adminFetch<T>(
 
 export type LoginVerdict = "ok" | "invalid" | "disabled" | "limited" | "unreachable";
 
-/** Ask the Go backend whether a token is the configured ADMIN_TOKEN. */
-export async function verifyAdminToken(token: string): Promise<LoginVerdict> {
+export interface AdminPrincipal {
+  kind: "token" | "user";
+  username: string;
+  role: "admin" | "reviewer";
+  method: string;
+  has_password?: boolean;
+}
+
+export interface LoginOutcome {
+  verdict: LoginVerdict;
+  /** Session token to store in the cookie; absent on failure (and on
+   *  a pre-session backend, where the caller falls back to the raw
+   *  credential — the backend accepts both). */
+  session?: string;
+  principal?: AdminPrincipal;
+}
+
+async function postLogin(path: string, payload: unknown): Promise<LoginOutcome> {
   let res: Response;
   try {
-    res = await fetch(`${API_BASE}/api/admin/login`, {
+    res = await fetch(`${API_BASE}${path}`, {
       method: "POST",
       cache: "no-store",
       headers: {
         "Content-Type": "application/json",
         ...(await clientIPHeaders()),
       },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify(payload),
     });
   } catch {
-    return "unreachable";
+    return { verdict: "unreachable" };
   }
   switch (res.status) {
-    case 200:
-      return "ok";
+    case 200: {
+      const data = (await res.json().catch(() => ({}))) as {
+        session?: string;
+        principal?: AdminPrincipal;
+      };
+      return { verdict: "ok", session: data.session, principal: data.principal };
+    }
     case 401:
-      return "invalid";
+      return { verdict: "invalid" };
     case 503:
-      return "disabled";
+      return { verdict: "disabled" };
     case 429:
-      return "limited";
+      return { verdict: "limited" };
     default:
-      return "unreachable";
+      return { verdict: "unreachable" };
   }
+}
+
+/** Trade the ADMIN_TOKEN recovery credential for a session. */
+export function loginWithToken(token: string): Promise<LoginOutcome> {
+  return postLogin("/api/admin/login", { token });
+}
+
+/** Trade a username + password pair for a session. */
+export function loginWithPassword(
+  username: string,
+  password: string
+): Promise<LoginOutcome> {
+  return postLogin("/api/admin/auth/password", { username, password });
+}
+
+// --- Auth configuration (public; drives the login page) ---
+
+export interface AuthConfig {
+  has_users: boolean;
+  token: boolean;
+  password: boolean;
+  github: { enabled: boolean; client_id: string };
+  oidc: { enabled: boolean; issuer: string; client_id: string; name: string };
+}
+
+const AUTH_CONFIG_FALLBACK: AuthConfig = {
+  has_users: false,
+  token: false,
+  password: false,
+  github: { enabled: false, client_id: "" },
+  oidc: { enabled: false, issuer: "", client_id: "", name: "SSO" },
+};
+
+/** Which login methods the backend offers. Public by design: client
+ *  IDs are not secrets, and the page must render before login. */
+export async function fetchAuthConfig(): Promise<AuthConfig> {
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/auth/config`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return AUTH_CONFIG_FALLBACK;
+    const data = (await res.json()) as Partial<AuthConfig>;
+    return {
+      ...AUTH_CONFIG_FALLBACK,
+      ...data,
+      github: { ...AUTH_CONFIG_FALLBACK.github, ...(data.github ?? {}) },
+      oidc: { ...AUTH_CONFIG_FALLBACK.oidc, ...(data.oidc ?? {}) },
+    };
+  } catch {
+    return AUTH_CONFIG_FALLBACK;
+  }
+}
+
+// --- Principal and accounts ---
+
+export interface AdminMe extends AdminPrincipal {
+  has_users: boolean;
+}
+
+export function fetchMe(token: string): Promise<AdminMe> {
+  return adminFetch<AdminMe>(token, "/api/admin/me");
+}
+
+export interface AdminUserItem {
+  id: string;
+  username: string;
+  role: "admin" | "reviewer";
+  source: "local" | "github" | "oidc";
+  disabled: boolean;
+  created_at: number;
+  last_login_at: number;
+}
+
+export function fetchAdminUsers(
+  token: string
+): Promise<{ users: AdminUserItem[]; total: number }> {
+  return adminFetch(token, "/api/admin/users");
 }
 
 // --- Response types (mirror server/internal/api/admin.go) ---

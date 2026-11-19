@@ -73,11 +73,24 @@ const (
 	KeyPublicAPIEnabled         = "PUBLIC_API_ENABLED"
 	KeyPublicAPIRequireToken    = "PUBLIC_API_REQUIRE_TOKEN"
 	KeyPublicAPITokenRatePerMin = "PUBLIC_API_TOKEN_RATE_PER_MIN"
+	// auth: admin accounts, GitHub OAuth, OIDC SSO. All live — the
+	// auth handlers read them through the Manager per request, so
+	// saving here changes the login page's offered methods at once.
+	KeyGitHubClientID     = "GITHUB_CLIENT_ID"
+	KeyGitHubClientSecret = "GITHUB_CLIENT_SECRET"
+	KeyGitHubAllowedUsers = "GITHUB_ALLOWED_USERS"
+	KeyOIDCIssuer         = "OIDC_ISSUER"
+	KeyOIDCClientID       = "OIDC_CLIENT_ID"
+	KeyOIDCClientSecret   = "OIDC_CLIENT_SECRET"
+	KeyOIDCProviderName   = "OIDC_PROVIDER_NAME"
+	KeyOIDCAllowedEmails  = "OIDC_ALLOWED_EMAILS"
+	KeyOIDCAllowedDomain  = "OIDC_ALLOWED_DOMAIN"
 )
 
 // Groups in settings-page display order.
 var Groups = []Group{
 	{Key: "service", Label: "服务与数据库"},
+	{Key: "auth", Label: "登录与账号"},
 	{Key: "appearance", Label: "外观与主题"},
 	{Key: "crawler", Label: "爬虫"},
 	{Key: "metadata", Label: "元数据抓取"},
@@ -110,6 +123,26 @@ var Registry = []Item{
 	{Key: KeyAdminToken, Group: "service", Label: "管理端令牌", Type: TypeSecret, Sensitive: true, Default: "",
 		Desc: "只从环境读取，从不入库。在 env 文件里修改，重启生效"},
 	{Key: KeyEnvFile, Group: "service", Label: "环境文件路径", Type: TypeString, Default: ".env"},
+
+	// --- auth: admin login methods. All live: the login page asks the
+	// backend which methods are configured and renders only those. ---
+	{Key: KeyGitHubClientID, Group: "auth", Label: "GitHub Client ID", Type: TypeString, Default: "", Editable: true, MaxLen: 200,
+		Desc: "GitHub OAuth App 的 Client ID；与密钥、放行名单都配好后，登录页出现 GitHub 登录按钮"},
+	{Key: KeyGitHubClientSecret, Group: "auth", Label: "GitHub Client Secret", Type: TypeSecret, Sensitive: true, Default: "", Editable: true,
+		Desc: "只显示是否已设置，保存时留空表示不改"},
+	{Key: KeyGitHubAllowedUsers, Group: "auth", Label: "GitHub 放行用户名", Type: TypeList, Default: "", Editable: true,
+		MaxItems: 200, MaxLen: 100, Desc: "只有名单内的 GitHub 用户名（不区分大小写）能登录；名单外的人授权成功也不会发会话"},
+	{Key: KeyOIDCIssuer, Group: "auth", Label: "SSO Issuer 地址", Type: TypeString, Default: "", Editable: true, MaxLen: 300,
+		Desc: "OIDC 提供商的 Issuer，如 https://accounts.google.com；与 Client ID、密钥都配好后登录页出现 SSO 按钮（仅支持 OIDC，不支持 SAML）"},
+	{Key: KeyOIDCClientID, Group: "auth", Label: "SSO Client ID", Type: TypeString, Default: "", Editable: true, MaxLen: 200},
+	{Key: KeyOIDCClientSecret, Group: "auth", Label: "SSO Client Secret", Type: TypeSecret, Sensitive: true, Default: "", Editable: true,
+		Desc: "只显示是否已设置，保存时留空表示不改"},
+	{Key: KeyOIDCProviderName, Group: "auth", Label: "SSO 按钮名称", Type: TypeString, Default: "SSO", Editable: true, MaxLen: 30,
+		Desc: "登录页 SSO 按钮上显示的名字，如公司 IdP 的名称"},
+	{Key: KeyOIDCAllowedEmails, Group: "auth", Label: "SSO 放行邮箱", Type: TypeList, Default: "", Editable: true,
+		MaxItems: 500, MaxLen: 200, Desc: "允许通过 SSO 登录的邮箱（不区分大小写）"},
+	{Key: KeyOIDCAllowedDomain, Group: "auth", Label: "SSO 放行邮箱域名", Type: TypeString, Default: "", Editable: true, MaxLen: 100,
+		Desc: "如 example.com，该域名下的邮箱都可通过 SSO 登录；与放行邮箱至少填一个，两者都空时 SSO 登录一律拒绝"},
 
 	// --- appearance: live, consumed by the web app via /api/site ---
 	{Key: KeySiteName, Group: "appearance", Label: "站点名称", Type: TypeString, Default: "DHTSearch", Editable: true, MaxLen: 60,

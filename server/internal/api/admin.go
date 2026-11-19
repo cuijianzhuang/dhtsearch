@@ -27,6 +27,18 @@ const (
 
 func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/login", s.handleAdminLogin)
+	mux.HandleFunc("POST /api/admin/auth/password", s.handleAdminPasswordLogin)
+	mux.HandleFunc("POST /api/admin/auth/github/exchange", s.handleGitHubExchange)
+	mux.HandleFunc("POST /api/admin/auth/oidc/exchange", s.handleOIDCExchange)
+	mux.HandleFunc("GET /api/admin/auth/config", s.handleAuthConfig)
+	mux.HandleFunc("GET /api/admin/me", s.handleAdminMe)
+	mux.HandleFunc("POST /api/admin/logout", s.handleAdminLogout)
+	mux.HandleFunc("POST /api/admin/me/password", s.handleAdminChangeMyPassword)
+	mux.HandleFunc("GET /api/admin/users", s.handleAdminUsersList)
+	mux.HandleFunc("POST /api/admin/users", s.handleAdminUsersCreate)
+	mux.HandleFunc("POST /api/admin/users/{id}", s.handleAdminUserUpdate)
+	mux.HandleFunc("POST /api/admin/users/{id}/password", s.handleAdminUserResetPassword)
+	mux.HandleFunc("DELETE /api/admin/users/{id}", s.handleAdminUserDelete)
 	mux.HandleFunc("GET /api/admin/overview", s.handleAdminOverview)
 	mux.HandleFunc("GET /api/admin/torrents", s.handleAdminList)
 	mux.HandleFunc("POST /api/admin/torrents/batch", s.handleAdminBatch)
@@ -52,32 +64,13 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/reports/{id}/block", s.handleAdminReportBlock)
 }
 
-func (s *Server) adminEnabled() bool { return s.opts.AdminToken != "" }
-
-// requireAdmin gates a handler: 503 when the admin API is disabled, 401
-// when the bearer token is missing or wrong. Returns false when it has
-// already answered the request.
-func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
-	if !s.adminEnabled() {
-		writeError(w, http.StatusServiceUnavailable, "admin disabled")
-		return false
-	}
-	tok := ""
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		tok = strings.TrimPrefix(auth, "Bearer ")
-	}
-	if tok == "" || subtle.ConstantTimeCompare([]byte(tok), []byte(s.opts.AdminToken)) != 1 {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return false
-	}
-	return true
-}
-
-// handleAdminLogin verifies a token without exposing any data, so the
-// web UI can trade the operator's token for an httpOnly cookie only
-// after the backend has accepted it.
+// handleAdminLogin verifies the ADMIN_TOKEN recovery credential and
+// trades it for a server-side session, so the web UI's cookie holds
+// a revocable session token rather than the recovery token itself.
+// (adminEnabled / requireAdmin live in auth.go, where the principal
+// resolution for every credential kind is defined.)
 func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.adminEnabled() {
+	if s.opts.AdminToken == "" {
 		writeError(w, http.StatusServiceUnavailable, "admin disabled")
 		return
 	}
@@ -98,7 +91,25 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	ctx, cancel := s.adminCtx(r)
+	defer cancel()
+	token, err := s.mintSession(ctx, "", "token")
+	if err != nil {
+		// Session storage is down; the login itself is valid, so
+		// answer as before and let the web layer fall back to
+		// storing the recovery token (which requireAdmin accepts
+		// directly) rather than locking the operator out.
+		s.logger.Printf("api: mint token session: %v", err)
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return
+	}
+	writeJSON(w, http.StatusOK, loginResult{
+		OK:      true,
+		Session: token,
+		Principal: &principal{
+			Kind: "token", Username: "ADMIN_TOKEN", Role: roleAdmin, Method: "token",
+		},
+	})
 }
 
 func (s *Server) adminCtx(r *http.Request) (context.Context, context.CancelFunc) {

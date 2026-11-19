@@ -11,6 +11,7 @@ const TABS = [
   { key: "blocked", href: "/admin/blocked", label: "黑名单" },
   { key: "llm", href: "/admin/llm", label: "LLM 审核" },
   { key: "reports", href: "/admin/reports", label: "举报队列" },
+  { key: "users", href: "/admin/users", label: "账号" },
   { key: "settings", href: "/admin/settings", label: "设置" },
   { key: "api-tokens", href: "/admin/api-tokens", label: "API 令牌" },
 ] as const;
@@ -73,19 +74,18 @@ export default async function AdminShell({
   );
 }
 
-/** Shown when the backend has no ADMIN_TOKEN configured. */
+/** Shown when the backend has no login method configured at all. */
 export function AdminDisabledNotice() {
   return (
     <main className="mx-auto flex w-full max-w-xl flex-1 flex-col px-4 py-16">
       <div className="rounded-xl border border-line bg-surface p-6 text-center shadow-card">
         <p className="text-lg font-medium text-ink-2">管理端未启用</p>
         <p className="mt-3 text-sm leading-relaxed text-mute">
-          后端没有配置{" "}
+          后端没有配置任何登录方式，/api/admin 接口整体禁用。请在后端环境变量中设置{" "}
           <code className="rounded-md bg-soft px-2 py-1 font-mono text-xs">
             ADMIN_TOKEN
-          </code>
-          ，/api/admin 接口整体禁用。请在后端环境变量中设置一个足够长的随机
-          token 后重启服务，再回到这里登录。
+          </code>{" "}
+          后重启服务，再回到这里用恢复令牌登录并创建管理员账号。
         </p>
         <Link
           href="/"
