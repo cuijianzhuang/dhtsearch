@@ -339,7 +339,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main
 
 API 默认只听 `127.0.0.1:8080`、前端听 `127.0.0.1:3000`，公网访问请在前面加反向代理。日志：`journalctl -u dhtsearch -f`（前端 `-u dhtsearch-web`）；健康检查：`curl http://127.0.0.1:8080/api/healthz`（install/upgrade 会等它最多 120 秒，失败打印日志尾巴）。
 
-Release 产物由 `.github/workflows/release.yml` 在打 `v*` tag 时构建（也可手动 `workflow_dispatch`）：`dhtsearch-<version>-linux-<amd64|arm64>.tar.gz` + 对应 `.sha256`，install 时先验 sha256 再安装。本地等价打包用 `./scripts/package-release.sh --version vX.Y.Z --arch amd64`。**在打第一个 tag 之前 Release 里没有现成产物**，这段时间请用 `--from-source` 安装。
+Release 产物由 `.github/workflows/release.yml` 构建：`dhtsearch-<version>-linux-<amd64|arm64>.tar.gz` + 对应 `.sha256`，install 时先验 sha256 再安装。本地等价打包用 `./scripts/package-release.sh --version vX.Y.Z --arch amd64`。
+
+发版分自动和手动两条路：
+
+- **自动发版**（`.github/workflows/auto-release.yml`）：push 到 `main` 时，只有改动包含业务代码才发版，版本号在现有最大 `vX.Y.Z` tag 基础上 patch +1（仓库还没有 tag 时首个版本为 `v0.1.0`）。业务代码白名单由 `scripts/release-scope.sh` 判定（后端 `server/` 的 Go 代码与 go.mod/go.sum、前端 `web/app|components|lib|public` 与 web 构建配置），只改文档、`scripts/`、`.github/` 不发版；业务代码与文档混在一起照常发。HEAD 已有版本 tag、或提交信息含 `[skip release]` 时跳过。连续多次 push 只发最新一次（旧的运行会被取消）。判断与版本号计算可用 `./scripts/test-release-tools.sh` 本地单测。
+- **手动发版**：照旧——自己推 `v*` tag 走 `release.yml` 直接发版；或在 Actions 里手动 `workflow_dispatch` 跑 `release.yml`（只构建产物，`version` 不填时产物名为 `dev-<短 sha>`，不挂 Release）。
 
 ### 每小时备份到 Cloudflare R2
 

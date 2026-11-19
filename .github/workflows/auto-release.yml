@@ -1,0 +1,133 @@
+name: Auto Release
+
+# Automatic releases on pushes to main, following the house rules:
+#
+#   * Only business-code changes release. The whitelist lives in
+#     scripts/release-scope.sh (server Go code + module pins, web app /
+#     components / lib / public + web build inputs). Docs, scripts/ and
+#     .github/ changes alone never release; business code mixed with
+#     docs still does.
+#   * The version is the greatest vX.Y.Z tag with patch + 1, computed by
+#     scripts/next-version.sh (first ever automatic release: v0.1.0).
+#   * A push whose HEAD is already tagged, or whose commit messages
+#     contain "[skip release]", is skipped.
+#   * Manual paths are untouched: pushing a v* tag still releases via
+#     release.yml directly, and workflow_dispatch still works there.
+#
+# Why the publish step *calls* release.yml instead of just pushing a tag:
+# a tag pushed with GITHUB_TOKEN does not trigger other workflows, so a
+# tag-only approach would silently produce tags with no packages. The
+# gate below computes the version, the tag job pushes the tag, and the
+# publish job invokes release.yml as a reusable workflow in this same
+# run to build and attach the packages to that tag's GitHub Release.
+#
+# Rapid successive pushes: the concurrency group cancels the older run,
+# so only the latest push releases. The version is computed from the
+# tags that exist when the gate runs, so a cancelled run never consumes
+# a version unless its tag was already pushed — in that case the next
+# run simply bumps from that tag, and the orphaned tag can be released
+# manually from the Release workflow's workflow_dispatch.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Decide whether to release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_release: ${{ steps.decide.outputs.should_release }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Decide
+        id: decide
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          should=false
+          version=""
+
+          # Resolve the commit range for this push. BEFORE is all zeros
+          # (or missing from history after a force-push) only in odd
+          # cases; fall back to just the head commit then.
+          range=""
+          if [ -n "$BEFORE" ] \
+             && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            range="${BEFORE}..${AFTER}"
+          fi
+
+          if [ -n "$range" ]; then
+            messages="$(git log --format=%B "$range")"
+            files="$(git diff --name-only "$BEFORE" "$AFTER")"
+          else
+            messages="$(git log -1 --format=%B "$AFTER")"
+            files="$(git show --name-only --format= "$AFTER")"
+          fi
+
+          if printf '%s' "$messages" | grep -qF '[skip release]'; then
+            echo "skip: [skip release] found in commit messages"
+          elif git tag --points-at "$AFTER" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "skip: HEAD is already tagged with a release version"
+          else
+            echo "changed files:"
+            printf '%s\n' "$files"
+            if [ "$(printf '%s\n' "$files" | scripts/release-scope.sh)" = "true" ]; then
+              version="$(git tag -l | scripts/next-version.sh)"
+              should=true
+            else
+              echo "skip: no business code in this push"
+            fi
+          fi
+
+          echo "should_release=${should}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "decision: should_release=${should} version=${version}"
+
+  tag:
+    name: Tag ${{ needs.gate.outputs.version }}
+    needs: gate
+    if: needs.gate.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create and push tag
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Release $VERSION" "$AFTER"
+          git push origin "refs/tags/${VERSION}"
+
+  publish:
+    name: Publish release
+    needs: [gate, tag]
+    if: needs.gate.outputs.should_release == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      version: ${{ needs.gate.outputs.version }}
+      publish: true
