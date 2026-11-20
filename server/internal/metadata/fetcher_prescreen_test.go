@@ -247,7 +247,7 @@ func TestPrescreenAB(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				for h := range jobs {
-					if _, ok := f.fetch(context.Background(), h); ok {
+					if _, ok := f.fetch(context.Background(), h, SourceDHT); ok {
 						mu.Lock()
 						fetched++
 						mu.Unlock()

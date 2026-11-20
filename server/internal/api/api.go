@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -205,6 +206,53 @@ func (s *Server) metaStatusInto(fetch map[string]any) {
 	if ms.DHT != nil {
 		fetch["dht"] = ms.DHT
 	}
+}
+
+// FetchSourceStats is one discovery source's row in the fetch
+// section's by_source breakdown: how many fetches the source's
+// discoveries accounted for and how they ended. SuccessRate is
+// Fetched/Attempts derived at read time (0 when the source has no
+// attempts yet), rounded to four decimals — the raw counters are
+// all here, so nothing is lost by the rounding.
+type FetchSourceStats struct {
+	Source           string  `json:"source"`
+	Attempts         int64   `json:"attempts"`
+	Fetched          int64   `json:"fetched"`
+	TimedOut         int64   `json:"timed_out"`
+	Failed           int64   `json:"failed"`
+	PrescreenDropped int64   `json:"prescreen_dropped"`
+	SuccessRate      float64 `json:"success_rate"`
+}
+
+// fetchBySource folds the persisted per-source fetch counters into
+// the fetch section's by_source rows, in canonical source order.
+// The counters live in the stats table under the keys cmd/server's
+// mirror writes (fetch_<source>_<counter> — see
+// metadata.SourceStatKey), so the breakdown is exactly as durable
+// as the counters themselves: both handlers publish it from the
+// same counters map they already loaded.
+func fetchBySource(counters map[string]int64) []FetchSourceStats {
+	rows := make([]FetchSourceStats, 0, 3)
+	for _, name := range []string{"dht", "scrape", "feed"} {
+		get := func(counter string) int64 {
+			return counters["fetch_"+name+"_"+counter]
+		}
+		attempts, fetched := get("attempts"), get("fetched")
+		rate := 0.0
+		if attempts > 0 {
+			rate = math.Round(float64(fetched)/float64(attempts)*10000) / 10000
+		}
+		rows = append(rows, FetchSourceStats{
+			Source:           name,
+			Attempts:         attempts,
+			Fetched:          fetched,
+			TimedOut:         get("timed_out"),
+			Failed:           get("failed"),
+			PrescreenDropped: get("prescreen_dropped"),
+			SuccessRate:      rate,
+		})
+	}
+	return rows
 }
 
 // ScraperStatus describes the tracker-scrape prioritizer. Seeded/Scraped is
@@ -738,6 +786,10 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			// of those the successes with a hint peer connected.
 			"peer_hint_items":   counters["peer_hint_items"],
 			"peer_hint_fetched": counters["peer_hint_fetched"],
+			// Per-source breakdown of the same outcomes: which
+			// discovery channel (dht / scrape / feed) the fetches
+			// came from and how each channel's fetches ended.
+			"by_source": fetchBySource(counters),
 		},
 		"moderation": map[string]any{
 			"reviewed":      counters["llm_reviewed"],

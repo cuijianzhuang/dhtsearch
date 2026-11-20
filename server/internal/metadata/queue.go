@@ -8,9 +8,12 @@ import (
 	"time"
 )
 
-// Source identifies where a queued infohash came from. It is a priority
-// signal only: a curated feed hash is likelier to be alive and wanted than
-// a hash sampled at random from the DHT.
+// Source identifies where a queued infohash came from. It is a
+// priority signal (a curated feed hash is likelier to be alive and
+// wanted than a hash sampled at random from the DHT) and the
+// fetch-attribution tag: every fetch outcome is counted under its
+// item's source (see SourceTracker), so the operator can see which
+// discovery channel actually produces torrents.
 type Source int
 
 const (

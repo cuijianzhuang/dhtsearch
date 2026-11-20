@@ -86,6 +86,10 @@ type Fetcher struct {
 	prescreenDropped int64
 	hintItems        int64 // fetches that carried at least one DHT peer hint
 	hintFetched      int64 // of those, successes with a hint peer connected during the attempt
+
+	// Per-source attribution of the same outcomes counted above,
+	// split by the fetched items' discovery Source.
+	srcStats metadata.SourceTracker
 }
 
 var _ metadata.Backend = (*Fetcher)(nil)
@@ -134,9 +138,10 @@ func New(cfg metadata.Config) (*Fetcher, error) {
 	return f, nil
 }
 
-// Run consumes hex infohashes from in until in closes or the fetcher
-// is closed. Mirrors the incumbent's worker pool shape.
-func (f *Fetcher) Run(ctx context.Context, in <-chan string, onRecord func(metadata.Record)) {
+// Run consumes Items from in until in closes or the fetcher
+// is closed. Mirrors the incumbent's worker pool shape; only the
+// item's Hash and Source (the attribution tag) are consumed.
+func (f *Fetcher) Run(ctx context.Context, in <-chan metadata.Item, onRecord func(metadata.Record)) {
 	ctx, f.cancel = context.WithCancel(ctx)
 	for i := 0; i < f.cfg.Workers; i++ {
 		f.wg.Add(1)
@@ -144,17 +149,17 @@ func (f *Fetcher) Run(ctx context.Context, in <-chan string, onRecord func(metad
 	}
 }
 
-func (f *Fetcher) worker(ctx context.Context, in <-chan string, onRecord func(metadata.Record)) {
+func (f *Fetcher) worker(ctx context.Context, in <-chan metadata.Item, onRecord func(metadata.Record)) {
 	defer f.wg.Done()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case hexHash, ok := <-in:
+		case it, ok := <-in:
 			if !ok {
 				return
 			}
-			if rec, ok := f.fetch(ctx, hexHash); ok {
+			if rec, ok := f.fetch(ctx, it.Hash, it.Source); ok {
 				onRecord(rec)
 			}
 		}
@@ -173,7 +178,7 @@ func (f *Fetcher) RunQueue(ctx context.Context, q *metadata.Queue, onRecord func
 				if !ok {
 					return
 				}
-				if rec, ok := f.fetchPeers(ctx, it.Hash, it.Peers); ok {
+				if rec, ok := f.fetchFull(ctx, it.Hash, it.Source, it.Peers); ok {
 					onRecord(rec)
 				}
 			}
@@ -190,11 +195,17 @@ func (f *Fetcher) RunQueue(ctx context.Context, q *metadata.Queue, onRecord func
 //   - failed: the hash was invalid, or the swarm provably lied — a
 //     completed metadata blob whose SHA-1 is not the requested
 //     infohash, or a peer claiming an impossible metadata size.
-func (f *Fetcher) fetch(ctx context.Context, hexHash string) (metadata.Record, bool) {
-	return f.fetchPeers(ctx, hexHash, nil)
+func (f *Fetcher) fetch(ctx context.Context, hexHash string, src metadata.Source) (metadata.Record, bool) {
+	return f.fetchFull(ctx, hexHash, src, nil)
 }
 
-// fetchPeers is fetch with DHT peer hints (metadata.Item.Peers):
+// fetchPeers is fetch with DHT peer hints (metadata.Item.Peers) and
+// no explicit source (attributed to SourceDHT, the hints' origin).
+func (f *Fetcher) fetchPeers(ctx context.Context, hexHash string, peers []netip.AddrPort) (metadata.Record, bool) {
+	return f.fetchFull(ctx, hexHash, metadata.SourceDHT, peers)
+}
+
+// fetchFull runs one attempt. peers carries DHT peer hints:
 // addresses the crawler already knows are in this swarm, seeded
 // into the attempt's pool before the tracker announce round starts
 // so they race the tracker-supplied peers inside the same timeout
@@ -203,17 +214,20 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (metadata.Record, b
 // handshake and SHA-1 verification as any tracker or PEX candidate,
 // and a dead hint costs nothing but a failed dial in parallel with
 // the tracker path.
-func (f *Fetcher) fetchPeers(ctx context.Context, hexHash string, peers []netip.AddrPort) (metadata.Record, bool) {
+//
+// src is the item's discovery source: the attempt and its outcome
+// are attributed to it (see metadata.SourceTracker), identically
+// to the incumbent.
+func (f *Fetcher) fetchFull(ctx context.Context, hexHash string, src metadata.Source, peers []netip.AddrPort) (metadata.Record, bool) {
+	f.srcStats.Attempt(src)
 	rec := metadata.Record{InfoHash: hexHash}
 	if !validInfohash(hexHash) {
-		f.count(&f.failed)
-		f.report(hexHash, metadata.OutcomeFailed)
+		f.finish(src, hexHash, metadata.OutcomeFailed)
 		return rec, false
 	}
 	raw, err := hex.DecodeString(hexHash)
 	if err != nil || len(raw) != 20 {
-		f.count(&f.failed)
-		f.report(hexHash, metadata.OutcomeFailed)
+		f.finish(src, hexHash, metadata.OutcomeFailed)
 		return rec, false
 	}
 	var ih [20]byte
@@ -247,21 +261,36 @@ func (f *Fetcher) fetchPeers(ctx context.Context, hexHash string, peers []netip.
 		if len(peers) > 0 && a.hintWasConnected() {
 			f.count(&f.hintFetched)
 		}
-		f.count(&f.fetched)
-		f.report(hexHash, metadata.OutcomeFetched)
+		f.finish(src, hexHash, metadata.OutcomeFetched)
 		return outRec, true
 	case outcomePrescreened:
-		f.count(&f.prescreenDropped)
-		f.report(hexHash, metadata.OutcomePrescreened)
+		f.finish(src, hexHash, metadata.OutcomePrescreened)
 	case outcomeTimeout:
-		f.count(&f.timedOut)
-		f.report(hexHash, metadata.OutcomeTimedOut)
+		f.finish(src, hexHash, metadata.OutcomeTimedOut)
 	case outcomeFailed:
-		f.count(&f.failed)
-		f.report(hexHash, metadata.OutcomeFailed)
+		f.finish(src, hexHash, metadata.OutcomeFailed)
 	case outcomeAborted:
 	}
 	return rec, false
+}
+
+// finish records a fetch's terminal outcome in the fetcher's global
+// counters, in the per-source attribution, and in the ResultFunc
+// report — the three always move together, mirroring the
+// incumbent's finish.
+func (f *Fetcher) finish(src metadata.Source, hash string, outcome metadata.FetchOutcome) {
+	switch outcome {
+	case metadata.OutcomeFetched:
+		f.count(&f.fetched)
+	case metadata.OutcomeTimedOut:
+		f.count(&f.timedOut)
+	case metadata.OutcomeFailed:
+		f.count(&f.failed)
+	case metadata.OutcomePrescreened:
+		f.count(&f.prescreenDropped)
+	}
+	f.srcStats.Outcome(src, outcome)
+	f.report(hash, outcome)
 }
 
 // report delivers a fetch outcome to Config.ResultFunc, when set,
@@ -350,6 +379,13 @@ func (f *Fetcher) PeerHintStats() (items, fetched int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.hintItems, f.hintFetched
+}
+
+// SourceStats returns the per-source fetch counters, identically
+// attributed to the incumbent's. Part of the metadata.Backend
+// contract.
+func (f *Fetcher) SourceStats() []metadata.FetchSourceStats {
+	return f.srcStats.Stats()
 }
 
 // Close stops the workers and releases the uTP socket.

@@ -261,6 +261,30 @@ func queueItem(cr *crawler.Crawler, hash string, seeders int32, src metadata.Sou
 	}
 }
 
+// feedItems adapts the feeds service's hash channel to the fetch
+// workers' item channel, tagging every item with the feed source.
+// The feeds service speaks plain hashes (it predates the item
+// channel and has no other fetch input to carry), but the tag is
+// what attributes the dedicated feed fetcher's outcomes to the
+// feed channel in the per-source fetch counters — without it they
+// would land on the default dht row and the feed channel would
+// look like it produces nothing.
+func feedItems(ctx context.Context, out <-chan string) <-chan metadata.Item {
+	items := make(chan metadata.Item)
+	go func() {
+		defer close(items)
+		for h := range out {
+			it := metadata.Item{Hash: h, Seeders: -1, Source: metadata.SourceFeed, At: time.Now()}
+			select {
+			case items <- it:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return items
+}
+
 // feedAlias is the feed title for a fetched torrent, "" for DHT-only ones.
 func feedAlias(fs *feeds.Service, infoHash string) string {
 	if fs == nil {
@@ -795,42 +819,42 @@ func main() {
 			}
 			fetcher.RunQueue(ctx, q, onRecord)
 		} else if scraped != nil {
-			hashes := make(chan string)
+			items := make(chan metadata.Item)
 			go func() {
-				defer close(hashes)
+				defer close(items)
 				for it := range scraped {
 					item := metadata.Item{Hash: it.Hash, Seeders: it.Seeders, Source: metadata.SourceScrape, At: time.Now()}
 					if !admGate.Admit(item) {
 						continue
 					}
 					select {
-					case hashes <- it.Hash:
+					case items <- item:
 					case <-ctx.Done():
 						return
 					}
 				}
 			}()
-			fetcher.Run(ctx, hashes, onRecord)
+			fetcher.Run(ctx, items, onRecord)
 		} else {
-			hashes := make(chan string)
+			items := make(chan metadata.Item)
 			go func() {
-				defer close(hashes)
+				defer close(items)
 				for h := range feed {
 					item := metadata.Item{Hash: h, Seeders: -1, Source: metadata.SourceDHT, At: time.Now()}
 					if !admGate.Admit(item) {
 						continue
 					}
 					select {
-					case hashes <- h:
+					case items <- item:
 					case <-ctx.Done():
 						return
 					}
 				}
 			}()
-			fetcher.Run(ctx, hashes, onRecord)
+			fetcher.Run(ctx, items, onRecord)
 		}
 		if feedFetcher != nil {
-			feedFetcher.Run(ctx, feedSvc.Out(), onRecord)
+			feedFetcher.Run(ctx, feedItems(ctx, feedSvc.Out()), onRecord)
 			feedFetch = feedFetcher
 		}
 	} else {
@@ -939,6 +963,20 @@ func main() {
 					skStored, skBackoff := admGate.Skipped()
 					st.IncrStatContext(wctx, "admission_skipped_stored", skStored-prevAdmStored(&skStored))
 					st.IncrStatContext(wctx, "admission_skipped_backoff", skBackoff-prevAdmBackoff(&skBackoff))
+				}
+				// Per-source fetch attribution: the same delta
+				// mirror, keyed per discovery source (see
+				// metadata.SourceStatKey). The main foundation
+				// contributes the dht and scrape rows; the feeds
+				// fetcher — a separate instance whose counters the
+				// global mirror above never persisted — contributes
+				// the feed row, so all three survive restarts the
+				// same way.
+				if fetcher != nil {
+					mainSourceMirror.apply(wctx, st, fetcher.SourceStats())
+				}
+				if feedFetch != nil {
+					feedSourceMirror.apply(wctx, st, feedFetch.SourceStats())
 				}
 				// Hourly sweep of the negative cache: rows whose
 				// backoff expired over a week ago belong to hashes
@@ -1128,6 +1166,48 @@ var (
 	lastHintItems   int64
 	lastHintFetched int64
 )
+
+// The per-source mirrors keep their own delta state (one per
+// fetcher instance: the main foundation and the feeds fetcher).
+var (
+	mainSourceMirror = newSourceStatMirror()
+	feedSourceMirror = newSourceStatMirror()
+)
+
+// sourceStatMirror applies one fetcher's per-source fetch counters
+// to the stats table as deltas since the previous application, one
+// stats key per (source, counter) pair — the same mirror discipline
+// as the scalar counters above, factored because three sources ×
+// five counters × two fetcher instances is thirty keys, not six.
+type sourceStatMirror struct {
+	prev map[string]int64
+}
+
+func newSourceStatMirror() *sourceStatMirror {
+	return &sourceStatMirror{prev: make(map[string]int64)}
+}
+
+func (m *sourceStatMirror) apply(ctx context.Context, st *store.Store, stats []metadata.FetchSourceStats) {
+	for _, ss := range stats {
+		for _, c := range []struct {
+			name  string
+			value int64
+		}{
+			{metadata.SourceCounterAttempts, ss.Attempts},
+			{metadata.SourceCounterFetched, ss.Fetched},
+			{metadata.SourceCounterTimedOut, ss.TimedOut},
+			{metadata.SourceCounterFailed, ss.Failed},
+			{metadata.SourceCounterPrescreenDropped, ss.PrescreenDropped},
+		} {
+			key := metadata.SourceStatKey(ss.Source, c.name)
+			delta := c.value - m.prev[key]
+			m.prev[key] = c.value
+			if delta != 0 {
+				st.IncrStatContext(ctx, key, delta)
+			}
+		}
+	}
+}
 
 // prevSeen returns the previously reported seen count and records the new
 // one, so the stats mirror only applies deltas.

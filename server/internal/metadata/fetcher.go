@@ -128,6 +128,10 @@ type Fetcher struct {
 	prescreenDropped int64
 	hintItems        int64 // fetches that carried at least one DHT peer hint
 	hintFetched      int64 // of those, successes with a hint peer connected at completion
+
+	// Per-source attribution of the same outcomes counted above,
+	// split by the fetched items' discovery Source.
+	srcStats SourceTracker
 }
 
 // DefaultPrescreenTimeout is the prescreen window used when none is
@@ -244,10 +248,13 @@ func magnetTrackerParams(trackers []string) string {
 	return b.String()
 }
 
-// Run starts the worker pool consuming hex infohashes from in until in is
+// Run starts the worker pool consuming Items from in until in is
 // closed or the fetcher is closed. onRecord is called (from worker
 // goroutines) for every torrent whose metadata was fetched in time.
-func (f *Fetcher) Run(ctx context.Context, in <-chan string, onRecord func(Record)) {
+// Only the item's Hash and Source are consumed here (the channel
+// path carries no peer hints or seeder counts — those ride the
+// priority Queue); the Source is the fetch-attribution tag.
+func (f *Fetcher) Run(ctx context.Context, in <-chan Item, onRecord func(Record)) {
 	ctx, f.cancel = context.WithCancel(ctx)
 	for i := 0; i < f.cfg.Workers; i++ {
 		f.wg.Add(1)
@@ -255,17 +262,17 @@ func (f *Fetcher) Run(ctx context.Context, in <-chan string, onRecord func(Recor
 	}
 }
 
-func (f *Fetcher) worker(ctx context.Context, in <-chan string, onRecord func(Record)) {
+func (f *Fetcher) worker(ctx context.Context, in <-chan Item, onRecord func(Record)) {
 	defer f.wg.Done()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case hexHash, ok := <-in:
+		case it, ok := <-in:
 			if !ok {
 				return
 			}
-			if rec, ok := f.fetch(ctx, hexHash); ok {
+			if rec, ok := f.fetch(ctx, it.Hash, it.Source); ok {
 				onRecord(rec)
 			}
 		}
@@ -287,7 +294,7 @@ func (f *Fetcher) RunQueue(ctx context.Context, q *Queue, onRecord func(Record))
 				if !ok {
 					return
 				}
-				if rec, ok := f.fetchPeers(ctx, it.Hash, it.Peers); ok {
+				if rec, ok := f.fetchPeers(ctx, it.Hash, it.Peers, it.Source); ok {
 					onRecord(rec)
 				}
 			}
@@ -297,8 +304,8 @@ func (f *Fetcher) RunQueue(ctx context.Context, q *Queue, onRecord func(Record))
 
 // fetch adds the magnet, waits for GotInfo with a timeout and always drops
 // the torrent afterwards.
-func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
-	return f.fetchPeers(ctx, hexHash, nil)
+func (f *Fetcher) fetch(ctx context.Context, hexHash string, src Source) (Record, bool) {
+	return f.fetchPeers(ctx, hexHash, nil, src)
 }
 
 // fetchPeers is fetch with DHT peer hints (Item.Peers): addresses the
@@ -308,21 +315,22 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 // peer satisfies prescreen exactly like any other peer — that is
 // the point of the warm start: a hash whose swarm no tracker lists
 // can now connect inside the prescreen window instead of dying in it.
-func (f *Fetcher) fetchPeers(ctx context.Context, hexHash string, peers []netip.AddrPort) (Record, bool) {
+// src is the item's discovery source: the attempt and its outcome
+// are attributed to it (see SourceTracker).
+func (f *Fetcher) fetchPeers(ctx context.Context, hexHash string, peers []netip.AddrPort, src Source) (Record, bool) {
+	f.srcStats.Attempt(src)
 	rec := Record{InfoHash: hexHash}
 	// AddMagnet panics (rather than returning an error) on a zero or
 	// malformed infohash, and a panic in a worker takes the process with it.
 	// The crawler already filters these, but this is the last line before an
 	// untrusted value reaches the library, so check here too.
 	if !validInfohash(hexHash) {
-		f.count(&f.failed)
-		f.report(hexHash, OutcomeFailed)
+		f.finish(src, hexHash, OutcomeFailed)
 		return rec, false
 	}
 	spec, err := torrent.TorrentSpecFromMagnetUri("magnet:?xt=urn:btih:" + hexHash + f.magnetSuffix)
 	if err != nil {
-		f.count(&f.failed)
-		f.report(hexHash, OutcomeFailed)
+		f.finish(src, hexHash, OutcomeFailed)
 		return rec, false
 	}
 	spec.DisallowDataDownload = true
@@ -344,8 +352,7 @@ func (f *Fetcher) fetchPeers(ctx context.Context, hexHash string, peers []netip.
 	// process for systemd to restart.
 	t, _, err := f.clientFor(hexHash).AddTorrentSpec(spec)
 	if err != nil {
-		f.count(&f.failed)
-		f.report(hexHash, OutcomeFailed)
+		f.finish(src, hexHash, OutcomeFailed)
 		return rec, false
 	}
 	defer t.Drop()
@@ -368,12 +375,10 @@ func (f *Fetcher) fetchPeers(ctx context.Context, hexHash string, peers []netip.
 	switch waitForInfo(ctx, torrentInfoSource{t}, timeout, f.prescreenWindow(timeout)) {
 	case waitGotInfo:
 	case waitPrescreened:
-		f.count(&f.prescreenDropped)
-		f.report(hexHash, OutcomePrescreened)
+		f.finish(src, hexHash, OutcomePrescreened)
 		return rec, false
 	case waitTimedOut:
-		f.count(&f.timedOut)
-		f.report(hexHash, OutcomeTimedOut)
+		f.finish(src, hexHash, OutcomeTimedOut)
 		return rec, false
 	case waitAborted:
 		return rec, false
@@ -381,17 +386,34 @@ func (f *Fetcher) fetchPeers(ctx context.Context, hexHash string, peers []netip.
 
 	info := t.Info()
 	if info == nil {
-		f.count(&f.failed)
-		f.report(hexHash, OutcomeFailed)
+		f.finish(src, hexHash, OutcomeFailed)
 		return rec, false
 	}
 	rec = RecordFromInfo(info, hexHash, f.cfg.MaxFiles)
 	if len(peers) > 0 && hintPeerConnected(t, peers) {
 		f.count(&f.hintFetched)
 	}
-	f.count(&f.fetched)
-	f.report(hexHash, OutcomeFetched)
+	f.finish(src, hexHash, OutcomeFetched)
 	return rec, true
+}
+
+// finish records a fetch's terminal outcome in the fetcher's global
+// counters, in the per-source attribution, and in the ResultFunc
+// report — the three always move together, so every outcome site
+// goes through here and none of them can drift apart.
+func (f *Fetcher) finish(src Source, hash string, outcome FetchOutcome) {
+	switch outcome {
+	case OutcomeFetched:
+		f.count(&f.fetched)
+	case OutcomeTimedOut:
+		f.count(&f.timedOut)
+	case OutcomeFailed:
+		f.count(&f.failed)
+	case OutcomePrescreened:
+		f.count(&f.prescreenDropped)
+	}
+	f.srcStats.Outcome(src, outcome)
+	f.report(hash, outcome)
 }
 
 // report delivers a fetch outcome to Config.ResultFunc, when set.
@@ -671,6 +693,13 @@ func (f *Fetcher) PeerHintStats() (items, fetched int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.hintItems, f.hintFetched
+}
+
+// SourceStats returns the per-source fetch counters: attempts and
+// outcomes split by the fetched items' discovery Source, in
+// canonical source order. Part of the Backend contract.
+func (f *Fetcher) SourceStats() []FetchSourceStats {
+	return f.srcStats.Stats()
 }
 
 // Close stops the workers and the torrent clients.

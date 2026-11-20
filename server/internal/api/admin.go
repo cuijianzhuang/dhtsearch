@@ -201,6 +201,10 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 			// of those the successes with a hint peer connected.
 			"peer_hint_items":   counters["peer_hint_items"],
 			"peer_hint_fetched": counters["peer_hint_fetched"],
+			// Per-source breakdown of the same outcomes: which
+			// discovery channel (dht / scrape / feed) the fetches
+			// came from and how each channel's fetches ended.
+			"by_source": fetchBySource(counters),
 		},
 		"moderation": map[string]any{
 			"enabled":       s.moderationEnabled(),

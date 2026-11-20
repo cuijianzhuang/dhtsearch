@@ -109,8 +109,8 @@ func TestRealSidecarLoopbackExchange(t *testing.T) {
 	}
 	defer f.Close()
 
-	in := make(chan string, 1)
-	in <- hash.HexString()
+	in := make(chan metadata.Item, 1)
+	in <- metadata.Item{Hash: hash.HexString()}
 	close(in)
 	// Run is fire-and-forget (workers in the background, like the
 	// other foundations); poll for the record.
@@ -320,8 +320,8 @@ func TestRealSidecarDHTStatus(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	in := make(chan string, 1)
-	in <- "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	in := make(chan metadata.Item, 1)
+	in <- metadata.Item{Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 	f.Run(ctx, in, func(r metadata.Record) { t.Errorf("unexpected record %+v", r) })
 	waitDeadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(waitDeadline) {

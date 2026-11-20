@@ -22,6 +22,14 @@ import { CHART, DonutChart, MeterBar, TrendLine } from "./charts";
 
 const POLL_MS = 8000;
 
+/** Display labels for the fetch section's by_source rows, keyed by
+ *  the API's source names. */
+const FETCH_SOURCE_LABELS: Record<string, string> = {
+  dht: "DHT 采样",
+  scrape: "Tracker 刮削",
+  feed: "订阅源",
+};
+
 async function fetchKind<T>(kind: string, range?: string): Promise<T> {
   const q = new URLSearchParams({ kind });
   if (range) q.set("range", range);
@@ -323,6 +331,44 @@ export default function OverviewDashboard({
                 ["丢弃", formatCount(o.scraper.dropped)],
                 ["被挤出", formatCount(o.scraper.evicted)],
               ]}
+            />
+          </Panel>
+        )}
+
+        {o.fetch?.by_source && (
+          <Panel title="抓取来源">
+            <div className="divide-y divide-line-2">
+              {o.fetch.by_source.map((row) => (
+                <div
+                  key={row.source}
+                  className="flex items-baseline justify-between gap-3 py-2 first:pt-0 last:pb-0"
+                >
+                  <span className="truncate text-sm text-mute">
+                    {FETCH_SOURCE_LABELS[row.source] ?? row.source}
+                  </span>
+                  <span className="text-sm whitespace-nowrap tabular-nums text-ink-2">
+                    成功 {formatCount(row.fetched)} / 尝试{" "}
+                    {formatCount(row.attempts)}
+                    <span className="ml-2 font-medium text-ink">
+                      {pct(row.fetched, row.attempts)}
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="mt-2 text-xs leading-relaxed text-faint">
+              元数据抓取按发现来源归因（累计）：哪个渠道真正产出种子，看
+              成功率即可。
+            </p>
+            <DetailRows
+              rows={o.fetch.by_source.flatMap((row) => {
+                const label = FETCH_SOURCE_LABELS[row.source] ?? row.source;
+                return [
+                  [`${label} 超时`, formatCount(row.timed_out)],
+                  [`${label} 失败`, formatCount(row.failed)],
+                  [`${label} 早筛丢弃`, formatCount(row.prescreen_dropped)],
+                ] as [string, string][];
+              })}
             />
           </Panel>
         )}

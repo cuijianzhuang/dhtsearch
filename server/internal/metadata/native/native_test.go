@@ -212,7 +212,7 @@ func TestFetchFromLoopbackPeer(t *testing.T) {
 		Workers: 2, Timeout: 10 * time.Second, MaxFiles: 50,
 	}, staticSource{addrs: []string{peer.addr()}})
 
-	rec, ok := f.fetch(context.Background(), hash.HexString())
+	rec, ok := f.fetch(context.Background(), hash.HexString(), metadata.SourceDHT)
 	if !ok {
 		t.Fatal("fetch failed")
 	}
@@ -241,7 +241,7 @@ func TestFetchWrongInfoRejected(t *testing.T) {
 	}, staticSource{addrs: []string{peer.addr()}})
 
 	start := time.Now()
-	rec, ok := f.fetch(context.Background(), hashWanted.HexString())
+	rec, ok := f.fetch(context.Background(), hashWanted.HexString(), metadata.SourceDHT)
 	elapsed := time.Since(start)
 	if ok {
 		t.Fatalf("fetch accepted wrong metadata: %+v", rec)
@@ -266,7 +266,7 @@ func TestFetchPrescreenDropDeadPeer(t *testing.T) {
 	_, _, hash := makeInfo(t, "dead", 1)
 
 	start := time.Now()
-	_, ok := f.fetch(context.Background(), hash.HexString())
+	_, ok := f.fetch(context.Background(), hash.HexString(), metadata.SourceDHT)
 	elapsed := time.Since(start)
 	if ok {
 		t.Fatal("fetch unexpectedly succeeded")
@@ -288,7 +288,7 @@ func TestFetchTimeoutNoPeers(t *testing.T) {
 	_, _, hash := makeInfo(t, "nobody", 1)
 
 	start := time.Now()
-	_, ok := f.fetch(context.Background(), hash.HexString())
+	_, ok := f.fetch(context.Background(), hash.HexString(), metadata.SourceDHT)
 	elapsed := time.Since(start)
 	if ok {
 		t.Fatal("fetch unexpectedly succeeded")
