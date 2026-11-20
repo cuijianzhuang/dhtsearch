@@ -56,6 +56,19 @@
 // transitions and steps it once per poll — the position is data, so
 // it still updates. Movement is a transform transition stepped by
 // state at poll cadence; there is no per-frame JS in this layer.
+//
+// The spider always faces the direction of data flow — head right
+// on the horizontal track, head down the vertical one — including
+// while it waits or rests. It never crawls backwards: any move to
+// a lower anchor (the loop wrap at the end of a traverse, or the
+// frontier retreating) is a fade cycle — fade out in place,
+// reposition while invisible, fade back in, crawl forward again.
+// And it alone breaks the teal discipline: a near-black spider
+// with red eyes and a red abdomen marking (a soft light halo keeps
+// it readable in dark appearance). On the diagnosed fetch stall
+// the red intensifies — brighter, larger marking, plus a soft red
+// ring — so the spider itself signals trouble alongside the stage's
+// warn treatment; at rest it sits slightly transparent.
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { AdminOverview } from "@/lib/admin";
@@ -182,48 +195,89 @@ export default function PipelineFlow({
   );
 
   const waitAnchor = Math.min(frontier + 1, 4);
-  const spiderTone: NodeTone =
-    disabled || allStill
-      ? "faint"
-      : waiting && fetchStalled
-        ? "warn"
-        : "accent";
+  const spiderAlarm = waiting && fetchStalled;
+  const spiderIdle = disabled || allStill;
 
-  // The rendered position: an anchor plus whether arriving there
-  // jumps. A step to a lower anchor (the loop wrap, or the frontier
-  // retreating) must jump, not glide backwards across the track.
-  const [spider, setSpider] = useState({ anchor: 0, jump: true });
+  // The rendered position: an anchor, whether arriving there jumps,
+  // and whether the spider is faded out mid fade-cycle. Forward
+  // moves glide; ANY move to a lower anchor — the loop wrap at the
+  // end of a traverse, or the frontier retreating — goes through
+  // fadeTo instead: the spider never crawls backwards.
+  const [spider, setSpider] = useState({ anchor: 0, jump: true, faded: false });
+  const [fadeTo, setFadeTo] = useState<number | null>(null);
+  const anchorRef = useRef(spider.anchor);
+  useEffect(() => {
+    anchorRef.current = spider.anchor;
+  }, [spider.anchor]);
+
+  // The fade cycle: fade out in place, reposition while invisible
+  // (jump = no transform transition), fade back in, then release.
+  // Frozen with everything else while the data is stale.
+  useEffect(() => {
+    if (fadeTo === null || stale) return;
+    const t1 = setTimeout(
+      () => setSpider((p) => ({ ...p, faded: true })),
+      30,
+    );
+    const t2 = setTimeout(
+      () => setSpider({ anchor: fadeTo, jump: true, faded: true }),
+      400,
+    );
+    const t3 = setTimeout(
+      () => setSpider((p) => ({ ...p, faded: false })),
+      480,
+    );
+    const t4 = setTimeout(() => setFadeTo(null), 860);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+      clearTimeout(t4);
+    };
+  }, [fadeTo, stale]);
+
   // Traveling: advance one anchor per quarter poll — a full traverse
   // per poll interval (one anchor per poll under reduced motion,
-  // where the transitions are off anyway). The stepping stops when
-  // the mode changes or the data goes stale.
+  // where the transitions are off anyway). At the last anchor, the
+  // next tick starts the fade cycle back to the start node instead
+  // of stepping. The stepping stops when the mode changes, the data
+  // goes stale, or a fade cycle is running.
   useEffect(() => {
-    if (!traveling || stale) return;
+    if (!traveling || stale || fadeTo !== null) return;
     const id = setInterval(
-      () =>
-        setSpider((p) => {
-          const next = (p.anchor + 1) % 5;
-          return { anchor: next, jump: next < p.anchor };
-        }),
+      () => {
+        if (anchorRef.current >= 4) setFadeTo(0);
+        else
+          setSpider((p) => ({
+            anchor: p.anchor + 1,
+            jump: false,
+            faded: false,
+          }));
+      },
       reducedMotion ? POLL_MS : POLL_MS / 4,
     );
     return () => clearInterval(id);
-  }, [traveling, stale, reducedMotion]);
+  }, [traveling, stale, reducedMotion, fadeTo]);
+
   // Not traveling: settle at the position rule's anchor. Adjusted
   // during render (the store-the-previous-value pattern) whenever
   // the mode or the target changes — including settling again at a
   // previously visited anchor after a travel session moved it away.
+  // Forward settles glide; a retreat is handed to the fade cycle.
   const settleTarget = traveling ? null : waiting ? waitAnchor : 0;
   const modeKey = settleTarget === null ? "travel" : `settle:${settleTarget}`;
   const [prevModeKey, setPrevModeKey] = useState(modeKey);
   if (modeKey !== prevModeKey) {
     setPrevModeKey(modeKey);
     if (settleTarget !== null) {
-      setSpider((p) =>
-        p.anchor === settleTarget
-          ? p
-          : { anchor: settleTarget, jump: settleTarget < p.anchor },
-      );
+      if (settleTarget < spider.anchor) {
+        setFadeTo(settleTarget);
+      } else {
+        setFadeTo(null);
+        if (settleTarget !== spider.anchor || spider.faded) {
+          setSpider({ anchor: settleTarget, jump: false, faded: false });
+        }
+      }
     }
   }
 
@@ -276,7 +330,9 @@ export default function PipelineFlow({
         </div>
         <SpiderLayer
           anchor={spider.anchor}
-          tone={spiderTone}
+          alarm={spiderAlarm}
+          idle={spiderIdle}
+          faded={spider.faded}
           moving={traveling && !stale}
           jump={spider.jump}
           stale={stale}
@@ -455,13 +511,20 @@ function MeshBackdrop({ tier }: { tier: Tier }) {
  *  freezing the spider mid-glide until fresh data lands. */
 function SpiderLayer({
   anchor,
-  tone,
+  alarm,
+  idle,
+  faded,
   moving,
   jump,
   stale,
 }: {
   anchor: number;
-  tone: NodeTone;
+  /** Diagnosed fetch stall: the red accents intensify. */
+  alarm: boolean;
+  /** Resting (all still or crawler disabled): slightly transparent. */
+  idle: boolean;
+  /** Mid fade-cycle: invisible. */
+  faded: boolean;
   /** Traveling: the legs wiggle. */
   moving: boolean;
   /** This step goes to a lower anchor: no backward glide. */
@@ -489,13 +552,9 @@ function SpiderLayer({
       } pointer-events-none absolute inset-0 z-20`}
     >
       <span
-        className={`spider-body ${
-          tone === "warn"
-            ? "text-warn"
-            : tone === "faint"
-              ? "text-faint"
-              : "text-accent"
-        } ${moving ? "spider-moving" : ""}`}
+        className={`spider-body ${alarm ? "spider-alarm" : ""} ${
+          idle ? "spider-idle" : ""
+        } ${faded ? "spider-faded" : ""} ${moving ? "spider-moving" : ""}`}
       >
         <SpiderSvg />
       </span>
@@ -503,17 +562,26 @@ function SpiderLayer({
   );
 }
 
-/** A simple top-down spider silhouette in currentColor: two body
- *  segments and eight bent legs, the legs split into the two
- *  alternating gait groups (.spider-legs-a/-b) whose subtle rotation
- *  wiggle runs only while the spider travels. */
+/** A simple top-down spider, drawn head-up (CSS rotates it into the
+ *  flow direction per breakpoint): two near-black body segments and
+ *  eight bent legs in the same ink, red eyes and a red abdomen
+ *  marking. The legs are split into the two alternating gait groups
+ *  (.spider-legs-a/-b) whose subtle rotation wiggle runs only while
+ *  the spider travels. The soft ring (.spider-ring) stays invisible
+ *  until the alarm state fades it in. Palette lives in globals.css. */
 function SpiderSvg() {
   return (
-    <svg viewBox="0 0 48 48" className="block h-8 w-8 sm:h-9 sm:w-9" fill="none">
+    <svg
+      viewBox="0 0 48 48"
+      className="spider-svg block h-8 w-8 sm:h-9 sm:w-9"
+      fill="none"
+    >
+      <circle cx="24" cy="24" r="21.5" className="spider-ring" />
       <g
-        stroke="currentColor"
+        className="spider-ink"
         strokeWidth="2.2"
         strokeLinecap="round"
+        fill="none"
       >
         <g className="spider-legs spider-legs-a">
           <path d="M19.5 15.5 L11 8 L6 10.5" />
@@ -528,8 +596,13 @@ function SpiderSvg() {
           <path d="M19 32 L11.5 38 L8 43" />
         </g>
       </g>
-      <ellipse cx="24" cy="29" rx="6.5" ry="8.5" fill="currentColor" />
-      <circle cx="24" cy="19" r="4.2" fill="currentColor" />
+      <ellipse cx="24" cy="29" rx="6.5" ry="8.5" className="spider-core" />
+      <circle cx="24" cy="19" r="4.2" className="spider-core" />
+      <ellipse cx="24" cy="31.5" rx="2.6" ry="3.8" className="spider-marking" />
+      <g className="spider-eyes">
+        <circle cx="22.2" cy="17.2" r="1.05" />
+        <circle cx="25.8" cy="17.2" r="1.05" />
+      </g>
     </svg>
   );
 }
