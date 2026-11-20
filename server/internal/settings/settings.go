@@ -600,6 +600,19 @@ func checkRange(it Item, f float64) error {
 	return nil
 }
 
+// ValidClockTime reports whether v is a strict HH:MM time of day
+// (00:00–23:59, zero-padded) — the AUTO_UPDATE_TIME format. Exported
+// because the update contract code (internal/api) validates the same
+// format in the panel state file.
+func ValidClockTime(v string) bool {
+	if len(v) != 5 || v[2] != ':' {
+		return false
+	}
+	h, err1 := strconv.Atoi(v[:2])
+	m, err2 := strconv.Atoi(v[3:])
+	return err1 == nil && err2 == nil && h >= 0 && h <= 23 && m >= 0 && m <= 59
+}
+
 // validateStringKey holds the per-key rules a plain type check cannot
 // express.
 func validateStringKey(key, v string) error {
@@ -607,6 +620,10 @@ func validateStringKey(key, v string) error {
 	case KeySiteName:
 		if v == "" {
 			return fmt.Errorf("must not be empty")
+		}
+	case KeyAutoUpdateTime:
+		if !ValidClockTime(v) {
+			return fmt.Errorf("must be a time of day like 03:37 (HH:MM)")
 		}
 	case KeyOIDCIssuer:
 		if v == "" {

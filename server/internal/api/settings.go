@@ -95,15 +95,31 @@ func (s *Server) handleAdminSettingsPut(w http.ResponseWriter, r *http.Request) 
 		"applied":          applied,
 		"restart_required": restart,
 	}
+	var warnings []string
+	// System update: when either AUTO_UPDATE_* key was part of this
+	// save, mirror the effective values into the panel contract file
+	// the installer script reads (see update.go). The settings
+	// themselves are already saved at this point; a sync failure is a
+	// warning, not a failed save.
+	_, touchedEnabled := body.Values[settings.KeyAutoUpdateEnabled]
+	_, touchedTime := body.Values[settings.KeyAutoUpdateTime]
+	if touchedEnabled || touchedTime {
+		if err := s.syncUpdatePanelFile(); err != nil {
+			s.logger.Printf("api: sync update panel file: %v", err)
+			warnings = append(warnings, "系统更新设置已保存，但同步给升级脚本失败，自动升级状态可能不生效："+err.Error())
+		}
+	}
 	// Footgun guard: requiring API tokens while the deployment has no
 	// INTERNAL_API_TOKEN locks the bundled frontend out along with
 	// everyone else (its server-side calls are anonymous without the
 	// first-party channel). The save itself is legitimate — an
 	// API-only deployment may want exactly that — so warn, don't block.
 	if s.opts.InternalToken == "" && s.opts.Settings.Bool(settings.KeyPublicAPIRequireToken) {
-		resp["warnings"] = []string{
-			"「公开 API 要求令牌」已开启，但内部令牌（INTERNAL_API_TOKEN）未配置：站点前台自身也会被 401 拦截。请通过 install.sh 升级（会自动生成并同步到 API 与 web 两侧），或在两侧环境变量中设置相同的 INTERNAL_API_TOKEN。",
-		}
+		warnings = append(warnings,
+			"「公开 API 要求令牌」已开启，但内部令牌（INTERNAL_API_TOKEN）未配置：站点前台自身也会被 401 拦截。请通过 install.sh 升级（会自动生成并同步到 API 与 web 两侧），或在两侧环境变量中设置相同的 INTERNAL_API_TOKEN。")
+	}
+	if len(warnings) > 0 {
+		resp["warnings"] = warnings
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

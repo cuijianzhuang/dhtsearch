@@ -12,6 +12,13 @@ const (
 	KeyDatabaseURL = "DATABASE_URL"
 	KeyAdminToken  = "ADMIN_TOKEN"
 	KeyEnvFile     = "ENV_FILE"
+	// system update: the panel records intent only. The API process
+	// runs unprivileged and never executes an upgrade; saving these
+	// syncs them to a state file in the data dir that the root-side
+	// installer script reads (see internal/api/update.go and the
+	// upgrade agent in scripts/install.sh).
+	KeyAutoUpdateEnabled = "AUTO_UPDATE_ENABLED"
+	KeyAutoUpdateTime    = "AUTO_UPDATE_TIME"
 	// appearance
 	KeySiteName        = "SITE_NAME"
 	KeyThemeColor      = "THEME_COLOR"
@@ -90,6 +97,7 @@ const (
 // Groups in settings-page display order.
 var Groups = []Group{
 	{Key: "service", Label: "服务与数据库"},
+	{Key: "update", Label: "系统更新"},
 	{Key: "auth", Label: "登录与账号"},
 	{Key: "appearance", Label: "外观与主题"},
 	{Key: "crawler", Label: "爬虫"},
@@ -123,6 +131,20 @@ var Registry = []Item{
 	{Key: KeyAdminToken, Group: "service", Label: "管理端令牌", Type: TypeSecret, Sensitive: true, Default: "",
 		Desc: "只从环境读取，从不入库。在 env 文件里修改，重启生效"},
 	{Key: KeyEnvFile, Group: "service", Label: "环境文件路径", Type: TypeString, Default: ".env"},
+
+	// --- system update: intent only. The API never runs an upgrade;
+	// saving here syncs the two values to the panel state file in the
+	// data dir, and the root-side upgrade agent (a per-minute systemd
+	// timer installed by install.sh) applies them: it arms/disarms the
+	// auto-update timer with this time and runs panel-requested
+	// upgrades. Restart=false because the server itself needs no
+	// restart — the script side picks the change up within ~1 minute.
+	// Until an admin saves these keys at least once, the script keeps
+	// following its own CLI state (dhtsearch auto-update). ---
+	{Key: KeyAutoUpdateEnabled, Group: "update", Label: "自动升级", Type: TypeBool, Default: "false", Editable: true,
+		Desc: "开 = root 侧的 systemd 定时器按下面的时间自动执行 upgrade（带备份、健康检查与失败回滚）。面板只记录开关与时间并同步到数据目录的状态文件，脚本侧的升级代理约 1 分钟内据此启停定时器；从未在面板保存过时以脚本 CLI（dhtsearch auto-update）的状态为准"},
+	{Key: KeyAutoUpdateTime, Group: "update", Label: "自动升级时间", Type: TypeString, Default: "03:37", Editable: true, MaxLen: 5,
+		Desc: "每天执行自动升级的时间，HH:MM 格式（服务器本地时间），另有最多 30 分钟随机延迟；仅在自动升级开启时有意义"},
 
 	// --- auth: admin login methods. All live: the login page asks the
 	// backend which methods are configured and renders only those. ---
