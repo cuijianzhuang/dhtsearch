@@ -429,7 +429,7 @@ npm run dev                  # 开发，访问 http://localhost:3000
 
 | 方法与路径 | 说明 |
 | --- | --- |
-| `POST /api/admin/login` | 校验恢复令牌并签发会话（单独限流，每客户端 6 次/分钟） |
+| `POST /api/admin/login` | 校验恢复令牌并签发会话（单独限流：每客户端令牌桶容量 5 次、每 10 秒恢复 1 次，超限 429） |
 | `POST /api/admin/auth/password` | 用户名密码登录并签发会话 |
 | `POST /api/admin/auth/github/exchange` / `POST /api/admin/auth/oidc/exchange` | 第三方登录回调交换（前端 OAuth 路由调用） |
 | `GET /api/admin/auth/config` | 登录页用：已启用的登录方式（公开，无敏感信息） |
@@ -529,8 +529,11 @@ npm run dev                  # 开发，访问 http://localhost:3000
 鉴权：所有 `/api/admin/*` 都要 `Authorization: Bearer <会话令牌或
 ADMIN_TOKEN>`。任何登录方式成功后都换发**服务端会话**（cookie 只存
 会话令牌、库里只存其 SHA-256，24 小时；登出即吊销，改密踢掉其他
-会话，管理员禁用/删号踢掉其全部会话）。登录接口单独限流（令牌登录
-每客户端 6 次/分钟；账密登录按 IP+用户名双键）。管理接口豁免公开
+会话，管理员禁用/删号踢掉其全部会话）。登录接口单独限流（令牌桶：每键容量 5 次、可连续尝试 5 次，第 6 次起
+返回 429，之后每 10 秒恢复 1 次，即持续速率 6 次/分钟；每次尝试——
+不论成败——都消耗一个令牌。令牌登录按客户端地址计键，账密登录按
+客户端地址+用户名双键计键，GitHub/OIDC 交换按客户端地址+提供商计键）。
+管理接口豁免公开
 API 的每 IP 限流（有自己的登录限流），且限流参数有下限保护，改不出
 把管理员自己锁死的组合。前端把会话存进 httpOnly cookie，页面脚本
 读不到，浏览器端操作经 Next 的 `/api/admin-action` 代理转发。
