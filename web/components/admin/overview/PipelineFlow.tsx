@@ -604,11 +604,14 @@ function WebBackdrop({ tier }: { tier: Tier }) {
   );
 }
 
-/** A rail with tier-driven dots between two stages. Renders the
- *  phone variant (a 6px-wide rail at the mini ring's height — the
- *  spider's anchor geometry in globals.css keys off that 6px) and
- *  the sm+ variant; the dots exist only when the tier says the
- *  stage moved during the last poll interval. */
+/** A rail with tier-driven flow comets between two stages. Renders
+ *  the phone variant (a 6px-wide rail at the mini ring's height —
+ *  the spider's anchor geometry in globals.css keys off that 6px;
+ *  its paint is head-and-halo only, the slot has no room for a
+ *  trail) and the sm+ variant (full comet: bright head, halo,
+ *  tapering trail — see .flow-dot-x in globals.css); the comets
+ *  exist only when the tier says the stage moved during the last
+ *  poll interval. */
 function Segment({ tier }: { tier: Tier }) {
   const dots = Array.from({ length: tier.dots }, (_, i) => i);
   const style = (i: number) => ({
@@ -623,7 +626,7 @@ function Segment({ tier }: { tier: Tier }) {
       >
         <div className="absolute top-1/2 right-0 left-0 h-px -translate-y-1/2 bg-input" />
         {dots.map((i) => (
-          <span key={i} className="flow-dot flow-dot-x" style={style(i)} />
+          <span key={i} className="flow-dot flow-dot-m" style={style(i)} />
         ))}
       </div>
       <div
