@@ -34,14 +34,10 @@
 // a poll lands — never per-frame React state — and are hidden under
 // prefers-reduced-motion, leaving a static diagram with counters.
 //
-// The track also reads as what it is — a spider crawling a network.
-// Each stage box carries a node glyph (a dot in a ring) on its
-// inbound edge: accent when work reached that stage this poll, warn
-// on the stalled fetch stage, faint when nothing arrived. A small
-// node-mesh behind the DHT end pulses at segment 1's tier rate and
-// sits dim and still at a zero Δseen. And one spider — the crawler
-// itself — rides the track at the position the data says work
-// currently reaches:
+// The track also reads as what it is — a spider crawling a network:
+// each stage is itself a node (the ring described below), and one
+// spider — the crawler itself — rides the track at the position
+// the data says work currently reaches:
 //   Δpassed > 0            it travels the whole track, one anchor per
 //                          quarter poll (a full traverse per poll
 //                          interval), looping while items keep
@@ -69,6 +65,19 @@
 // the red intensifies — brighter, larger marking, plus a soft red
 // ring — so the spider itself signals trouble alongside the stage's
 // warn treatment; at rest it sits slightly transparent.
+//
+// The visual layer follows the approved design mockup: each stage
+// is a large node ring — a saturated accent disc with a bright rim
+// and a soft glow — with the stage name, the big count and the
+// captions stacked under it, and the connector rails run ring to
+// ring at ring height. The ring carries the stage's state in the
+// same language: full saturation and glow while work reaches it,
+// desaturated and dim at a zero inbound delta, warning-colored on
+// the stalled fetch stage, muted across the board when the crawler
+// is disabled. Behind the DHT ring a true spider web (radial
+// threads and concentric arcs) spreads, and a node-mesh extends
+// across the whole track, densest at the DHT end; both pulse at
+// segment 1's tier rate and sit dim and still at a zero Δseen.
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { AdminOverview } from "@/lib/admin";
@@ -307,10 +316,12 @@ export default function PipelineFlow({
         </span>
       </div>
 
-      <div className={`relative mt-3 ${stale ? "flow-paused" : ""}`}>
+      <div
+        className={`relative mt-3 overflow-hidden ${stale ? "flow-paused" : ""}`}
+      >
         <MeshBackdrop tier={seg(dSeen)} />
-        <div className="relative flex flex-col sm:flex-row sm:items-center">
-          <Stage label="DHT 网络" value={nodes} sub={`排队节点 ${formatCount(queuedNodes)}`} dim={disabled} nodeTone={disabled ? "faint" : "accent"} />
+        <div className="relative z-10 flex flex-col sm:flex-row sm:items-start">
+          <Stage label="DHT 网络" value={nodes} sub={`排队节点 ${formatCount(queuedNodes)}`} dim={disabled} nodeTone={disabled ? "faint" : "accent"} backdropTier={seg(dSeen)} />
           <Segment tier={seg(dSeen)} />
           <Stage label="采样发现" value={cur.seen} delta={dSeen} dim={disabled} nodeTone={toneOf(dSeen)} />
           <Segment tier={seg(dAttempts)} />
@@ -357,6 +368,7 @@ function Stage({
   warn,
   dim,
   nodeTone = "faint",
+  backdropTier,
 }: {
   label: string;
   value: number;
@@ -365,60 +377,118 @@ function Stage({
   sub?: string;
   warn?: boolean;
   dim?: boolean;
-  /** The network-node glyph on this stage's inbound edge. */
+  /** How this stage's node ring is lit (its inbound flow state). */
   nodeTone?: NodeTone;
+  /** First stage only: drives the spider-web backdrop's pulse. */
+  backdropTier?: Tier;
 }) {
   return (
     <div
-      className={`relative min-w-0 rounded-lg border px-3 py-2.5 sm:flex-1 ${
-        warn
-          ? "border-warn/60 bg-warn/10"
-          : "border-line bg-canvas/60"
-      } ${dim ? "opacity-60" : ""}`}
+      className={`relative flex min-w-0 flex-col items-center text-center sm:flex-1 ${
+        dim ? "opacity-60" : ""
+      }`}
     >
-      {/* The node where this stage joins the track: centred on the
-          inbound edge (top edge on phones, left edge from sm up),
-          exactly where the segment's line arrives. */}
-      <span
+      {backdropTier && <WebBackdrop tier={backdropTier} />}
+      {/* The stage as a network node: a large ring (its size and
+          palette live in globals.css) lit by the stage's tone —
+          saturated and glowing in the accent while work reaches it,
+          warning-colored on the stalled fetch stage, desaturated
+          when nothing arrived this poll. */}
+      <div
         aria-hidden
-        className="absolute top-0 left-1/2 z-10 flex h-4 w-4 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-line bg-surface sm:top-1/2 sm:left-0"
-      >
-        <span
-          className={`h-1.5 w-1.5 rounded-full ${
-            nodeTone === "warn"
-              ? "bg-warn"
-              : nodeTone === "accent"
-                ? "bg-accent"
-                : "bg-faint"
-          }`}
-        />
-      </span>
-      <p className="text-[11px] font-medium text-mute">{label}</p>
-      <p className="mt-0.5 text-lg leading-6 font-semibold tabular-nums text-ink">
-        <AnimatedNumber value={value} />
-      </p>
-      {/* Both caption lines always render (sub may be empty) so every
-          stage box in the row keeps the same height. A stage with no
-          delta concept (DHT 网络) carries its sub on the first line. */}
-      <p
-        className={`mt-0.5 h-4 truncate text-[11px] tabular-nums ${
-          warn ? "font-medium text-warn-ink" : "text-faint"
+        className={`stage-ring relative z-10 ${
+          nodeTone === "warn"
+            ? "stage-ring-warn"
+            : nodeTone === "faint"
+              ? "stage-ring-faint"
+              : ""
         }`}
-      >
-        {warn
-          ? "队列有积压，本轮无进展"
-          : d === undefined
-            ? (sub ?? "")
-            : d === null
-              ? "等待下一轮数据"
-              : d > 0
-                ? `本轮 +${formatCount(d)}`
-                : "本轮 +0"}
-      </p>
-      <p className="h-4 truncate text-[11px] tabular-nums text-faint">
-        {d === undefined ? "" : (sub ?? "")}
-      </p>
+      />
+      <div className="relative z-10 flex flex-col items-center">
+        <p className="mt-2 h-5 text-sm leading-5 font-semibold text-ink">
+          {label}
+        </p>
+        <p className="mt-0.5 h-8 text-2xl leading-8 font-bold tabular-nums text-ink">
+          <AnimatedNumber value={value} />
+        </p>
+        {/* Both caption lines always render (sub may be empty) so
+            every stage in the row keeps the same height — the mobile
+            spider anchors are fixed steps of that height. A stage
+            with no delta concept (DHT 网络) carries its sub on the
+            first line. */}
+        <p
+          className={`mt-0.5 h-4 max-w-full truncate text-[11px] leading-4 tabular-nums ${
+            warn ? "font-medium text-warn-ink" : "text-faint"
+          }`}
+        >
+          {warn
+            ? "队列有积压，本轮无进展"
+            : d === undefined
+              ? (sub ?? "")
+              : d === null
+                ? "等待下一轮数据"
+                : d > 0
+                  ? `本轮 +${formatCount(d)}`
+                  : "本轮 +0"}
+        </p>
+        <p className="h-4 max-w-full truncate text-[11px] leading-4 tabular-nums text-faint">
+          {d === undefined ? "" : (sub ?? "")}
+        </p>
+      </div>
     </div>
+  );
+}
+
+/** The spider web behind the DHT ring: radial threads and
+ *  concentric arcs drawn as one static SVG, centred on the ring and
+ *  spilling past the stage cell (the track clips it to the band).
+ *  Its group opacity pulses at segment 1's tier rate while
+ *  discoveries arrive and sits dim and still at a zero Δseen;
+ *  .flow-paused freezes the pulse with everything else when the
+ *  data goes stale. */
+function WebBackdrop({ tier }: { tier: Tier }) {
+  const active = tier.dots > 0;
+  return (
+    <svg
+      aria-hidden
+      className="pointer-events-none absolute top-11 left-1/2 z-0 h-[300px] w-[300px] -translate-x-1/2 -translate-y-1/2 sm:top-[42px] lg:top-12 lg:h-[340px] lg:w-[340px]"
+      viewBox="0 0 200 200"
+      fill="none"
+    >
+      <g
+        className={active ? "web-pulse" : undefined}
+        style={
+          active
+            ? { animationDuration: `${tier.seconds}s` }
+            : { opacity: 0.16 }
+        }
+        stroke="currentColor"
+        strokeWidth="0.8"
+      >
+        <g className="text-accent">
+          <path d="M114 100 L197 100 M112.1 107 L184 148.5 M107 112.1 L148.5 184 M100 114 L100 197 M93 112.1 L51.5 184 M87.9 107 L16 148.5 M86 100 L3 100 M87.9 93 L16 51.5 M93 87.9 L51.5 16 M100 86 L100 3 M107 87.9 L148.5 16 M112.1 93 L184 51.5" />
+          <circle cx="100" cy="100" r="22" />
+          <circle cx="100" cy="100" r="38" />
+          <circle cx="100" cy="100" r="54" />
+          <circle cx="100" cy="100" r="70" />
+          <circle cx="100" cy="100" r="86" />
+          <circle cx="100" cy="100" r="97" />
+          <g fill="currentColor" stroke="none">
+            <circle cx="154" cy="100" r="1.6" />
+            <circle cx="127" cy="146.8" r="1.6" />
+            <circle cx="73" cy="146.8" r="1.6" />
+            <circle cx="46" cy="100" r="1.6" />
+            <circle cx="73" cy="53.2" r="1.6" />
+            <circle cx="127" cy="53.2" r="1.6" />
+            <circle cx="174.5" cy="143" r="1.6" />
+            <circle cx="25.5" cy="143" r="1.6" />
+            <circle cx="25.5" cy="57" r="1.6" />
+            <circle cx="100" cy="14" r="1.6" />
+            <circle cx="174.5" cy="57" r="1.6" />
+          </g>
+        </g>
+      </g>
+    </svg>
   );
 }
 
@@ -444,7 +514,7 @@ function Segment({ tier }: { tier: Tier }) {
       </div>
       <div
         aria-hidden
-        className="relative hidden h-6 w-12 shrink-0 overflow-hidden sm:block lg:w-16"
+        className="relative hidden h-[84px] w-12 shrink-0 overflow-hidden sm:block lg:h-[96px] lg:w-16"
       >
         <div className="absolute top-1/2 right-0 left-0 h-px -translate-y-1/2 bg-input" />
         {dots.map((i) => (
@@ -455,19 +525,20 @@ function Segment({ tier }: { tier: Tier }) {
   );
 }
 
-/** The DHT node-mesh behind the first stage: a static SVG routing
- *  graph (12 nodes, muted, teal only on a few hubs) whose group
- *  opacity pulses at segment 1's tier rate while discoveries arrive.
- *  At a zero Δseen tier it renders dim and still; .flow-paused
- *  freezes the pulse when the data goes stale. On phones it backs
- *  only the first stage instead of stretching down the column. */
+/** The node-mesh behind the whole track (sm and up; on phones the
+ *  spider web behind the first ring carries the motif alone): a
+ *  static SVG routing graph whose nodes thin out from the DHT end
+ *  toward 入库, sliced from the left so the dense end always shows.
+ *  Its group opacity pulses at segment 1's tier rate while
+ *  discoveries arrive; at a zero Δseen tier it renders dim and
+ *  still; .flow-paused freezes the pulse when the data goes stale. */
 function MeshBackdrop({ tier }: { tier: Tier }) {
   const active = tier.dots > 0;
   return (
     <svg
       aria-hidden
-      className="pointer-events-none absolute top-0 left-0 z-0 h-28 w-[55%] sm:inset-y-0 sm:h-auto sm:w-[30%]"
-      viewBox="0 0 300 120"
+      className="pointer-events-none absolute inset-0 z-0 hidden h-full w-full sm:block"
+      viewBox="0 0 1200 200"
       preserveAspectRatio="xMinYMid slice"
       fill="none"
     >
@@ -480,24 +551,31 @@ function MeshBackdrop({ tier }: { tier: Tier }) {
         }
       >
         <path
-          d="M18 60 L52 30 M18 60 L58 88 M52 30 L95 52 M52 30 L120 18 M58 88 L95 52 M95 52 L150 70 M95 52 L120 18 M120 18 L168 32 M150 70 L196 88 M150 70 L205 50 M168 32 L205 50 M168 32 L240 26 M196 88 L248 78 M205 50 L240 26 M205 50 L282 55 M240 26 L282 55 M248 78 L282 55"
+          d="M30 60 L80 25 M30 60 L95 95 M80 25 L150 55 M80 25 L215 20 M95 95 L150 55 M95 95 L185 110 M150 55 L215 20 M150 55 L260 80 M185 110 L260 80 M185 110 L350 120 M215 20 L320 40 M260 80 L320 40 M260 80 L350 120 M260 80 L410 70 M320 40 L410 70 M350 120 L410 70 M410 70 L470 30 M410 70 L520 95 M470 30 L600 55 M520 95 L600 55 M600 55 L690 85 M690 85 L770 40 M690 85 L860 75 M770 40 L860 75 M860 75 L950 50 M950 50 L1050 90 M1050 90 L1150 45 M860 75 L1050 90"
           stroke="currentColor"
           strokeWidth="1"
           className="text-input"
         />
         <g fill="currentColor">
-          <circle cx="18" cy="60" r="3.5" className="text-accent" />
-          <circle cx="52" cy="30" r="2.2" className="text-faint" />
-          <circle cx="58" cy="88" r="2.2" className="text-faint" />
-          <circle cx="95" cy="52" r="2.8" className="text-accent" />
-          <circle cx="120" cy="18" r="2" className="text-faint" />
-          <circle cx="150" cy="70" r="2.4" className="text-faint" />
-          <circle cx="168" cy="32" r="2" className="text-faint" />
-          <circle cx="196" cy="88" r="2.2" className="text-faint" />
-          <circle cx="205" cy="50" r="2.8" className="text-accent" />
-          <circle cx="240" cy="26" r="2" className="text-faint" />
-          <circle cx="248" cy="78" r="2" className="text-faint" />
-          <circle cx="282" cy="55" r="2.4" className="text-faint" />
+          <circle cx="30" cy="60" r="3.2" className="text-accent" />
+          <circle cx="80" cy="25" r="2" className="text-faint" />
+          <circle cx="95" cy="95" r="2" className="text-faint" />
+          <circle cx="150" cy="55" r="2.6" className="text-accent" />
+          <circle cx="185" cy="110" r="1.8" className="text-faint" />
+          <circle cx="215" cy="20" r="1.8" className="text-faint" />
+          <circle cx="260" cy="80" r="3" className="text-accent" />
+          <circle cx="320" cy="40" r="2" className="text-faint" />
+          <circle cx="350" cy="120" r="1.8" className="text-faint" />
+          <circle cx="410" cy="70" r="2.2" className="text-faint" />
+          <circle cx="470" cy="30" r="1.8" className="text-faint" />
+          <circle cx="520" cy="95" r="2" className="text-faint" />
+          <circle cx="600" cy="55" r="2.6" className="text-accent" />
+          <circle cx="690" cy="85" r="2" className="text-faint" />
+          <circle cx="770" cy="40" r="1.8" className="text-faint" />
+          <circle cx="860" cy="75" r="2.2" className="text-faint" />
+          <circle cx="950" cy="50" r="1.8" className="text-faint" />
+          <circle cx="1050" cy="90" r="2" className="text-faint" />
+          <circle cx="1150" cy="45" r="1.8" className="text-faint" />
         </g>
       </g>
     </svg>
@@ -573,7 +651,7 @@ function SpiderSvg() {
   return (
     <svg
       viewBox="0 0 48 48"
-      className="spider-svg block h-8 w-8 sm:h-9 sm:w-9"
+      className="spider-svg block h-10 w-10 sm:h-11 sm:w-11"
       fill="none"
     >
       <circle cx="24" cy="24" r="21.5" className="spider-ring" />
