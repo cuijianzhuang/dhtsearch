@@ -201,8 +201,8 @@ func TestStoredOverridesValidatedAtLoad(t *testing.T) {
 func TestCanonicalForms(t *testing.T) {
 	m := newManager(t, nil, nil, &fakeStorage{})
 	if _, _, err := m.Update(map[string]*string{
-		KeyTrackers:     strptr(" udp://a:1/x , udp://b:2/y "),
-		KeyMetaTimeout:  strptr("90"), // bare seconds, like the env parser
+		KeyTrackers:        strptr(" udp://a:1/x , udp://b:2/y "),
+		KeyMetaTimeout:     strptr("90"), // bare seconds, like the env parser
 		KeyTrendingEnabled: strptr("TRUE"),
 	}); err != nil {
 		t.Fatal(err)
