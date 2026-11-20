@@ -131,21 +131,43 @@ jobs:
           name: server-${{ matrix.arch }}
           path: server-dist
 
-  package:
-    name: Package (${{ matrix.arch }})
-    needs: [web, server]
+  resolve:
+    name: Resolve version
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        arch: [amd64, arm64]
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      # fetch-depth 0 + fetch-tags: the Resolve version step below may
-      # need the full tag list (scripts/next-version.sh). Only this job
+      # fetch-depth 0 + fetch-tags: resolving the next version may need
+      # the full tag list (scripts/next-version.sh). Only this job
       # resolves versions, so only this job pays for the full fetch.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ inputs.publish }}" = "true" ]; then
+            # Publishing without an explicit version (manual dispatch):
+            # bump the greatest vX.Y.Z tag, or start at v0.1.0.
+            echo "version=$(git tag -l | scripts/next-version.sh)" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+  package:
+    name: Package (${{ matrix.arch }})
+    needs: [web, server, resolve]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: web-dist
@@ -165,24 +187,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Resolve version
-        id: version
-        run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-          elif [ -n "${{ inputs.version }}" ]; then
-            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ inputs.publish }}" = "true" ]; then
-            # Publishing without an explicit version (manual dispatch):
-            # bump the greatest vX.Y.Z tag, or start at v0.1.0.
-            echo "version=$(git tag -l | scripts/next-version.sh)" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          fi
       - name: Assemble tarball + sha256
         run: |
           set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
+          version="${{ needs.resolve.outputs.version }}"
           pkg="dhtsearch-${version}-linux-${{ matrix.arch }}"
           stage="$RUNNER_TEMP/$pkg"
           mkdir -p "$stage"
@@ -208,7 +216,7 @@ jobs:
         # standalone build (including .next) is intact.
         run: |
           set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
+          version="${{ needs.resolve.outputs.version }}"
           pkg="dhtsearch-${version}-linux-${{ matrix.arch }}"
           smoke="$RUNNER_TEMP/smoke"
           mkdir -p "$smoke"
@@ -250,7 +258,7 @@ jobs:
         if: github.ref_type == 'tag' || inputs.publish
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.version }}
+          tag_name: ${{ needs.resolve.outputs.version }}
           target_commitish: ${{ github.sha }}
           files: |
             dist/*.tar.gz
@@ -264,6 +272,7 @@ jobs:
   # arch) C++ build never delays the Go artifacts.
   sidecar:
     name: Libtorrent sidecar (optional asset)
+    needs: resolve
     uses: ./.github/workflows/sidecar.yml
     # NOTE: no continue-on-error here — GitHub does not allow it on
     # reusable-workflow jobs and rejects the WHOLE workflow at
@@ -274,4 +283,4 @@ jobs:
     # asset attached rather than failing this workflow.
     with:
       upload_to_release: ${{ github.ref_type == 'tag' || inputs.publish }}
-      version: ${{ inputs.version || github.ref_name }}
+      version: ${{ needs.resolve.outputs.version }}
