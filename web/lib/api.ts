@@ -170,6 +170,35 @@ export async function fetchSimilar(hash: string): Promise<SimilarItem[]> {
   return data.results ?? [];
 }
 
+/** One page of a torrent's stored file list. `total` counts the stored
+ *  entries (what can actually be paged through), which can be lower
+ *  than the torrent's file_count when the crawler capped the list. */
+export interface TorrentFilesResponse {
+  info_hash: string;
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  files: TorrentFile[];
+}
+
+export async function fetchTorrentFiles(
+  hash: string,
+  page: number,
+  pageSize = 100
+): Promise<TorrentFilesResponse | null> {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  const res = await fetch(
+    `${API_BASE}/api/torrents/${encodeURIComponent(hash)}/files?${params}`,
+    { cache: "no-store", headers: await clientIPHeaders() }
+  );
+  if (!res.ok) return null;
+  return (await res.json()) as TorrentFilesResponse;
+}
+
 export async function fetchStats(): Promise<StatsResponse | null> {
   try {
     const res = await fetch(`${API_BASE}/api/stats`, {

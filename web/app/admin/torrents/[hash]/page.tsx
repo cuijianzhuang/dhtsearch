@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
+import AdminPagination from "@/components/admin/AdminPagination";
 import AdminShell, {
   AdminBackendErrorNotice,
   AdminDisabledNotice,
@@ -11,8 +12,10 @@ import CopyMagnetButton from "@/components/CopyMagnetButton";
 import {
   AdminError,
   fetchAdminDetail,
+  fetchAdminFiles,
   isAdminDisabled,
   isAdminUnauthorized,
+  type AdminFilesResponse,
 } from "@/lib/admin";
 import { tokenOrRedirect } from "@/lib/admin-page";
 import {
@@ -24,12 +27,19 @@ import {
 
 export const metadata: Metadata = { title: "种子详情" };
 
+const FILES_PAGE_SIZE = 100;
+
 export default async function AdminTorrentDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ hash: string }>;
+  searchParams: Promise<{ page?: string }>;
 }) {
   const { hash } = await params;
+  const { page: pageRaw } = await searchParams;
+  const parsedPage = Number.parseInt(pageRaw ?? "1", 10);
+  const filePage = Number.isFinite(parsedPage) && parsedPage >= 1 ? parsedPage : 1;
   const token = await tokenOrRedirect();
   let t;
   try {
@@ -44,7 +54,21 @@ export default async function AdminTorrentDetailPage({
       />
     );
   }
-  const files = t.files ?? [];
+  // The file list is paged separately: the detail payload no longer
+  // embeds it, so a torrent with thousands of files renders one page
+  // (100 rows) instead of the whole list. A files-fetch failure only
+  // degrades this section, not the whole page.
+  let filesResp: AdminFilesResponse | null = null;
+  let filesError: string | null = null;
+  try {
+    filesResp = await fetchAdminFiles(token, hash, filePage, FILES_PAGE_SIZE);
+  } catch (e) {
+    if (isAdminUnauthorized(e)) redirect("/admin/login");
+    if (isAdminDisabled(e)) return <AdminDisabledNotice />;
+    filesError = e instanceof AdminError ? e.message : String(e);
+  }
+  const files = filesResp?.files ?? [];
+  const filesTotal = filesResp?.total ?? 0;
 
   return (
     <AdminShell active="torrents">
@@ -111,24 +135,37 @@ export default async function AdminTorrentDetailPage({
         </div>
 
         <h2 className="mt-6 text-sm font-semibold text-ink">
-          文件列表（{formatCount(files.length)}）
+          文件列表（{formatCount(filesTotal)}）
         </h2>
-        {files.length > 0 ? (
-          <ul className="mt-2 divide-y divide-line-2 rounded-lg border border-line">
-            {files.map((f, i) => (
-              <li
-                key={i}
-                className="flex items-baseline justify-between gap-3 px-3 py-2 text-xs"
-              >
-                <span className="min-w-0 font-mono wrap-anywhere text-ink-2">
-                  {f.path}
-                </span>
-                <span className="shrink-0 tabular-nums text-mute">
-                  {formatSize(f.size)}
-                </span>
-              </li>
-            ))}
-          </ul>
+        {filesError ? (
+          <p className="mt-2 text-sm text-mute">
+            文件列表加载失败：{filesError}
+          </p>
+        ) : files.length > 0 ? (
+          <>
+            <ul className="mt-2 divide-y divide-line-2 rounded-lg border border-line">
+              {files.map((f, i) => (
+                <li
+                  key={i}
+                  className="flex items-baseline justify-between gap-3 px-3 py-2 text-xs"
+                >
+                  <span className="min-w-0 font-mono wrap-anywhere text-ink-2">
+                    {f.path}
+                  </span>
+                  <span className="shrink-0 tabular-nums text-mute">
+                    {formatSize(f.size)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <AdminPagination
+              basePath={`/admin/torrents/${t.info_hash}`}
+              params={{}}
+              page={filePage}
+              total={filesTotal}
+              pageSize={FILES_PAGE_SIZE}
+            />
+          </>
         ) : (
           <p className="mt-2 text-sm text-mute">暂无文件列表信息</p>
         )}

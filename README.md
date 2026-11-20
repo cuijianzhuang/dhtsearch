@@ -322,6 +322,7 @@ npm run dev                  # 开发，访问 http://localhost:3000
 | --- | --- |
 | `GET /api/search?q=xx&page=1&page_size=20` | 搜索（q 为空返回最新收录），结果含拼好的 magnet 链接（带 tracker 参数）。可选 `category=video\|audio\|image\|doc\|software\|archive\|other` 按主文件扩展名分类筛选、`sort=relevance\|newest\|size` 排序；响应附各分类计数（`categories`）与 tracker 列表（`trackers`） |
 | `GET /api/torrents/{hash}/similar` | 相似种子：名称关键词重叠 + 同分类优先的简单推荐（≤12 条） |
+| `GET /api/torrents/{hash}/files?page=1&page_size=100` | 文件列表分页（默认 100 条/页，上限 500），响应含 `total`（已收录条数）/`total_pages`。搜索结果与管理详情只内嵌/返回第一页，完整列表走此接口，避免大文件种子撑爆响应与页面 |
 | `GET /rss?q=xx&category=video` | 关键词订阅 RSS 2.0（最新在前，≤50 条，条目链接为磁力）；无 q 输出全站最新。前端同路径 `/rss` 为代理入口 |
 | `POST /api/report` | 访客举报：`{info_hash, reason: adult\|spam\|infringement\|other, note?}`，落 reports 表；同访客对同种子限流，超限 429 |
 | `GET /api/stats` | 收录数、成人/垃圾/体积过滤计数、LLM 审核统计、爬虫/刮削/RSS 状态 |

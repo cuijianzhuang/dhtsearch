@@ -301,7 +301,16 @@ export interface AdminListResponse {
 
 export interface AdminTorrentDetail extends AdminTorrentItem {
   clean_name?: string;
-  files?: { path: string; size: number }[];
+}
+
+/** One page of a torrent's stored file list (admin detail view). */
+export interface AdminFilesResponse {
+  info_hash: string;
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  files: { path: string; size: number }[];
 }
 
 export interface BlockedItem {
@@ -388,6 +397,22 @@ export function fetchAdminDetail(
   return adminFetch<AdminTorrentDetail>(
     token,
     `/api/admin/torrents/${encodeURIComponent(hash)}`
+  );
+}
+
+export function fetchAdminFiles(
+  token: string,
+  hash: string,
+  page = 1,
+  pageSize = 100
+): Promise<AdminFilesResponse> {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  return adminFetch<AdminFilesResponse>(
+    token,
+    `/api/admin/torrents/${encodeURIComponent(hash)}/files?${params}`
   );
 }
 
