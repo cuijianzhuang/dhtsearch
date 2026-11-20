@@ -2687,47 +2687,104 @@ menu_uninstall() {
     exit 0
 }
 
+# menu_header_line — the one-line state summary printed under the
+# menu title, e.g. "当前：v0.1.11 · 服务 运行中 · 自动更新 关", so the
+# three glance questions (what version? is it up? does it update
+# itself?) are answered before anything is picked; 状态 keeps the
+# full detail. Pieces that cannot be determined are omitted rather
+# than guessed: without systemd (dry-run, the DHTSEARCH_ROOT test
+# hooks) the service piece is left out entirely, and a machine with
+# neither a version record nor unit files has no install to
+# summarize and reports 未安装.
+menu_header_line() {
+    local ver="" line api_state web_state
+    if [ -f "$VERSION_FILE" ]; then
+        ver="$(installed_version)"
+    fi
+    if [ -n "$ver" ] && [ "$ver" != "unknown" ]; then
+        line="当前：${ver}"
+    elif [ -f "${UNIT_DIR}/${API_UNIT}" ] || [ -f "${UNIT_DIR}/${WEB_UNIT}" ]; then
+        line="当前：已安装（版本未知）"
+    else
+        echo "当前：未安装"
+        return 0
+    fi
+    if have_systemd && [ -f "${UNIT_DIR}/${API_UNIT}" ]; then
+        api_state="$(systemctl is-active "$API_UNIT" 2>/dev/null || true)"
+        web_state="$(systemctl is-active "$WEB_UNIT" 2>/dev/null || true)"
+        if [ "$api_state" = "active" ] && [ "$web_state" = "active" ]; then
+            line="${line} · 服务 运行中"
+        elif [ "$api_state" = "active" ] || [ "$web_state" = "active" ]; then
+            line="${line} · 服务 部分运行"
+        elif [ -n "$api_state" ] && [ -n "$web_state" ]; then
+            line="${line} · 服务 已停止"
+        fi
+    fi
+    if au_enabled; then
+        line="${line} · 自动更新 开"
+    else
+        line="${line} · 自动更新 关"
+    fi
+    echo "$line"
+}
+
+# The menu is grouped by task domain — day-to-day service operations
+# first, then updates, configuration and data, with install and the
+# destructive uninstall last under 系统. Numbering stays single-level
+# and stable within a release so muscle memory and docs keep working;
+# every entry calls the same handler the flat menu called.
 menu() {
     local choice
     while true; do
         echo
         echo "DHTSearch 管理菜单"
-        echo "  1) 安装"
-        echo "  2) 升级"
-        echo "  3) 状态"
-        echo "  4) 重启服务"
-        echo "  5) 查看日志"
-        echo "  6) 修改端口"
-        echo "  7) 数据库切换"
-        echo "  8) 卸载"
-        echo "  9) 启动服务"
-        echo "  10) 停止服务"
-        echo "  11) 开机自启"
-        echo "  12) 配置管理"
+        menu_header_line
+        echo
+        echo "服务"
+        echo "  1) 状态"
+        echo "  2) 查看日志"
+        echo "  3) 重启服务"
+        echo "  4) 启动服务"
+        echo "  5) 停止服务"
+        echo
+        echo "更新"
+        echo "  6) 检查更新"
+        echo "  7) 升级到最新版"
+        echo "  8) 自动更新设置"
+        echo
+        echo "配置"
+        echo "  9) 修改端口"
+        echo "  10) 数据库切换"
+        echo "  11) 配置管理"
+        echo "  12) 开机自启"
+        echo
+        echo "数据"
         echo "  13) 备份与恢复"
         echo "  14) 自检"
-        echo "  15) 检查更新"
-        echo "  16) 自动更新"
+        echo
+        echo "系统"
+        echo "  15) 安装 / 重新安装"
+        echo "  16) 卸载"
         echo "  0) 退出"
         printf '选择： '
         if ! read -r choice; then exit 0; fi
         case "$choice" in
-            1) menu_install ;;
-            2) menu_upgrade ;;
-            3) do_status; menu_pause ;;
-            4) menu_restart ;;
-            5) menu_logs ;;
-            6) menu_change_port ;;
-            7) menu_switch_db ;;
-            8) menu_uninstall ;;
-            9) menu_start ;;
-            10) menu_stop ;;
-            11) menu_autostart ;;
-            12) menu_config ;;
+            1) do_status; menu_pause ;;
+            2) menu_logs ;;
+            3) menu_restart ;;
+            4) menu_start ;;
+            5) menu_stop ;;
+            6) menu_check_update ;;
+            7) menu_upgrade ;;
+            8) menu_auto_update ;;
+            9) menu_change_port ;;
+            10) menu_switch_db ;;
+            11) menu_config ;;
+            12) menu_autostart ;;
             13) menu_backup ;;
             14) menu_selfcheck ;;
-            15) menu_check_update ;;
-            16) menu_auto_update ;;
+            15) menu_install ;;
+            16) menu_uninstall ;;
             0) exit 0 ;;
             *) echo "未知选择：$choice" ;;
         esac
