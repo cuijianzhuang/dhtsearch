@@ -6,6 +6,7 @@ import {
   fetchSearch,
   SearchError,
   type SearchErrorKind,
+  fetchTrending,
   type SearchResponse,
   type SearchSort,
 } from "@/lib/api";
@@ -77,6 +78,23 @@ export default async function SearchPage({ searchParams }: PageProps) {
   }
   const site = await fetchSiteConfig();
   const counts = data?.categories ?? {};
+  // Popular terms for the empty state: this week's trending titles
+  // when the backend has them, a small static set otherwise.
+  const emptyTerms = await (async (): Promise<string[]> => {
+    if (!data || (data.results?.length ?? 0) > 0) return [];
+    const trending = await fetchTrending();
+    const terms = Array.from(
+      new Set([
+        ...(trending?.movies ?? []),
+        ...(trending?.tv ?? []),
+        ...(trending?.tv_jp ?? []),
+        ...(trending?.tv_kr ?? []),
+      ])
+    ).slice(0, 10);
+    return terms.length > 0
+      ? terms
+      : ["纪录片", "动漫", "古典音乐", "有声书", "开源软件", "电子书"];
+  })();
   const rssHref = (() => {
     const p = new URLSearchParams();
     if (q) p.set("q", q);
@@ -222,6 +240,45 @@ export default async function SearchPage({ searchParams }: PageProps) {
                   ? "换个关键词试试，或者稍后再来——爬虫正在持续收录新资源。"
                   : "索引暂时为空，爬虫正在收录中，请稍后再来。"}
               </p>
+              {(category || q) && (
+                <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+                  {category && (
+                    <Link
+                      href={categoryHref(q, sort, "")}
+                      prefetch={false}
+                      className="inline-flex min-h-11 items-center rounded-lg bg-accent px-4 text-sm font-medium text-on-accent transition-colors hover:bg-accent-hover"
+                    >
+                      清除分类筛选
+                    </Link>
+                  )}
+                  {q && (
+                    <Link
+                      href="/search"
+                      prefetch={false}
+                      className="inline-flex min-h-11 items-center rounded-lg border border-input bg-soft px-4 text-sm text-ink-2 transition-colors hover:border-accent hover:text-accent-ink"
+                    >
+                      浏览最新收录
+                    </Link>
+                  )}
+                </div>
+              )}
+              {emptyTerms.length > 0 && (
+                <div className="mt-8">
+                  <p className="text-xs text-faint">试试热门搜索</p>
+                  <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+                    {emptyTerms.map((term) => (
+                      <Link
+                        key={term}
+                        href={`/search?q=${encodeURIComponent(term)}`}
+                        prefetch={false}
+                        className="inline-flex min-h-9 items-center rounded-full border border-line bg-surface px-3 text-xs text-ink-2 transition-colors hover:border-accent hover:text-accent-ink"
+                      >
+                        {term}
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </>
