@@ -219,10 +219,15 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 	// AddTorrentSpec takes the torrent client's process-wide lock and
 	// has no context variant: if that lock is ever wedged (see the
 	// Drop call below), this call parks the worker with no way out.
-	// There is no fix from outside the library — the containment is
-	// the pipeline watchdog (internal/watchdog), which detects the
-	// resulting ingest stall and exits the process for systemd to
-	// restart. The same applies to t.Drop and Client.Close.
+	// The one wedge observed in production was fuelled from outside
+	// the library after all: the client's per-torrent DHT announcers
+	// (now disabled in metadataClientConfig) flooded the lock with
+	// announce/connection traffic until every worker queued on it.
+	// The lock exposure of AddTorrentSpec, t.Drop and Client.Close
+	// themselves remains — no context variant exists — so the
+	// pipeline watchdog (internal/watchdog) stays as the backstop:
+	// it detects a resulting stall or crawl and exits the process
+	// for systemd to restart.
 	t, _, err := f.client.AddTorrentSpec(spec)
 	if err != nil {
 		f.count(&f.failed)
@@ -362,9 +367,10 @@ func waitForInfo(ctx context.Context, src infoSource, timeout, prescreen time.Du
 	// helper goroutine instead and consume readings over a channel:
 	// the wait keeps its own exits whatever the sampler is stuck in.
 	// A sampler stuck in the library leaks until its call returns;
-	// at most one exists per in-flight fetch, and the pipeline
-	// watchdog (internal/watchdog) is the containment for the wedge
-	// itself.
+	// at most one exists per in-flight fetch. The announce traffic
+	// that wedged the lock in production is now off (see
+	// metadataClientConfig); the pipeline watchdog
+	// (internal/watchdog) remains the backstop for any other park.
 	peers := make(chan int, 1)
 	stopPoll := make(chan struct{})
 	defer close(stopPoll)
@@ -493,6 +499,24 @@ func metadataClientConfig() *torrent.ClientConfig {
 	tc.ListenPort = 0
 	tc.NoUpload = true
 	tc.Seed = false
+	// Never announce our torrents to the DHT. The default (true) spawns
+	// a dhtAnnouncer goroutine per torrent per DHT server, each running
+	// get_peers/announce traversals timeboxed at 15 minutes and
+	// repeatedly taking the client's process-wide lock. A metadata-only
+	// fetcher gains nothing from announcing itself as a peer — it
+	// disallows data transfer anyway — and at this fetcher's churn
+	// (128 workers, thousands of torrents a day) the announce machinery
+	// is what wedged the client lock in production on 2026-11-20:
+	// ingest collapsed to ~45 fetches/10m against a ~330 baseline
+	// while dozens of workers queued on Client.lock behind announce
+	// and connection goroutines. Turning it off also removes the
+	// torrent client's DHT get_peers (in v1.61 the announcer is the
+	// only caller of Announce with getPeers=true), so hashes whose
+	// swarm is listed on none of the configured trackers lose their
+	// peer source; tracker announces and PEX are unaffected. That
+	// trade is deliberate: an unmeasured slow tail against a total
+	// pipeline wedge.
+	tc.PeriodicallyAnnounceTorrentsToDht = false
 	tc.NoDefaultPortForwarding = true
 	tc.DefaultStorage = metadataStorage{}
 	tc.Callbacks.ReadMessage = ignorePayloadAvailability

@@ -185,3 +185,97 @@ func TestInactiveReportsDisabled(t *testing.T) {
 		t.Fatalf("status = %v, want disabled", st.State)
 	}
 }
+
+// The 2026-11-20 recurrence: ingest trickles (+2/min = +20 per
+// window, far under the floor) while discovery moves and the queue
+// never drains. The trickle keeps the zero-progress clock reset, so
+// only the crawl detector can catch it: dump at the first crawl
+// window (minute 10), dump + exit at the second (minute 20).
+func TestCrawlDetectedThenExits(t *testing.T) {
+	h := newHarness()
+	h.tickN(25, func(i int, p *Probe) {
+		p.Seen += 1000
+		p.Fetched += 2
+		p.QueueDepth = 15000
+	})
+	if h.stacks != 2 {
+		t.Fatalf("stack dumps = %d, want 2 (first crawl window + exit window)", h.stacks)
+	}
+	if len(h.exits) != 1 || h.exits[0] != 1 {
+		t.Fatalf("exits = %v, want [1]", h.exits)
+	}
+	if st := h.wd.Status(); st.State != StateStalled {
+		t.Fatalf("status = %v, want stalled", st.State)
+	}
+	out := h.logs.String()
+	if !strings.Contains(out, "ingest crawling") || !strings.Contains(out, "still crawling") {
+		t.Fatalf("log missing crawl lines:\n%s", out)
+	}
+}
+
+// The legitimate post-restart plateau: workers chew a backlog of
+// mostly dead hashes, so few records land — but the queue falls
+// steadily. That must never be flagged as a crawl.
+func TestCrawlQueueDrainingNotFlagged(t *testing.T) {
+	h := newHarness()
+	h.tickN(35, func(i int, p *Probe) {
+		p.Seen += 1000
+		p.Fetched += 2
+		p.QueueDepth = 15000 - 400*(i+1)
+	})
+	if h.stacks != 0 || len(h.exits) != 0 {
+		t.Fatalf("draining queue flagged: stacks=%d exits=%v", h.stacks, h.exits)
+	}
+	if strings.Contains(h.logs.String(), "crawling") {
+		t.Fatalf("unexpected crawl line:\n%s", h.logs.String())
+	}
+	if st := h.wd.Status(); st.State != StateOK {
+		t.Fatalf("status = %v, want ok", st.State)
+	}
+}
+
+// A healthy saturated pipeline: the queue stays pinned because
+// discovery refills it as fast as workers drain it, but stored
+// records grow at full rate. Not a crawl.
+func TestCrawlHealthyThroughputNotFlagged(t *testing.T) {
+	h := newHarness()
+	h.tickN(35, func(i int, p *Probe) {
+		p.Seen += 1000
+		p.Fetched += 35 // 350 per window, around the healthy baseline
+		p.QueueDepth = 15000
+	})
+	if h.stacks != 0 || len(h.exits) != 0 {
+		t.Fatalf("healthy throughput flagged: stacks=%d exits=%v", h.stacks, h.exits)
+	}
+	if st := h.wd.Status(); st.State != StateOK {
+		t.Fatalf("status = %v, want ok", st.State)
+	}
+}
+
+// A crawl window followed by a healthy window resets the
+// escalation: a later crawl is a new episode (dump again, but the
+// exit needs its own second consecutive crawl window).
+func TestCrawlRecoveryResetsEscalation(t *testing.T) {
+	h := newHarness()
+	h.tickN(32, func(i int, p *Probe) {
+		p.Seen += 1000
+		p.QueueDepth = 15000
+		switch {
+		case i <= 10:
+			p.Fetched += 2 // window 1: crawl -> dump
+		case i <= 20:
+			p.Fetched += 40 // window 2: healthy -> episode resets
+		default:
+			p.Fetched += 2 // window 3: crawl again -> dump, no exit
+		}
+	})
+	if h.stacks != 2 {
+		t.Fatalf("stack dumps = %d, want 2 (one per crawl episode)", h.stacks)
+	}
+	if len(h.exits) != 0 {
+		t.Fatalf("exits = %v, want none (second episode only one window old)", h.exits)
+	}
+	if st := h.wd.Status(); st.State != StateStalled {
+		t.Fatalf("status = %v, want stalled", st.State)
+	}
+}
