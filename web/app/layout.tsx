@@ -9,11 +9,11 @@ import { fetchSiteConfig } from "@/lib/site";
 import { APPEARANCE_COOKIE, parseAppearance, themePreset } from "@/lib/theme";
 
 const DESCRIPTION =
-  "干净、无广告的磁力链接搜索引擎。基于 DHT 网络实时收录，自动过滤成人内容与垃圾信息。";
+  "无广告的磁力链接搜索引擎。基于 DHT 网络实时收录，索引持续更新。";
 
 export async function generateMetadata(): Promise<Metadata> {
   const site = await fetchSiteConfig();
-  const title = `${site.name} - 干净的磁力链接搜索`;
+  const title = `${site.name} - 磁力链接搜索`;
   return {
     title: {
       default: title,

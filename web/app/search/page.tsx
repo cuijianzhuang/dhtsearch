@@ -58,8 +58,8 @@ export async function generateMetadata({ searchParams }: PageProps): Promise<Met
   return {
     title: query ? `${query} 的搜索结果` : "最新收录",
     description: query
-      ? `在 ${site.name} 中搜索「${query}」的磁力链接，结果已过滤成人内容与垃圾信息。`
-      : "浏览 DHT 网络最新收录的磁力链接，已过滤成人内容与垃圾信息。",
+      ? `在 ${site.name} 中搜索「${query}」的磁力链接。`
+      : "浏览 DHT 网络最新收录的磁力链接。",
   };
 }
 
@@ -164,7 +164,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
           <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
           <path d="m9 12 2 2 4-4" />
         </svg>
-        本站结果已自动过滤成人内容与垃圾信息，请放心使用。
+        收录来自 DHT 网络、实时更新，请注意甄别来源不明的资源。
       </div>
 
       {/* Pinned controls: result count, RSS, dead filter, sort and
@@ -337,7 +337,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
             the shell. Pagination likewise stays at the list end —
             reached by scrolling the list, never the chrome. */}
         <footer className="mt-auto pt-10 text-center text-xs text-faint">
-          {site.name} · 干净、无广告的磁力搜索
+          {site.name} · 无广告的磁力搜索
         </footer>
       </SearchScrollRegion>
     </main>
