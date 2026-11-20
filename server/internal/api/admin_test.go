@@ -249,6 +249,18 @@ func TestAdminBatch(t *testing.T) {
 		t.Fatalf("overview after batch block: %v", m)
 	}
 
+	// Batch delete removes the one torrent the block left behind,
+	// without adding it to the blocked table.
+	code, m = adminReq(t, "POST", base+"/api/admin/torrents/batch", testAdminToken,
+		map[string]any{"hashes": []string{strings.Repeat("c", 40)}, "action": "delete"})
+	if code != 200 || m["affected"].(float64) != 1 {
+		t.Fatalf("batch delete: %d %v", code, m)
+	}
+	_, m = adminReq(t, "GET", base+"/api/admin/overview", testAdminToken, nil)
+	if m["torrents"].(float64) != 0 {
+		t.Fatalf("overview after batch delete: %v", m)
+	}
+
 	if code, _ := adminReq(t, "POST", base+"/api/admin/torrents/batch", testAdminToken,
 		map[string]any{"hashes": hashes, "action": "explode"}); code != http.StatusBadRequest {
 		t.Fatalf("bad batch action: %d", code)

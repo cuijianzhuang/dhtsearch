@@ -3,6 +3,7 @@ import Script from "next/script";
 import { cookies } from "next/headers";
 import type { CSSProperties } from "react";
 import "./globals.css";
+import MobileBottomNav from "@/components/MobileBottomNav";
 import { fetchSiteConfig } from "@/lib/site";
 import { APPEARANCE_COOKIE, parseAppearance, themePreset } from "@/lib/theme";
 
@@ -94,6 +95,7 @@ export default async function RootLayout({
           suppressHydrationWarning
         />
         {children}
+        <MobileBottomNav />
         {gaId && (
           <>
             <Script

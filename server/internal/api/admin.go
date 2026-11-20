@@ -549,6 +549,21 @@ func (s *Server) handleAdminBatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "affected": n})
+	case "delete":
+		// Plain removal (no blocked-table record), the batch twin of
+		// the single-torrent DELETE the console already exposes.
+		var n int64
+		for _, h := range body.Hashes {
+			deleted, err := s.st.AdminDelete(ctx, h)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "delete failed")
+				return
+			}
+			if deleted {
+				n++
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "affected": n})
 	default:
 		writeError(w, http.StatusBadRequest, "invalid action")
 	}

@@ -27,10 +27,14 @@ const (
 	maxEmbeddedFiles = defaultFilesPageSize
 )
 
-// filesPageResponse is the wire shape of both files endpoints.
+// filesPageResponse is the wire shape of both files endpoints. Total
+// counts the entries the caller is paging through — the filtered set
+// when ?q= is given — and TotalAll the torrent's full stored list, so
+// the UI can show "共 N 个文件 / 筛出 M 个".
 type filesPageResponse struct {
 	InfoHash   string        `json:"info_hash"`
 	Total      int           `json:"total"`
+	TotalAll   int           `json:"total_all"`
 	Page       int           `json:"page"`
 	PageSize   int           `json:"page_size"`
 	TotalPages int           `json:"total_pages"`
@@ -56,9 +60,10 @@ func parseFilesPaging(r *http.Request) (page, pageSize int) {
 }
 
 // serveFilesPage is the shared tail of both files handlers: one store
-// page, 404 for an unknown hash, the uniform response shape.
-func (s *Server) serveFilesPage(w http.ResponseWriter, ctx context.Context, hash string, page, pageSize int, what string) {
-	files, total, found, err := s.st.FilesPage(ctx, hash, page, pageSize)
+// page, 404 for an unknown hash, the uniform response shape. query is
+// the optional ?q= path filter (empty = the whole stored list).
+func (s *Server) serveFilesPage(w http.ResponseWriter, ctx context.Context, hash string, page, pageSize int, query string, what string) {
+	files, total, totalAll, found, err := s.st.FilesPage(ctx, hash, page, pageSize, query)
 	if err != nil {
 		s.searchError(w, ctx, err, what)
 		return
@@ -74,6 +79,7 @@ func (s *Server) serveFilesPage(w http.ResponseWriter, ctx context.Context, hash
 	writeJSON(w, http.StatusOK, filesPageResponse{
 		InfoHash:   hash,
 		Total:      total,
+		TotalAll:   totalAll,
 		Page:       page,
 		PageSize:   pageSize,
 		TotalPages: totalPages,
@@ -94,7 +100,7 @@ func (s *Server) handleTorrentFiles(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.searchTimeout())
 	defer cancel()
 	page, pageSize := parseFilesPaging(r)
-	s.serveFilesPage(w, ctx, strings.ToLower(r.PathValue("hash")), page, pageSize, "files")
+	s.serveFilesPage(w, ctx, strings.ToLower(r.PathValue("hash")), page, pageSize, r.URL.Query().Get("q"), "files")
 }
 
 // handleAdminTorrentFiles serves GET /api/admin/torrents/{hash}/files:
@@ -106,5 +112,5 @@ func (s *Server) handleAdminTorrentFiles(w http.ResponseWriter, r *http.Request)
 	ctx, cancel := s.adminCtx(r)
 	defer cancel()
 	page, pageSize := parseFilesPaging(r)
-	s.serveFilesPage(w, ctx, strings.ToLower(r.PathValue("hash")), page, pageSize, "admin files")
+	s.serveFilesPage(w, ctx, strings.ToLower(r.PathValue("hash")), page, pageSize, r.URL.Query().Get("q"), "admin files")
 }

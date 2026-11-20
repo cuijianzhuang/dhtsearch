@@ -9,8 +9,8 @@ import TorrentActions, { postAdminAction } from "./TorrentActions";
 
 /**
  * The torrent management list: a real table on desktop, cards on
- * mobile. With `selectable` (the review queue) rows get checkboxes and
- * a bulk approve/block bar.
+ * mobile. With `selectable` rows get checkboxes and a floating bulk
+ * action bar (approve / block / delete) once anything is checked.
  */
 export default function AdminTorrentList({
   items,
@@ -38,12 +38,20 @@ export default function AdminTorrentList({
     });
   }
 
-  async function bulk(action: "approve" | "block") {
+  async function bulk(action: "approve" | "block" | "delete") {
     if (selectedHashes.length === 0) return;
     if (
       action === "block" &&
       !window.confirm(
         `拉黑选中的 ${selectedHashes.length} 条？它们会被删除并记录进黑名单，不会再次收录。`
+      )
+    ) {
+      return;
+    }
+    if (
+      action === "delete" &&
+      !window.confirm(
+        `删除选中的 ${selectedHashes.length} 条？只删记录、不进黑名单，之后被重新发现仍会收录。`
       )
     ) {
       return;
@@ -79,39 +87,6 @@ export default function AdminTorrentList({
 
   return (
     <div>
-      {selectable && selectedHashes.length > 0 && (
-        <div className="sticky top-2 z-10 mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-accent-line bg-accent-soft px-4 py-2 shadow-bar">
-          <span className="text-sm text-accent-ink">
-            已选 {selectedHashes.length} 条
-          </span>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => bulk("approve")}
-            className="inline-flex min-h-11 items-center rounded-lg border border-accent-line bg-surface px-3 text-sm text-accent-ink disabled:opacity-50"
-          >
-            批量通过
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => bulk("block")}
-            className="inline-flex min-h-11 items-center rounded-lg border border-input bg-surface px-3 text-sm text-warn-ink disabled:opacity-50"
-          >
-            批量拉黑
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => setSelected(new Set())}
-            className="inline-flex min-h-11 items-center rounded-lg px-3 text-sm text-mute disabled:opacity-50"
-          >
-            清除选择
-          </button>
-          {failed && <span className="text-xs text-warn-ink">批量操作失败，请重试</span>}
-        </div>
-      )}
-
       {/* Desktop table */}
       <div className="hidden overflow-x-auto rounded-xl border border-line bg-surface shadow-card md:block">
         <table className="w-full text-left text-sm">
@@ -237,6 +212,66 @@ export default function AdminTorrentList({
           </div>
         ))}
       </div>
+
+      {selectable && selectedHashes.length > 0 && (
+        // Floating bulk bar. Sticky (not fixed), same pattern as the
+        // front result list: it rides the viewport bottom while the
+        // list scrolls, then settles into the flow at the end of the
+        // list — so it can never sit on top of the pagination that
+        // follows the list. Solid surface, no backdrop-blur (a blurred
+        // bar re-samples the scrolling content every frame on mobile).
+        // The bottom offset respects the iPhone home-indicator inset.
+        <div className="sticky bottom-[max(1rem,env(safe-area-inset-bottom))] z-20 mt-3">
+          <div className="flex w-full flex-wrap items-center gap-2 rounded-xl border border-input bg-surface px-4 py-3 shadow-bar">
+            <span className="shrink-0 text-sm text-ink-2">
+              已选{" "}
+              <span className="font-medium text-accent-ink">
+                {selectedHashes.length}
+              </span>{" "}
+              项
+            </span>
+            <div className="ml-auto flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => bulk("approve")}
+                className="inline-flex min-h-11 items-center rounded-lg border border-accent-line bg-accent-soft px-3 text-sm font-medium text-accent-ink transition-colors hover:border-accent disabled:opacity-50"
+              >
+                通过
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => bulk("block")}
+                className="inline-flex min-h-11 items-center rounded-lg border border-input bg-soft px-3 text-sm text-warn-ink transition-colors hover:border-warn disabled:opacity-50"
+              >
+                拉黑
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => bulk("delete")}
+                className="inline-flex min-h-11 items-center rounded-lg border border-input bg-soft px-3 text-sm text-ink-2 transition-colors hover:border-warn hover:text-warn-ink disabled:opacity-50"
+              >
+                删除
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setSelected(new Set())}
+                className="inline-flex min-h-11 items-center rounded-lg px-3 text-sm text-mute transition-colors hover:text-ink disabled:opacity-50"
+              >
+                清除选择
+              </button>
+            </div>
+            {failed && (
+              <span className="w-full text-xs text-warn-ink">
+                批量操作失败，请重试
+              </span>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

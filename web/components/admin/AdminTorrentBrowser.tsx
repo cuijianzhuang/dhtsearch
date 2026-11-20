@@ -19,9 +19,9 @@ const STATUS_OPTIONS = [
 
 /**
  * Shared body of /admin/torrents (full management) and /admin/review
- * (the unreviewed queue: status locked, bulk actions on). Both are the
- * same list underneath; the queue just presets the filter and turns on
- * selection.
+ * (the unreviewed queue: status locked). Both are the same list
+ * underneath; the queue just presets the filter. Selection with the
+ * floating bulk bar is available on both.
  */
 export default async function AdminTorrentBrowser({
   tab,
@@ -52,10 +52,14 @@ export default async function AdminTorrentBrowser({
 
   return (
     <AdminShell active={tab}>
+      {/* The filter bar sticks to the top of the viewport while the
+          list scrolls: on a 20-row page the operator can re-filter
+          without scrolling back up first. Solid canvas background so
+          rows pass underneath it cleanly. */}
       <form
         method="get"
         action={basePath}
-        className="flex flex-wrap items-center gap-2"
+        className="sticky top-0 z-20 -mt-3 flex flex-wrap items-center gap-2 bg-canvas pt-3 pb-3"
       >
         <input
           type="search"
@@ -91,7 +95,7 @@ export default async function AdminTorrentBrowser({
       </form>
 
       <div className="mt-4">
-        <AdminTorrentList items={data.results} selectable={!!lockedStatus} />
+        <AdminTorrentList items={data.results} selectable />
       </div>
 
       <AdminPagination

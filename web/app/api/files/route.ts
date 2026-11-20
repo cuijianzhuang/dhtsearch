@@ -18,8 +18,9 @@ export async function GET(request: Request) {
   const sizeRaw = Number(sp.get("page_size") ?? "100");
   const pageSize =
     Number.isFinite(sizeRaw) && sizeRaw >= 1 ? Math.floor(sizeRaw) : 100;
+  const q = (sp.get("q") ?? "").slice(0, 200);
   try {
-    const data = await fetchTorrentFiles(hash, page, pageSize);
+    const data = await fetchTorrentFiles(hash, page, pageSize, q);
     if (!data) {
       return NextResponse.json({ error: "not found" }, { status: 404 });
     }
