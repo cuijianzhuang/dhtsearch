@@ -187,7 +187,7 @@
   }
 }
 
-/* Admin sidebar (right side, components/admin/AdminShellClient.tsx).
+/* Admin sidebar (left side, components/admin/AdminShellClient.tsx).
    The desktop width and the collapsed icon-rail state live here
    because the state is an attribute on <html> restored before first
    paint by a boot script (see AdminShell) — a React state would

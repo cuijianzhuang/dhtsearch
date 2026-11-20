@@ -14,7 +14,7 @@ export type { AdminTabKey };
 // screens only); this script only restores the attribute.
 const NAV_BOOT_SCRIPT = `try{var n=localStorage.getItem("${ADMIN_NAV_STORAGE_KEY}");if(n==="collapsed"||n==="expanded"){document.documentElement.dataset.adminNav=n;}}catch(e){}`;
 
-/** Shared chrome for the protected admin pages: a right sidebar
+/** Shared chrome for the protected admin pages: a left sidebar
  *  (collapsible on desktop, a drawer on mobile) rendered by
  *  AdminShellClient; this wrapper fetches the site config and emits
  *  the sidebar boot script. */
