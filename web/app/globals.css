@@ -268,23 +268,32 @@
    recolors it by swapping the variable; a hairline orbit circle
    outside the band and a fine inner ring inside it; the centre
    left open (a barely-there deep tint at most) so the web and
-   mesh show through. No sphere shading, no highlight blob: the
+   mesh show through. The ring is a node OF the web: a faint thread
+   crosses its centre (.ring-thread) and a small node dot sits at
+   the convergence (.ring-node-dot), full-strength while the stage
+   flows, paler when idle, warning-colored on the stall — all via
+   the same --ring-c. No sphere shading, no highlight blob: the
    only depth is a soft drop-shadow glow under the band. A stage
    whose inbound delta was zero renders desaturated, dimmer and
    glow-less (.stage-ring-faint); the crawler-disabled case mutes
-   every ring through the stage's own opacity on top of that. Ring
-   sizes step with the breakpoints (88px phones, 84px from sm,
-   96px from lg) and the spider anchors and connector rails key off
-   the same numbers. The spider web behind the DHT ring pulses its
-   group opacity at segment 1's tier rate (.web-pulse), stronger
-   than the node-mesh's breathing because the web is the motif;
-   .flow-paused freezes it with everything else, and reduced motion
-   pins it static. */
+   every ring through the stage's own opacity on top of that. While
+   work flows into a stage its glow breathes (.stage-ring-breathe,
+   its period set inline from the inbound segment's tier); idle
+   rings stay calm, .flow-paused freezes the breath with
+   everything else, and reduced motion pins it off. Ring sizes
+   step with the breakpoints (60px phones, 84px from sm, 80px
+   from lg — the hero is deliberately compact) and the spider
+   anchors and connector rails key off the same numbers. The
+   spider web behind the DHT ring pulses its group opacity at
+   segment 1's tier rate (.web-pulse), stronger than the
+   node-mesh's breathing because the web is the motif;
+   .flow-paused freezes it with everything else, and reduced
+   motion pins it static. */
 .stage-ring {
   --ring-c: var(--pri);
   display: block;
-  width: 88px;
-  height: 88px;
+  width: 60px;
+  height: 60px;
   filter: drop-shadow(
     0 0 12px color-mix(in srgb, var(--ring-c) 30%, transparent)
   );
@@ -302,10 +311,37 @@
   opacity: 0.78;
 }
 
+@keyframes ring-breathe {
+  0%,
+  100% {
+    filter: drop-shadow(
+      0 0 9px color-mix(in srgb, var(--ring-c) 24%, transparent)
+    );
+  }
+  50% {
+    filter: drop-shadow(
+      0 0 18px color-mix(in srgb, var(--ring-c) 50%, transparent)
+    );
+  }
+}
+
+.stage-ring-breathe {
+  animation-name: ring-breathe;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+
+.flow-paused .stage-ring-breathe {
+  animation-play-state: paused;
+}
+
 /* The ring's drawn parts (StageRingSvg in PipelineFlow.tsx): the
    orbit and inner hairlines are pale mixes of the ring color into
-   the card, the band's gradient stops run bright → full → deep,
-   and the centre disc is a whisper of the ring color, not a fill. */
+   the card, the band's gradient stops run luminous → full → deep
+   (brightest at the top rim), the centre disc is a whisper of the
+   ring color so the backdrop shows through, the thread crossing
+   the centre takes the pale web color, and the convergence dot
+   burns at full ring color while the stage flows. */
 .ring-orbit {
   stroke: color-mix(in srgb, var(--ring-c) 38%, var(--card));
 }
@@ -315,19 +351,31 @@
 }
 
 .ring-core {
-  fill: color-mix(in srgb, var(--ring-c) 7%, transparent);
+  fill: color-mix(in srgb, var(--ring-c) 2.5%, transparent);
+}
+
+.ring-thread {
+  stroke: var(--web-c);
+}
+
+.ring-node-dot {
+  fill: color-mix(in srgb, var(--ring-c) 45%, var(--card));
+}
+
+.stage-ring:not(.stage-ring-faint) .ring-node-dot {
+  fill: var(--ring-c);
 }
 
 .ring-stop-hi {
-  stop-color: color-mix(in srgb, var(--ring-c) 52%, #fff);
+  stop-color: color-mix(in srgb, var(--ring-c) 68%, #fff);
 }
 
 .ring-stop-mid {
-  stop-color: var(--ring-c);
+  stop-color: color-mix(in srgb, var(--ring-c) 88%, #fff);
 }
 
 .ring-stop-lo {
-  stop-color: color-mix(in srgb, var(--ring-c) 82%, #000);
+  stop-color: color-mix(in srgb, var(--ring-c) 78%, #000);
 }
 
 @media (min-width: 640px) {
@@ -339,9 +387,21 @@
 
 @media (min-width: 1024px) {
   .stage-ring {
-    width: 96px;
-    height: 96px;
+    width: 80px;
+    height: 80px;
   }
+}
+
+/* The soft cyan atmosphere behind the whole track: one wide, very
+   faint radial wash of the accent, centred on the ring row, that
+   binds web, mesh and rings into a single ambience. Purely a
+   background tint — no motion, nothing to freeze. */
+.ambience-glow {
+  background: radial-gradient(
+    ellipse 105% 165% at 50% 32%,
+    color-mix(in srgb, var(--pri) 6%, transparent),
+    transparent 68%
+  );
 }
 
 /* The web's threads and anchor dots take the pale --web-c, and a
@@ -403,10 +463,17 @@
    horizontally pure calc() over the track — five equal stage cells
    plus four fixed spacers (3rem wide from sm, 4rem from lg), so
    anchor k sits at (2k+1)/10 of the free space plus k spacers;
-   vertically the anchor is the ring centre — 44px below the track
-   top on phones, then one fixed 224px step per stage (184px stage:
-   88px ring over 96px of name, count and captions, plus the 40px
-   spacer); 42px from sm and 48px from lg, matching the ring sizes.
+   vertically the anchor is the ring centre — 30px below the track
+   top on phones, then one fixed 145px step per stage (125px stage:
+   60px ring over 65px of name, count and captions, plus the 20px
+   spacer); 42px from sm and 40px from lg, matching the ring sizes.
+   A soft shadow under the body seats the spider ON its line, and
+   a hair-thin silk thread (.spider-silk) trails one pitch behind
+   it — drawn in layer space between the previous anchor and the
+   spider's own, so the layer transform carries it through every
+   glide; it renders only while the spider travels or waits past
+   the first ring and fades with the spider (.spider-silk-faded),
+   so the fade cycle never draws it backwards.
    Movement is a transform transition stepped by React state at poll
    cadence — never per-frame JS; a step to a LOWER anchor (the loop
    wrap, or the frontier retreating) jumps with the transition
@@ -504,13 +571,38 @@
 
 /* Anchor 0 is the first stage's centre; each step advances by one
    stage-plus-spacer spacing along the track axis (vertical on
-   phones, horizontal from sm up). */
+   phones, horizontal from sm up). The body's soft drop-shadow is
+   what seats the spider on the line; it lives on the unrotated
+   body wrapper so the shadow falls downward at every breakpoint
+   (the SVG inside is the part that rotates to face the flow). */
 .spider-body {
   position: absolute;
   left: 50%;
-  top: 44px;
+  top: 30px;
   transform: translate(-50%, -50%);
+  filter: drop-shadow(0 3px 3px rgb(0 0 0 / 0.28));
   transition: opacity 0.35s ease;
+}
+
+/* The silk thread: one pitch of hairline behind the spider. In
+   layer space it spans from the previous anchor to anchor 0, so
+   at anchor k it lands exactly between rings k-1 and k. Static —
+   no animation of its own; it fades with the spider's fade cycle
+   and freezes with the layer when the data goes stale. */
+.spider-silk {
+  position: absolute;
+  left: 50%;
+  top: -115px;
+  width: 1px;
+  height: 145px;
+  transform: translateX(-50%);
+  background: color-mix(in srgb, var(--pri) 45%, transparent);
+  opacity: 0.35;
+  transition: opacity 0.35s ease;
+}
+
+.spider-silk-faded {
+  opacity: 0;
 }
 
 .spider-idle {
@@ -588,25 +680,33 @@
 }
 
 .spider-step-1 {
-  transform: translateY(224px);
+  transform: translateY(145px);
 }
 
 .spider-step-2 {
-  transform: translateY(448px);
+  transform: translateY(290px);
 }
 
 .spider-step-3 {
-  transform: translateY(672px);
+  transform: translateY(435px);
 }
 
 .spider-step-4 {
-  transform: translateY(896px);
+  transform: translateY(580px);
 }
 
 @media (min-width: 640px) {
   .spider-body {
     left: calc(10% - 19.2px);
     top: 42px;
+  }
+
+  .spider-silk {
+    left: calc(-10% - 28.8px);
+    top: 42px;
+    width: calc(20% + 9.6px);
+    height: 1px;
+    transform: translateY(-50%);
   }
 
   .spider-body > svg {
@@ -633,7 +733,13 @@
 @media (min-width: 1024px) {
   .spider-body {
     left: calc(10% - 25.6px);
-    top: 48px;
+    top: 40px;
+  }
+
+  .spider-silk {
+    left: calc(-10% - 38.4px);
+    top: 40px;
+    width: calc(20% + 12.8px);
   }
 
   .spider-step-1 {
@@ -655,6 +761,14 @@
 
 @media (prefers-reduced-motion: reduce) {
   .spider-step {
+    transition: none;
+  }
+
+  .stage-ring-breathe {
+    animation: none;
+  }
+
+  .spider-silk {
     transition: none;
   }
 

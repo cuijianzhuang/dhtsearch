@@ -84,6 +84,20 @@
 // threads and concentric arcs) spreads, and a node-mesh extends
 // across the whole track, densest at the DHT end; both pulse at
 // segment 1's tier rate and sit dim and still at a zero Δseen.
+//
+// Refinement pass: the rings read as nodes OF the web — a faint
+// thread crosses each ring's open centre and a small node dot sits
+// where the threads converge, lit with the stage's tone — and a
+// soft radial ambience behind the whole track binds the hero into
+// one atmosphere. A flowing stage's ring breathes (its glow pulses
+// at the inbound segment's tier rate; idle rings stay calm). The
+// spider sits ON its line with a soft shadow under it, and a
+// hair-thin silk thread trails from it back to the previous ring
+// while it travels or waits (never at rest, faded with it through
+// the fade cycle). The whole hero is deliberately compact — rings
+// step 60px phones / 84px sm / 80px lg with tightened stacks and
+// chrome — so the overview's KPI row and trend chart stay in the
+// first viewport instead of below the fold.
 
 import {
   useEffect,
@@ -316,8 +330,8 @@ export default function PipelineFlow({
     !disabled && d !== null && d > 0 ? "accent" : "faint";
 
   return (
-    <section className="overflow-hidden rounded-xl border border-line bg-surface p-4 shadow-card">
-      <div className="flex min-h-8 flex-wrap items-center justify-between gap-3">
+    <section className="overflow-hidden rounded-xl border border-line bg-surface p-3 shadow-card sm:p-4 lg:py-3">
+      <div className="flex min-h-7 flex-wrap items-center justify-between gap-3 lg:min-h-5">
         <h2 className="text-sm font-semibold text-ink">收录管线</h2>
         <span className="inline-flex items-center gap-1.5 text-xs text-faint">
           <span
@@ -339,13 +353,14 @@ export default function PipelineFlow({
       </div>
 
       <div
-        className={`relative mt-3 overflow-hidden ${stale ? "flow-paused" : ""}`}
+        className={`relative mt-2 overflow-hidden lg:mt-1.5 ${stale ? "flow-paused" : ""}`}
       >
+        <div aria-hidden className="ambience-glow pointer-events-none absolute inset-0 z-0" />
         <MeshBackdrop tier={seg(dSeen)} />
         <div className="relative z-10 flex flex-col sm:flex-row sm:items-start">
-          <Stage label="DHT 网络" value={nodes} sub={`排队节点 ${formatCount(queuedNodes)}`} dim={disabled} nodeTone={disabled ? "faint" : "accent"} backdropTier={seg(dSeen)} />
+          <Stage label="DHT 网络" value={nodes} sub={`排队节点 ${formatCount(queuedNodes)}`} dim={disabled} nodeTone={disabled ? "faint" : "accent"} backdropTier={seg(dSeen)} breatheTier={seg(dSeen)} />
           <Segment tier={seg(dSeen)} />
-          <Stage label="采样发现" value={cur.seen} delta={dSeen} dim={disabled} nodeTone={toneOf(dSeen)} />
+          <Stage label="采样发现" value={cur.seen} delta={dSeen} dim={disabled} nodeTone={toneOf(dSeen)} breatheTier={seg(dSeen)} />
           <Segment tier={seg(dAttempts)} />
           <Stage
             label="元数据抓取"
@@ -355,11 +370,12 @@ export default function PipelineFlow({
             warn={fetchStalled}
             dim={disabled}
             nodeTone={fetchStalled ? "warn" : toneOf(dAttempts)}
+            breatheTier={seg(dAttempts)}
           />
           <Segment tier={seg(dFetched)} />
-          <Stage label="内容过滤" value={cur.filtered} delta={dFiltered} dim={disabled} nodeTone={toneOf(dFetched)} />
+          <Stage label="内容过滤" value={cur.filtered} delta={dFiltered} dim={disabled} nodeTone={toneOf(dFetched)} breatheTier={seg(dFetched)} />
           <Segment tier={seg(dStored)} />
-          <Stage label="入库" value={cur.stored} delta={dStored} dim={disabled} nodeTone={toneOf(dStored)} />
+          <Stage label="入库" value={cur.stored} delta={dStored} dim={disabled} nodeTone={toneOf(dStored)} breatheTier={seg(dStored)} />
         </div>
         <SpiderLayer
           anchor={spider.anchor}
@@ -372,7 +388,7 @@ export default function PipelineFlow({
         />
       </div>
 
-      <p className="mt-3 border-t border-line-2 pt-2 text-xs leading-relaxed text-faint">
+      <p className="mt-2 border-t border-line-2 pt-1.5 text-[11px] leading-4 text-faint">
         元数据超时 {formatCount(cur.timedOut)} · 元数据失败{" "}
         {formatCount(cur.failed)} · 早筛丢弃 {formatCount(cur.prescreen)}
         。除「入库」外，管线计数为进程累计值，「本轮」为最近一次
@@ -392,6 +408,7 @@ function Stage({
   dim,
   nodeTone = "faint",
   backdropTier,
+  breatheTier,
 }: {
   label: string;
   value: number;
@@ -404,7 +421,16 @@ function Stage({
   nodeTone?: NodeTone;
   /** First stage only: drives the spider-web backdrop's pulse. */
   backdropTier?: Tier;
+  /** This stage's inbound segment tier: while work is flowing in,
+   *  the ring's glow breathes at this rate (see .stage-ring-breathe
+   *  in globals.css). Idle and warning rings stay calm. */
+  breatheTier?: Tier;
 }) {
+  const breathing =
+    !dim &&
+    nodeTone === "accent" &&
+    breatheTier !== undefined &&
+    breatheTier.dots > 0;
   return (
     <div
       className={`relative flex min-w-0 flex-col items-center text-center sm:flex-1 ${
@@ -426,15 +452,20 @@ function Stage({
             : nodeTone === "faint"
               ? "stage-ring-faint"
               : ""
-        }`}
+        } ${breathing ? "stage-ring-breathe" : ""}`}
+        style={
+          breathing
+            ? { animationDuration: `${breatheTier.seconds}s` }
+            : undefined
+        }
       >
         <StageRingSvg />
       </div>
       <div className="relative z-10 flex flex-col items-center">
-        <p className="mt-2 h-5 text-sm leading-5 font-semibold text-ink">
+        <p className="mt-1 h-[15px] text-[13px] leading-[15px] font-semibold text-ink sm:mt-2 sm:h-5 sm:text-sm sm:leading-5 lg:mt-0.5 lg:h-4 lg:leading-4">
           {label}
         </p>
-        <p className="mt-0.5 h-8 text-2xl leading-8 font-bold tabular-nums text-ink">
+        <p className="mt-px h-5 text-base leading-5 font-bold tabular-nums text-ink sm:mt-0.5 sm:h-8 sm:text-2xl sm:leading-8 lg:mt-0 lg:h-7 lg:text-xl lg:leading-7">
           <AnimatedNumber value={value} />
         </p>
         {/* Both caption lines always render (sub may be empty) so
@@ -443,7 +474,7 @@ function Stage({
             with no delta concept (DHT 网络) carries its sub on the
             first line. */}
         <p
-          className={`mt-0.5 h-4 max-w-full truncate text-[11px] leading-4 tabular-nums ${
+          className={`mt-px h-3 max-w-full truncate text-[10px] leading-3 tabular-nums sm:mt-0.5 sm:h-4 sm:text-[11px] sm:leading-4 lg:mt-0 lg:h-[11px] lg:leading-[11px] ${
             warn ? "font-medium text-warn-ink" : "text-faint"
           }`}
         >
@@ -457,7 +488,7 @@ function Stage({
                   ? `本轮 +${formatCount(d)}`
                   : "本轮 +0"}
         </p>
-        <p className="h-4 max-w-full truncate text-[11px] leading-4 tabular-nums text-faint">
+        <p className="h-3 max-w-full truncate text-[10px] leading-3 tabular-nums text-faint sm:h-4 sm:text-[11px] sm:leading-4 lg:h-[11px] lg:leading-[11px]">
           {d === undefined ? "" : (sub ?? "")}
         </p>
       </div>
@@ -469,6 +500,10 @@ function Stage({
  *  a hairline orbit circle, a luminous band (a gradient along the
  *  stroke, bright at the top), a fine inner ring, and an open centre
  *  over a barely-there deep tint, so the web and mesh show through.
+ *  The ring is a node OF that web: a faint thread crosses its centre
+ *  on the connector axis and a small node dot sits where the
+ *  threads converge, lit with the stage's tone (bright while work
+ *  reaches it, faint when idle, warning-colored on the stall).
  *  All colors hang off the wrapper's --ring-c (see globals.css), so
  *  the warn/faint states recolor the whole drawing by variable. The
  *  gradient id is per-instance: five rings share the document, and a
@@ -486,6 +521,7 @@ function StageRingSvg() {
         </linearGradient>
       </defs>
       <circle cx="48" cy="48" r="46.5" className="ring-orbit" strokeWidth="0.8" />
+      <line x1="3" y1="48" x2="93" y2="48" className="ring-thread" strokeWidth="0.8" />
       <circle cx="48" cy="48" r="31.5" className="ring-core" />
       <circle
         cx="48"
@@ -495,6 +531,7 @@ function StageRingSvg() {
         strokeWidth="10.5"
       />
       <circle cx="48" cy="48" r="31.5" className="ring-inner" strokeWidth="0.8" />
+      <circle cx="48" cy="48" r="3" className="ring-node-dot" />
     </svg>
   );
 }
@@ -513,7 +550,7 @@ function WebBackdrop({ tier }: { tier: Tier }) {
   return (
     <svg
       aria-hidden
-      className="web-fade pointer-events-none absolute top-11 left-1/2 z-0 h-[440px] w-[440px] -translate-x-1/2 -translate-y-1/2 sm:top-[42px] lg:top-12 lg:h-[540px] lg:w-[540px]"
+      className="web-fade pointer-events-none absolute top-[30px] left-1/2 z-0 h-[300px] w-[300px] -translate-x-1/2 -translate-y-1/2 sm:top-[42px] sm:h-[440px] sm:w-[440px] lg:top-10 lg:h-[620px] lg:w-[620px]"
       viewBox="0 0 240 240"
       fill="none"
     >
@@ -567,7 +604,7 @@ function Segment({ tier }: { tier: Tier }) {
     <>
       <div
         aria-hidden
-        className="relative mx-auto h-10 w-6 shrink-0 overflow-hidden sm:hidden"
+        className="relative mx-auto h-5 w-6 shrink-0 overflow-hidden sm:hidden"
       >
         <div className="absolute top-0 bottom-0 left-1/2 w-px -translate-x-1/2 bg-input" />
         {dots.map((i) => (
@@ -576,7 +613,7 @@ function Segment({ tier }: { tier: Tier }) {
       </div>
       <div
         aria-hidden
-        className="relative hidden h-[84px] w-12 shrink-0 overflow-hidden sm:block lg:h-[96px] lg:w-16"
+        className="relative hidden h-[84px] w-12 shrink-0 overflow-hidden sm:block lg:h-[80px] lg:w-16"
       >
         <div className="absolute top-1/2 right-0 left-0 h-px -translate-y-1/2 bg-input" />
         {dots.map((i) => (
@@ -590,7 +627,9 @@ function Segment({ tier }: { tier: Tier }) {
 /** The node-mesh behind the whole track (sm and up; on phones the
  *  spider web behind the first ring carries the motif alone): a
  *  static SVG routing graph whose nodes thin out from the DHT end
- *  toward 入库, sliced from the left so the dense end always shows.
+ *  toward 入库 but never vanish — the graph runs the full width of
+ *  the hero so the ambience stays perceptible behind the last ring
+ *  too. It is sliced from the left so the dense end always shows.
  *  Its group opacity pulses at segment 1's tier rate while
  *  discoveries arrive; at a zero Δseen tier it renders dim and
  *  still; .flow-paused freezes the pulse when the data goes stale. */
@@ -600,7 +639,7 @@ function MeshBackdrop({ tier }: { tier: Tier }) {
     <svg
       aria-hidden
       className="pointer-events-none absolute inset-0 z-0 hidden h-full w-full sm:block"
-      viewBox="0 0 1200 200"
+      viewBox="0 0 1600 200"
       preserveAspectRatio="xMinYMid slice"
       fill="none"
     >
@@ -613,7 +652,7 @@ function MeshBackdrop({ tier }: { tier: Tier }) {
         }
       >
         <path
-          d="M30 60 L80 25 M30 60 L95 95 M80 25 L150 55 M80 25 L215 20 M95 95 L150 55 M95 95 L185 110 M150 55 L215 20 M150 55 L260 80 M185 110 L260 80 M185 110 L350 120 M215 20 L320 40 M260 80 L320 40 M260 80 L350 120 M260 80 L410 70 M320 40 L410 70 M350 120 L410 70 M410 70 L470 30 M410 70 L520 95 M470 30 L600 55 M520 95 L600 55 M600 55 L690 85 M690 85 L770 40 M690 85 L860 75 M770 40 L860 75 M860 75 L950 50 M950 50 L1050 90 M1050 90 L1150 45 M860 75 L1050 90"
+          d="M30 60 L80 25 M30 60 L95 95 M80 25 L150 55 M80 25 L215 20 M95 95 L150 55 M95 95 L185 110 M150 55 L215 20 M150 55 L260 80 M185 110 L260 80 M185 110 L350 120 M215 20 L320 40 M260 80 L320 40 M260 80 L350 120 M260 80 L410 70 M320 40 L410 70 M350 120 L410 70 M410 70 L470 30 M410 70 L520 95 M470 30 L600 55 M520 95 L600 55 M600 55 L690 85 M690 85 L770 40 M690 85 L860 75 M770 40 L860 75 M860 75 L950 50 M950 50 L1050 90 M1050 90 L1150 45 M860 75 L1050 90 M1150 45 L1260 80 M1050 90 L1260 80 M1260 80 L1360 35 M1260 80 L1460 95 M1360 35 L1460 95 M1360 35 L1560 60 M1460 95 L1560 60"
           strokeWidth="1"
           className="mesh-lines"
         />
@@ -637,6 +676,10 @@ function MeshBackdrop({ tier }: { tier: Tier }) {
           <circle cx="950" cy="50" r="1.8" className="mesh-node" />
           <circle cx="1050" cy="90" r="2" className="mesh-node" />
           <circle cx="1150" cy="45" r="1.8" className="mesh-node" />
+          <circle cx="1260" cy="80" r="2.2" className="mesh-node" />
+          <circle cx="1360" cy="35" r="1.8" className="mesh-node" />
+          <circle cx="1460" cy="95" r="2" className="mesh-node" />
+          <circle cx="1560" cy="60" r="1.8" className="mesh-node" />
         </g>
       </g>
     </svg>
@@ -682,6 +725,13 @@ function SpiderLayer({
       el.style.transition = "";
     }
   }, [stale]);
+  // The silk thread trails exactly one pitch behind the spider —
+  // drawn in layer space from the previous anchor to the spider's
+  // own, so the layer's transform carries it with the glide. It
+  // exists only while the spider travels or waits (never at rest,
+  // never before the first ring) and fades with the spider through
+  // the fade cycle, so repositioning never draws it backwards.
+  const silk = !idle && anchor > 0;
   return (
     <div
       aria-hidden
@@ -690,6 +740,9 @@ function SpiderLayer({
         jump ? "spider-jump" : ""
       } pointer-events-none absolute inset-0 z-20`}
     >
+      {silk && (
+        <span className={`spider-silk ${faded ? "spider-silk-faded" : ""}`} />
+      )}
       <span
         className={`spider-body ${alarm ? "spider-alarm" : ""} ${
           idle ? "spider-idle" : ""
@@ -712,7 +765,7 @@ function SpiderSvg() {
   return (
     <svg
       viewBox="0 0 48 48"
-      className="spider-svg block h-10 w-10 sm:h-11 sm:w-11"
+      className="spider-svg block h-7 w-7 sm:h-11 sm:w-11"
       fill="none"
     >
       <circle cx="24" cy="24" r="21.5" className="spider-ring" />
