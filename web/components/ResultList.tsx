@@ -71,7 +71,11 @@ export default function ResultList({
         // scrolls, but settles into the flow at the end of the list, so it can
         // never cover the last card, the pagination, or the footer.
         <div className="sticky bottom-4 z-10 mt-3">
-          <div className="flex w-full items-center justify-between gap-2 rounded-xl border border-input bg-surface/95 px-4 py-3 shadow-bar backdrop-blur">
+          {/* Solid surface, no backdrop-blur: a blurred sticky bar
+              forces the browser to re-sample and blur the content
+              scrolling under it every frame — a classic mobile scroll
+              jank source — for a 5% translucency nobody can see. */}
+          <div className="flex w-full items-center justify-between gap-2 rounded-xl border border-input bg-surface px-4 py-3 shadow-bar">
             <span className="shrink-0 text-sm text-ink-2">
               已选 <span className="font-medium text-accent-ink">{selected.size}</span> 条
             </span>

@@ -27,7 +27,10 @@ export interface FunnelStage {
 }
 
 /** Horizontal funnel: one bar per stage, widths relative to the first
- *  stage, animated on value change via a CSS width transition. */
+ *  stage, animated on value change. The fill is a full-width div
+ *  scaled on X (transform, compositor-driven) rather than a width
+ *  transition, which would re-run layout every frame of every poll
+ *  on a phone CPU. */
 export function FunnelBars({ stages }: { stages: FunnelStage[] }) {
   const base = Math.max(1, stages[0]?.value ?? 1);
   return (
@@ -40,9 +43,9 @@ export function FunnelBars({ stages }: { stages: FunnelStage[] }) {
           <span className="truncate text-sm text-mute">{s.label}</span>
           <div className="h-6 overflow-hidden rounded-md bg-soft">
             <div
-              className="h-full rounded-md transition-[width] duration-700 ease-out"
+              className="h-full w-full origin-left rounded-md transition-transform duration-700 ease-out"
               style={{
-                width: `${Math.max(s.value > 0 ? 1.5 : 0, (s.value / base) * 100)}%`,
+                transform: `scaleX(${Math.max(s.value > 0 ? 0.015 : 0, s.value / base)})`,
                 background: s.color,
               }}
             />
@@ -271,8 +274,8 @@ export function MeterBar({
       </div>
       <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-soft">
         <div
-          className="h-full rounded-full transition-[width] duration-700 ease-out"
-          style={{ width: `${pct}%`, background: color }}
+          className="h-full w-full origin-left rounded-full transition-transform duration-700 ease-out"
+          style={{ transform: `scaleX(${pct / 100})`, background: color }}
         />
       </div>
     </div>

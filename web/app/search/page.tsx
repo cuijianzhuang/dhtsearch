@@ -99,8 +99,21 @@ export default async function SearchPage({ searchParams }: PageProps) {
         </div>
       </header>
 
-      <div className="mt-4 rounded-lg border border-accent-line bg-accent-soft px-4 py-3 text-xs text-accent-ink">
-        🛡️ 本站结果已自动过滤成人内容与垃圾信息，请放心使用。
+      <div className="mt-4 flex items-center gap-2 rounded-lg border border-accent-line bg-accent-soft px-4 py-3 text-xs text-accent-ink">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="h-4 w-4 shrink-0"
+          aria-hidden
+        >
+          <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+          <path d="m9 12 2 2 4-4" />
+        </svg>
+        本站结果已自动过滤成人内容与垃圾信息，请放心使用。
       </div>
 
       {error ? (
@@ -124,7 +137,21 @@ export default async function SearchPage({ searchParams }: PageProps) {
                 className="inline-flex min-h-11 items-center gap-1 text-sm text-mute transition-colors hover:text-accent-ink"
                 title="订阅当前搜索的 RSS 更新"
               >
-                <span aria-hidden>📡</span> RSS 订阅
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="h-4 w-4"
+                  aria-hidden
+                >
+                  <path d="M4 11a9 9 0 0 1 9 9" />
+                  <path d="M4 4a16 16 0 0 1 16 16" />
+                  <line x1="4" x2="4.01" y1="20" y2="20" />
+                </svg>{" "}
+                RSS 订阅
               </a>
               <SortSelect q={q} category={category} sort={sort} />
             </span>

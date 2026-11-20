@@ -186,3 +186,45 @@
     animation: none;
   }
 }
+
+/* Admin sidebar (right side, components/admin/AdminShellClient.tsx).
+   The desktop width and the collapsed icon-rail state live here
+   because the state is an attribute on <html> restored before first
+   paint by a boot script (see AdminShell) — a React state would
+   flash the expanded rail on every load, and Tailwind has no variant
+   for an ancestor attribute. Every rule is inside the lg query:
+   below lg the sidebar is a drawer and always shows full labels.
+   The icon-only logout block is hidden everywhere except the
+   collapsed rail. */
+.admin-nav-icononly {
+  display: none;
+}
+
+@media (min-width: 1024px) {
+  .admin-sidebar {
+    width: 15rem;
+  }
+
+  html[data-admin-nav="collapsed"] .admin-sidebar {
+    width: 4.5rem;
+  }
+
+  html[data-admin-nav="collapsed"] .admin-nav-text {
+    display: none;
+  }
+
+  html[data-admin-nav="collapsed"] .admin-nav-item {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  html[data-admin-nav="collapsed"] .admin-nav-appear {
+    display: none;
+  }
+
+  html[data-admin-nav="collapsed"] .admin-nav-icononly {
+    display: flex;
+    justify-content: center;
+  }
+}

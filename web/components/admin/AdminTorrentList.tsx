@@ -143,23 +143,32 @@ export default function AdminTorrentList({
                   </td>
                 )}
                 <td className="max-w-105 px-3 py-3">
+                  {/* Clamp the name to two lines: release names run to
+                      200+ characters and an unclamped wrap made single
+                      rows 4-6 lines tall, wrecking the table's scan
+                      rhythm. Full text is one click away on the detail
+                      page (and in the title tooltip). */}
                   <Link
                     href={`/admin/torrents/${t.info_hash}`}
-                    className="font-medium wrap-anywhere text-accent-ink hover:underline"
+                    title={t.name || undefined}
+                    className="line-clamp-2 font-medium wrap-anywhere text-accent-ink hover:underline"
                   >
                     {t.name || "(未命名)"}
                   </Link>
                   {t.alias && t.alias !== t.name && (
                     <p className="mt-1 line-clamp-1 text-xs text-mute">{t.alias}</p>
                   )}
-                  <p className="mt-1 font-mono text-[11px] break-all text-faint">
+                  <p
+                    className="mt-1 truncate font-mono text-[11px] text-faint"
+                    title={t.info_hash}
+                  >
                     {t.info_hash}
                   </p>
                 </td>
-                <td className="px-3 py-3 whitespace-nowrap text-mute">
+                <td className="px-3 py-3 font-medium whitespace-nowrap tabular-nums text-ink-2">
                   {formatSize(t.total_size)}
                 </td>
-                <td className="px-3 py-3 whitespace-nowrap text-mute">
+                <td className="px-3 py-3 whitespace-nowrap tabular-nums text-mute">
                   {formatCount(t.file_count)}
                 </td>
                 <td className="px-3 py-3 whitespace-nowrap text-mute">
@@ -199,17 +208,25 @@ export default function AdminTorrentList({
               <div className="min-w-0 flex-1">
                 <Link
                   href={`/admin/torrents/${t.info_hash}`}
-                  className="font-medium wrap-anywhere text-accent-ink"
+                  title={t.name || undefined}
+                  className="line-clamp-3 font-medium wrap-anywhere text-accent-ink"
                 >
                   {t.name || "(未命名)"}
                 </Link>
                 <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-mute">
-                  <span>{formatSize(t.total_size)}</span>
-                  <span>{formatCount(t.file_count)} 个文件</span>
+                  <span className="font-medium tabular-nums text-ink-2">
+                    {formatSize(t.total_size)}
+                  </span>
+                  <span className="tabular-nums">
+                    {formatCount(t.file_count)} 个文件
+                  </span>
                   <span>{formatRelativeTime(t.created_at)}</span>
                   <ReviewBadge reviewed={t.reviewed_at > 0} />
                 </p>
-                <p className="mt-1 font-mono text-[11px] break-all text-faint">
+                <p
+                  className="mt-1 truncate font-mono text-[11px] text-faint"
+                  title={t.info_hash}
+                >
                   {t.info_hash}
                 </p>
               </div>

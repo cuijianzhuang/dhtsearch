@@ -89,6 +89,14 @@ export const APPEARANCES: { key: Appearance; label: string }[] = [
  *  over the admin-set default appearance. */
 export const APPEARANCE_STORAGE_KEY = "dhtsearch-appearance";
 
+/** localStorage key for the admin sidebar's expanded/collapsed
+ *  choice. Lives here (a plain shared module) rather than in the
+ *  sidebar component: the boot script that reads it is built by a
+ *  server component, and a value imported across the server/client
+ *  boundary from a "use client" module arrives as a proxy, not the
+ *  string. */
+export const ADMIN_NAV_STORAGE_KEY = "dhtsearch-admin-nav";
+
 /** Cookie mirroring the visitor's appearance choice. The root layout
  *  reads it server-side and renders data-appearance from it, so a
  *  router.refresh() or soft navigation — which re-renders the layout

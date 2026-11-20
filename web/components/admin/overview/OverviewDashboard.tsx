@@ -154,8 +154,14 @@ export default function OverviewDashboard({
         </button>
       </div>
 
-      {/* KPI row */}
-      <section className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+      {/* KPI row. min-w-0 on every grid item below (here and in the
+          panels): a grid item's automatic minimum size is its content's
+          min-content, and a truncating (nowrap) descendant still
+          contributes its full unwrapped text width there — one long
+          torrent name in 最新入库 used to stretch the whole column to
+          ~1900px on a 390px phone, and the browser then rendered the
+          page at desktop width. min-w-0 caps the item at its track. */}
+      <section className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6 [&>*]:min-w-0">
         <KpiCard label="种子总数" value={o.torrents} sub={`数据库 ${o.dialect}`} />
         <KpiCard label="今日新增" value={o.today} sub="今日 0 点以来" />
         <KpiCard
@@ -182,7 +188,7 @@ export default function OverviewDashboard({
       </section>
 
       {/* Trend + filter composition */}
-      <div className="mt-4 grid gap-4 lg:grid-cols-3">
+      <div className="mt-4 grid gap-4 lg:grid-cols-3 [&>*]:min-w-0">
         <Panel
           title="入库趋势"
           className="lg:col-span-2"
@@ -247,7 +253,7 @@ export default function OverviewDashboard({
       </div>
 
       {/* Pipeline funnel + live ingest stream */}
-      <div className="mt-4 grid gap-4 lg:grid-cols-3">
+      <div className="mt-4 grid gap-4 lg:grid-cols-3 [&>*]:min-w-0">
         <Panel title="收录管线" className="lg:col-span-2">
           <FunnelBars
             stages={[
@@ -335,7 +341,7 @@ export default function OverviewDashboard({
       </div>
 
       {/* Module status panels */}
-      <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4 [&>*]:min-w-0">
         {o.crawler && (
           <Panel title="爬虫状态">
             <StatusLine
