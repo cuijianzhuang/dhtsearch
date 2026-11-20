@@ -158,6 +158,42 @@
   }
 }
 
+/* Search page app shell: while /search is mounted, the document is
+   capped at the dynamic viewport height and never scrolls — the
+   page's header, notice, filter/sort controls and category chips
+   stay pinned, and only the results region (SearchScrollRegion)
+   scrolls, mirroring the admin shell's h-dvh + overflow-y-auto
+   shape. dvh (not vh) so mobile Safari's collapsing URL bar resizes
+   the shell instead of leaving a gap or a cropped list. The layout
+   footer and the mobile bottom nav's spacer stay in flow below the
+   shell, so the 管理 entry and the nav clearance work exactly as on
+   the scrolling pages. Browsers without :has() simply keep the old
+   whole-page scroll. */
+body:has(> main[data-search-shell]) {
+  height: 100dvh;
+  overflow: hidden;
+}
+
+/* The results region's scrollbar: present but quiet — a thin thumb
+   in the hairline token, no track. */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+.scroll-thin::-webkit-scrollbar {
+  width: 8px;
+}
+.scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 999px;
+}
+.scroll-thin::-webkit-scrollbar-thumb:hover {
+  background: var(--faint);
+}
+
 /* Admin overview live elements: freshly arrived rows in the "latest
    ingested" stream slide in; the live indicator dot breathes. Kept as
    plain classes (not utilities) because the dashboard toggles them by

@@ -14,7 +14,7 @@ import { fetchSiteConfig } from "@/lib/site";
 import { formatCount } from "@/lib/format";
 import SearchBox from "@/components/SearchBox";
 import ResultList from "@/components/ResultList";
-import BackToTop from "@/components/BackToTop";
+import SearchScrollRegion from "@/components/SearchScrollRegion";
 import Pagination from "@/components/Pagination";
 import SortSelect from "@/components/SortSelect";
 import HideDeadToggle from "@/components/HideDeadToggle";
@@ -114,8 +114,19 @@ export default async function SearchPage({ searchParams }: PageProps) {
     return qs ? `/rss?${qs}` : "/rss";
   })();
 
+  // Identity of the current result set: the scroll region starts a
+  // new set at the top of the list (see SearchScrollRegion).
+  const resetKey = [q, page, category, sort, hideDead ? "1" : "0"].join("|");
+
   return (
-    <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 py-6">
+    // App shell: data-search-shell caps the document at 100dvh (see
+    // globals.css), so the header, notice, controls and category
+    // chips below stay pinned and only the results region scrolls.
+    // pt-6 only — the region carries the bottom padding.
+    <main
+      data-search-shell
+      className="mx-auto flex w-full max-w-3xl min-h-0 flex-1 flex-col px-4 pt-6"
+    >
       {/* Header: logo + search box + appearance switcher. On phones
           the three no longer share one row: logo + switcher keep the
           first row and the search box wraps to its own full-width row
@@ -156,9 +167,10 @@ export default async function SearchPage({ searchParams }: PageProps) {
         本站结果已自动过滤成人内容与垃圾信息，请放心使用。
       </div>
 
-      {error ? (
-        <BackendError q={q} kind={errorKind} detail={error} />
-      ) : data ? (
+      {/* Pinned controls: result count, RSS, dead filter, sort and
+          the category chips stay with the header; only the results
+          below them scroll. */}
+      {!error && data && (
         <>
           <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
             <p className="text-sm text-mute">
@@ -233,8 +245,14 @@ export default async function SearchPage({ searchParams }: PageProps) {
               </Link>
             ))}
           </nav>
+        </>
+      )}
 
-          {data.results && data.results.length > 0 ? (
+      <SearchScrollRegion resetKey={resetKey}>
+        {error ? (
+          <BackendError q={q} kind={errorKind} detail={error} />
+        ) : data ? (
+          data.results && data.results.length > 0 ? (
             <>
               <ResultList results={data.results} trackers={data.trackers ?? []} query={q} />
               <Pagination
@@ -309,14 +327,19 @@ export default async function SearchPage({ searchParams }: PageProps) {
                 </div>
               )}
             </div>
-          )}
-        </>
-      ) : null}
+          )
+        ) : null}
 
-      <footer className="mt-auto pt-10 text-center text-xs text-faint">
-        {site.name} · 干净、无广告的磁力搜索
-      </footer>
-      <BackToTop />
+        {/* The page's footer line ends the scroll region: mt-auto
+            rests it at the region's bottom when the results are
+            short, and after the pagination when they are long. The
+            layout's PublicFooter （管理 entry) stays pinned below
+            the shell. Pagination likewise stays at the list end —
+            reached by scrolling the list, never the chrome. */}
+        <footer className="mt-auto pt-10 text-center text-xs text-faint">
+          {site.name} · 干净、无广告的磁力搜索
+        </footer>
+      </SearchScrollRegion>
     </main>
   );
 }
