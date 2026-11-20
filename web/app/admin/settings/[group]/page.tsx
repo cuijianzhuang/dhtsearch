@@ -6,10 +6,8 @@ import AdminShell, {
   AdminDisabledNotice,
 } from "@/components/admin/AdminShell";
 import SettingsGroupForm from "@/components/admin/SettingsGroupForm";
-import {
-  SettingsNavChips,
-  SettingsNavRail,
-} from "@/components/admin/SettingsNav";
+import { SettingsNavRail } from "@/components/admin/SettingsNav";
+import SettingsNavChips from "@/components/admin/SettingsNavChips";
 import RestartCard from "@/components/admin/RestartCard";
 import UpdateCard from "@/components/admin/UpdateCard";
 import {
