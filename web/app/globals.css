@@ -250,14 +250,96 @@
   }
 }
 
+/* Pipeline hero stage rings + spider web (PipelineFlow.tsx). Each
+   stage is a large node ring in the approved mockup's language: a
+   saturated accent disc with a brighter heart and rim, a pale halo
+   and a soft glow, drawn as one radial-gradient over --ring-c so
+   the warning state recolors it by swapping the variable. A stage
+   whose inbound delta was zero renders desaturated, dimmer and
+   glow-less (.stage-ring-faint); the crawler-disabled case mutes
+   every ring through the stage's own opacity on top of that. Ring
+   sizes step with the breakpoints (88px phones, 84px from sm,
+   96px from lg) and the spider anchors and connector rails key off
+   the same numbers. The spider web behind the DHT ring pulses its
+   group opacity at segment 1's tier rate (.web-pulse), stronger
+   than the node-mesh's breathing because the web is the motif;
+   .flow-paused freezes it with everything else, and reduced motion
+   pins it static. */
+.stage-ring {
+  --ring-c: var(--pri);
+  display: block;
+  width: 88px;
+  height: 88px;
+  border-radius: 9999px;
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--ring-c) 68%, #fff) 0%,
+    var(--ring-c) 30%,
+    color-mix(in srgb, var(--ring-c) 84%, #000) 52%,
+    color-mix(in srgb, var(--ring-c) 58%, #fff) 61%,
+    var(--ring-c) 71%,
+    color-mix(in srgb, var(--ring-c) 20%, transparent) 85%,
+    transparent 96%
+  );
+  box-shadow: 0 0 26px color-mix(in srgb, var(--ring-c) 34%, transparent);
+  transition:
+    filter 0.3s ease,
+    opacity 0.3s ease,
+    box-shadow 0.3s ease;
+}
+
+.stage-ring-warn {
+  --ring-c: var(--warn);
+}
+
+.stage-ring-faint {
+  filter: saturate(0.22);
+  opacity: 0.8;
+  box-shadow: none;
+}
+
+@media (min-width: 640px) {
+  .stage-ring {
+    width: 84px;
+    height: 84px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .stage-ring {
+    width: 96px;
+    height: 96px;
+  }
+}
+
+@keyframes web-pulse {
+  0%,
+  100% {
+    opacity: 0.34;
+  }
+  50% {
+    opacity: 0.58;
+  }
+}
+
+.web-pulse {
+  animation-name: web-pulse;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+
 /* Pipeline hero spider + network layer (PipelineFlow.tsx). The track
-   reads as a network: each stage box carries a node glyph on its
-   inbound edge, a node-mesh decorates the DHT end, and one spider —
-   the crawler itself — rides the track at the position the data says
-   work currently reaches. Anchor geometry is pure calc() over the
-   track: five equal stage cells plus four fixed spacers (2.5rem tall
-   on phones; 3rem wide from sm, 4rem from lg), so anchor k sits at
-   (2k+1)/10 of the free space plus k spacers along the axis.
+   reads as a network: each stage is a node ring (above), a spider
+   web spreads behind the DHT ring, a node-mesh fills the track,
+   and one spider — the crawler itself — rides the track at the
+   position the data says work currently reaches. Anchor geometry:
+   horizontally pure calc() over the track — five equal stage cells
+   plus four fixed spacers (3rem wide from sm, 4rem from lg), so
+   anchor k sits at (2k+1)/10 of the free space plus k spacers;
+   vertically the anchor is the ring centre — 44px below the track
+   top on phones, then one fixed 224px step per stage (184px stage:
+   88px ring over 96px of name, count and captions, plus the 40px
+   spacer); 42px from sm and 48px from lg, matching the ring sizes.
    Movement is a transform transition stepped by React state at poll
    cadence — never per-frame JS; a step to a LOWER anchor (the loop
    wrap, or the frontier retreating) jumps with the transition
@@ -340,6 +422,7 @@
 }
 
 .flow-paused .mesh-pulse,
+.flow-paused .web-pulse,
 .flow-paused .spider-legs {
   animation-play-state: paused;
 }
@@ -358,7 +441,7 @@
 .spider-body {
   position: absolute;
   left: 50%;
-  top: calc(10% - 16px);
+  top: 44px;
   transform: translate(-50%, -50%);
   transition: opacity 0.35s ease;
 }
@@ -438,25 +521,25 @@
 }
 
 .spider-step-1 {
-  transform: translateY(calc(20% + 8px));
+  transform: translateY(224px);
 }
 
 .spider-step-2 {
-  transform: translateY(calc(40% + 16px));
+  transform: translateY(448px);
 }
 
 .spider-step-3 {
-  transform: translateY(calc(60% + 24px));
+  transform: translateY(672px);
 }
 
 .spider-step-4 {
-  transform: translateY(calc(80% + 32px));
+  transform: translateY(896px);
 }
 
 @media (min-width: 640px) {
   .spider-body {
     left: calc(10% - 19.2px);
-    top: 50%;
+    top: 42px;
   }
 
   .spider-body > svg {
@@ -483,6 +566,7 @@
 @media (min-width: 1024px) {
   .spider-body {
     left: calc(10% - 25.6px);
+    top: 48px;
   }
 
   .spider-step-1 {
@@ -521,6 +605,11 @@
   .mesh-pulse {
     animation: none;
     opacity: 0.25;
+  }
+
+  .web-pulse {
+    animation: none;
+    opacity: 0.3;
   }
 }
 
