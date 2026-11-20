@@ -225,6 +225,15 @@
   }
 }
 
+@keyframes flow-x-rev {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
 .flow-dot {
   position: absolute;
   inset: 0;
@@ -249,6 +258,20 @@
     transparent 2.8px
   );
   animation-name: flow-y;
+}
+
+/* The wrap channel on the folded phone track runs right to left:
+   the dot is painted at the span's left edge and the span slides
+   in from the right, carrying the dot across against the row
+   direction — it is the return run of the Z, not backwards flow
+   within a stage. */
+.flow-dot-x-rev {
+  background: radial-gradient(
+    circle at 3px 50%,
+    color-mix(in srgb, var(--pri) 78%, var(--card)) 0 1.8px,
+    transparent 2.8px
+  );
+  animation-name: flow-x-rev;
 }
 
 .flow-paused .flow-dot {
@@ -460,16 +483,21 @@
    web spreads behind the DHT ring, a node-mesh fills the track,
    and one spider — the crawler itself — rides the track at the
    position the data says work currently reaches. Anchor geometry:
-   horizontally pure calc() over the track — five equal stage cells
-   plus four fixed spacers (3rem wide from sm, 4rem from lg), so
-   anchor k sits at (2k+1)/10 of the free space plus k spacers;
-   vertically the anchor is the ring centre — 30px below the track
-   top on phones, then one fixed 145px step per stage (125px stage:
-   60px ring over 65px of name, count and captions, plus the 20px
-   spacer); 42px from sm and 40px from lg, matching the ring sizes.
-   A soft shadow under the body seats the spider ON its line, and
-   a hair-thin silk thread (.spider-silk) trails one pitch behind
-   it — drawn in layer space between the previous anchor and the
+   from sm up, horizontally pure calc() over the track — five equal
+   stage cells plus four fixed spacers (3rem wide from sm, 4rem
+   from lg), so anchor k sits at (2k+1)/10 of the free space plus
+   k spacers, at ring-centre height (42px from sm, 40px from lg).
+   On phones the track folds into two rows over a 3-column grid
+   (two 2rem connector columns): the top row's ring centres sit at
+   (100% − 64px)/6, 50% and 100% − (100% − 64px)/6 of the track
+   width, 30px below its top; the bottom row repeats the first two
+   x positions one row pitch lower — a 125px stage block (60px ring
+   over 65px of name, count and captions) plus the 32px wrap row,
+   157px in all. The spider's steps are those offsets as transforms
+   of the full-track layer. A soft shadow under the body seats the
+   spider ON its line, and a hair-thin silk thread (.spider-silk,
+   with -b/-c spans for the wrap leg) trails one pitch behind it —
+   drawn in layer space between the previous anchor and the
    spider's own, so the layer transform carries it through every
    glide; it renders only while the spider travels or waits past
    the first ring and fades with the spider (.spider-silk-faded),
@@ -486,13 +514,19 @@
    still update once per poll.
 
    The spider always faces the direction of data flow: its SVG is
-   drawn head-up, then rotated 180deg on phones (head down the
-   vertical track) and 90deg from sm up (head right along the
-   horizontal track); waiting or resting it keeps facing forward.
-   It never crawls backwards: any move to a lower anchor — the
-   loop wrap at the end of a traverse, or the frontier retreating —
-   is a fade cycle (.spider-faded): fade out in place, reposition
-   while invisible, fade back in, then crawl forward again.
+   drawn head-up, then rotated 90deg (head right) along the
+   horizontal runs; on the phone track's wrap leg — and while
+   waiting at 元数据抓取, whose next segment is the drop — the
+   .spider-facing-down class turns it to 180deg (head down), a
+   rotation scoped to below sm so the single-row track always
+   faces right. Waiting or resting elsewhere it keeps facing
+   forward. It never crawls backwards: any move to a lower anchor
+   — the loop wrap at the end of a traverse, or the frontier
+   retreating — is a fade cycle (.spider-faded): fade out in place,
+   reposition while invisible, fade back in, then crawl forward
+   again. (The glide from the top row's end down to the bottom
+   row's start is forward motion along the folded path, not a
+   retreat: the anchor index still advances.)
    The spider alone breaks the teal discipline: near-black body
    and legs with red eyes and a red abdomen marking. In dark
    appearance a soft light halo (drop-shadow) keeps the black
@@ -570,35 +604,41 @@
 }
 
 /* Anchor 0 is the first stage's centre; each step advances by one
-   stage-plus-spacer spacing along the track axis (vertical on
-   phones, horizontal from sm up). The body's soft drop-shadow is
-   what seats the spider on the line; it lives on the unrotated
-   body wrapper so the shadow falls downward at every breakpoint
-   (the SVG inside is the part that rotates to face the flow). */
+   stage spacing along the folded phone path (right along the top
+   row, down the wrap, right along the bottom row) — from sm up the
+   media blocks below re-express the same steps along the single
+   horizontal track. The body's soft drop-shadow is what seats the
+   spider on the line; it lives on the unrotated body wrapper so
+   the shadow falls downward at every breakpoint (the SVG inside
+   is the part that rotates to face the flow). */
 .spider-body {
   position: absolute;
-  left: 50%;
+  left: calc((100% - 64px) / 6);
   top: 30px;
   transform: translate(-50%, -50%);
   filter: drop-shadow(0 3px 3px rgb(0 0 0 / 0.28));
   transition: opacity 0.35s ease;
 }
 
-/* The silk thread: one pitch of hairline behind the spider. In
-   layer space it spans from the previous anchor to anchor 0, so
-   at anchor k it lands exactly between rings k-1 and k. Static —
-   no animation of its own; it fades with the spider's fade cycle
-   and freezes with the layer when the data goes stale. */
-.spider-silk {
+/* The silk thread: one pitch of hairline behind the spider. The
+   spans share one paint; which of them shows, and where, is set
+   per anchor — on phones by the max-width block further below
+   (the wrap leg needs three spans: down, left along the channel,
+   down), from sm up by the media blocks' single horizontal span.
+   Static — no animation of its own; it fades with the spider's
+   fade cycle and freezes with the layer when the data goes stale. */
+.spider-silk,
+.spider-silk-b,
+.spider-silk-c {
   position: absolute;
-  left: 50%;
-  top: -115px;
-  width: 1px;
-  height: 145px;
-  transform: translateX(-50%);
   background: color-mix(in srgb, var(--pri) 45%, transparent);
   opacity: 0.35;
   transition: opacity 0.35s ease;
+}
+
+.spider-silk-b,
+.spider-silk-c {
+  display: none;
 }
 
 .spider-silk-faded {
@@ -613,10 +653,13 @@
   opacity: 0;
 }
 
-/* Facing: the SVG is drawn head-up; phones crawl downwards (head
-   rotated to the bottom), sm up crawls rightwards. */
+/* Facing: the SVG is drawn head-up; the horizontal runs rotate it
+   to head-right. The wrap leg's head-down turn lives in the
+   max-width block below so it can never leak into the single-row
+   track. The turn itself eases over a third of a second. */
 .spider-body > svg {
-  transform: rotate(180deg);
+  transform: rotate(90deg);
+  transition: transform 0.35s ease;
 }
 
 /* The spider's own palette: near-black ink, red accents. */
@@ -680,19 +723,80 @@
 }
 
 .spider-step-1 {
-  transform: translateY(145px);
+  transform: translateX(calc((100% + 32px) / 3));
 }
 
 .spider-step-2 {
-  transform: translateY(290px);
+  transform: translateX(calc((200% + 64px) / 3));
 }
 
 .spider-step-3 {
-  transform: translateY(435px);
+  transform: translateY(157px);
 }
 
 .spider-step-4 {
-  transform: translateY(580px);
+  transform: translate(calc((100% + 32px) / 3), 157px);
+}
+
+/* Phones only (below sm): the head-down turn for the wrap leg, and
+   the silk spans' per-anchor geometry. Silk geometry is written
+   in LAYER space — every span ends at anchor 0 and reaches one
+   pitch back along the path, and the layer's step transform
+   carries it to the spider's own anchor (the same trick the sm+
+   rules use). One column pitch is (100% + 32px)/3, the full top
+   row spans (200% + 64px)/3; rendered, the wrap channel runs at
+   y=141px (125px stage block + half the 32px wrap row) and the
+   bottom row's ring centres at y=187px, so in layer space (157px
+   higher) the wrap leg's spans sit at negative y. Everything in
+   this block is scoped by the max-width query so none of it can
+   leak into the sm+ single-row track. */
+@media (max-width: 639px) {
+  .spider-facing-down > svg {
+    transform: rotate(180deg);
+  }
+
+  .spider-step-1 .spider-silk,
+  .spider-step-4 .spider-silk {
+    top: 30px;
+    left: calc((-100% - 128px) / 6);
+    width: calc((100% + 32px) / 3);
+    height: 1px;
+    transform: translateY(-50%);
+  }
+
+  .spider-step-2 .spider-silk {
+    top: 30px;
+    left: calc((-50% - 64px) / 3);
+    width: calc((100% + 32px) / 3);
+    height: 1px;
+    transform: translateY(-50%);
+  }
+
+  .spider-step-3 .spider-silk {
+    left: calc(100% - (100% - 64px) / 6);
+    top: -127px;
+    width: 1px;
+    height: 111px;
+    transform: translateX(-50%);
+  }
+
+  .spider-step-3 .spider-silk-b {
+    display: block;
+    left: calc((100% - 64px) / 6);
+    top: -16px;
+    width: calc((200% + 64px) / 3);
+    height: 1px;
+    transform: translateY(-50%);
+  }
+
+  .spider-step-3 .spider-silk-c {
+    display: block;
+    left: calc((100% - 64px) / 6);
+    top: -16px;
+    width: 1px;
+    height: 46px;
+    transform: translateX(-50%);
+  }
 }
 
 @media (min-width: 640px) {
@@ -768,11 +872,14 @@
     animation: none;
   }
 
-  .spider-silk {
+  .spider-silk,
+  .spider-silk-b,
+  .spider-silk-c {
     transition: none;
   }
 
   .spider-body,
+  .spider-body > svg,
   .spider-marking,
   .spider-eyes,
   .spider-ring {

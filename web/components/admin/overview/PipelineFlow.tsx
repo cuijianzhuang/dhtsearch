@@ -98,6 +98,19 @@
 // step 60px phones / 84px sm / 80px lg with tightened stacks and
 // chrome — so the overview's KPI row and trend chart stay in the
 // first viewport instead of below the fold.
+//
+// On phones the track folds into two rows — DHT 网络 → 采样发现 →
+// 元数据抓取 across the top, 内容过滤 → 入库 below, starting under
+// the top row's left edge — joined at the wrap by an elbow
+// connector (down out of 元数据抓取， left along the channel, down
+// into 内容过滤） whose dots run the same tier as the segment it
+// replaces. The spider's path folds with it into a Z: right along
+// the top row, down the wrap (head turned down for that leg), then
+// right along the bottom row; waiting at 元数据抓取 it faces down
+// the wrap, waiting anywhere else it faces right, and the wrap
+// back to the start node is the usual fade cycle, never a
+// backwards crawl. From sm up the track is the single row it
+// always was.
 
 import {
   useEffect,
@@ -329,6 +342,16 @@ export default function PipelineFlow({
   const toneOf = (d: number | null): NodeTone =>
     !disabled && d !== null && d > 0 ? "accent" : "faint";
 
+  // Which way the spider's head points on the folded phone track:
+  // down only for the wrap leg — while gliding from 元数据抓取 to
+  // 内容过滤 (the traveling state whose anchor is 3), and while
+  // waiting at 元数据抓取, whose next segment is the drop. Everywhere
+  // else it faces right, the direction of the next segment. From sm
+  // up the track is one row and the spider always faces right (the
+  // down rotation is scoped to below sm in globals.css).
+  const facingDown =
+    (traveling && spider.anchor === 3) || (waiting && spider.anchor === 2);
+
   return (
     <section className="overflow-hidden rounded-xl border border-line bg-surface p-3 shadow-card sm:p-4 lg:py-3">
       <div className="flex min-h-7 flex-wrap items-center justify-between gap-3 lg:min-h-5">
@@ -357,7 +380,7 @@ export default function PipelineFlow({
       >
         <div aria-hidden className="ambience-glow pointer-events-none absolute inset-0 z-0" />
         <MeshBackdrop tier={seg(dSeen)} />
-        <div className="relative z-10 flex flex-col sm:flex-row sm:items-start">
+        <div className="relative z-10 grid grid-cols-[minmax(0,1fr)_2rem_minmax(0,1fr)_2rem_minmax(0,1fr)] sm:flex sm:flex-row sm:items-start">
           <Stage label="DHT 网络" value={nodes} sub={`排队节点 ${formatCount(queuedNodes)}`} dim={disabled} nodeTone={disabled ? "faint" : "accent"} backdropTier={seg(dSeen)} breatheTier={seg(dSeen)} />
           <Segment tier={seg(dSeen)} />
           <Stage label="采样发现" value={cur.seen} delta={dSeen} dim={disabled} nodeTone={toneOf(dSeen)} breatheTier={seg(dSeen)} />
@@ -372,7 +395,7 @@ export default function PipelineFlow({
             nodeTone={fetchStalled ? "warn" : toneOf(dAttempts)}
             breatheTier={seg(dAttempts)}
           />
-          <Segment tier={seg(dFetched)} />
+          <WrapSegment tier={seg(dFetched)} />
           <Stage label="内容过滤" value={cur.filtered} delta={dFiltered} dim={disabled} nodeTone={toneOf(dFetched)} breatheTier={seg(dFetched)} />
           <Segment tier={seg(dStored)} />
           <Stage label="入库" value={cur.stored} delta={dStored} dim={disabled} nodeTone={toneOf(dStored)} breatheTier={seg(dStored)} />
@@ -385,6 +408,7 @@ export default function PipelineFlow({
           moving={traveling && !stale}
           jump={spider.jump}
           stale={stale}
+          facingDown={facingDown}
         />
       </div>
 
@@ -469,10 +493,10 @@ function Stage({
           <AnimatedNumber value={value} />
         </p>
         {/* Both caption lines always render (sub may be empty) so
-            every stage in the row keeps the same height — the mobile
-            spider anchors are fixed steps of that height. A stage
-            with no delta concept (DHT 网络) carries its sub on the
-            first line. */}
+            every stage keeps the same height — the phone track's
+            row pitch and the spider's anchors are fixed steps of
+            that height. A stage with no delta concept (DHT 网络)
+            carries its sub on the first line. */}
         <p
           className={`mt-px h-3 max-w-full truncate text-[10px] leading-3 tabular-nums sm:mt-0.5 sm:h-4 sm:text-[11px] sm:leading-4 lg:mt-0 lg:h-[11px] lg:leading-[11px] ${
             warn ? "font-medium text-warn-ink" : "text-faint"
@@ -591,9 +615,11 @@ function WebBackdrop({ tier }: { tier: Tier }) {
   );
 }
 
-/** A rail with tier-driven dots. Renders both orientations (vertical
- *  on phones, horizontal from sm up); the dots exist only when the
- *  tier says the stage moved during the last poll interval. */
+/** A rail with tier-driven dots between two stages in the same
+ *  row. Renders the phone variant (a short horizontal rail at ring
+ *  height — the phone track's rows run left to right) and the sm+
+ *  variant; the dots exist only when the tier says the stage moved
+ *  during the last poll interval. */
 function Segment({ tier }: { tier: Tier }) {
   const dots = Array.from({ length: tier.dots }, (_, i) => i);
   const style = (i: number) => ({
@@ -604,12 +630,73 @@ function Segment({ tier }: { tier: Tier }) {
     <>
       <div
         aria-hidden
-        className="relative mx-auto h-5 w-6 shrink-0 overflow-hidden sm:hidden"
+        className="relative h-[60px] w-full shrink-0 overflow-hidden sm:hidden"
       >
-        <div className="absolute top-0 bottom-0 left-1/2 w-px -translate-x-1/2 bg-input" />
+        <div className="absolute top-1/2 right-0 left-0 h-px -translate-y-1/2 bg-input" />
         {dots.map((i) => (
-          <span key={i} className="flow-dot flow-dot-y" style={style(i)} />
+          <span key={i} className="flow-dot flow-dot-x" style={style(i)} />
         ))}
+      </div>
+      <div
+        aria-hidden
+        className="relative hidden h-[84px] w-12 shrink-0 overflow-hidden sm:block lg:h-[80px] lg:w-16"
+      >
+        <div className="absolute top-1/2 right-0 left-0 h-px -translate-y-1/2 bg-input" />
+        {dots.map((i) => (
+          <span key={i} className="flow-dot flow-dot-x" style={style(i)} />
+        ))}
+      </div>
+    </>
+  );
+}
+
+/** The segment between 元数据抓取 and 内容过滤. From sm up it is the
+ *  same horizontal rail as every other segment. On phones the
+ *  track folds here, so it renders the wrap instead: a full-width
+ *  elbow that drops out of 元数据抓取 (top row, right column), runs
+ *  left along the channel between the rows, and drops into 内容
+ *  过滤 (bottom row, left column). All three pieces carry the
+ *  segment's tier — dots flow down, then right-to-left along the
+ *  channel (the .flow-dot-x-rev class), then down again. The
+ *  stage-centre offset from each side edge is (track − 64px of
+ *  connector columns) / 6: the centre of the outer grid cells. */
+function WrapSegment({ tier }: { tier: Tier }) {
+  const dots = Array.from({ length: tier.dots }, (_, i) => i);
+  const style = (i: number) => ({
+    animationDuration: `${tier.seconds}s`,
+    animationDelay: `${(-tier.seconds * i) / Math.max(1, tier.dots)}s`,
+  });
+  const edge = "calc((100% - 64px) / 6)";
+  return (
+    <>
+      <div aria-hidden className="relative col-span-5 h-8 sm:hidden">
+        <div
+          className="absolute top-0 h-4 w-6 overflow-hidden"
+          style={{ left: `calc(100% - ${edge})`, transform: "translateX(-50%)" }}
+        >
+          <div className="absolute top-0 bottom-0 left-1/2 w-px -translate-x-1/2 bg-input" />
+          {dots.map((i) => (
+            <span key={i} className="flow-dot flow-dot-y" style={style(i)} />
+          ))}
+        </div>
+        <div
+          className="absolute top-1/2 h-6 -translate-y-1/2 overflow-hidden"
+          style={{ left: edge, right: edge }}
+        >
+          <div className="absolute top-1/2 right-0 left-0 h-px -translate-y-1/2 bg-input" />
+          {dots.map((i) => (
+            <span key={i} className="flow-dot flow-dot-x-rev" style={style(i)} />
+          ))}
+        </div>
+        <div
+          className="absolute bottom-0 h-4 w-6 overflow-hidden"
+          style={{ left: edge, transform: "translateX(-50%)" }}
+        >
+          <div className="absolute top-0 bottom-0 left-1/2 w-px -translate-x-1/2 bg-input" />
+          {dots.map((i) => (
+            <span key={i} className="flow-dot flow-dot-y" style={style(i)} />
+          ))}
+        </div>
       </div>
       <div
         aria-hidden
@@ -690,7 +777,10 @@ function MeshBackdrop({ tier }: { tier: Tier }) {
  *  from the position rule (see the file header); movement is the
  *  .spider-step transform transition in globals.css, stepped by the
  *  parent's state. A stale poll pins the computed transform inline,
- *  freezing the spider mid-glide until fresh data lands. */
+ *  freezing the spider mid-glide until fresh data lands. On the
+ *  folded phone track the parent also passes facingDown for the
+ *  wrap leg (see the facing rule at the call site); the class only
+ *  rotates the spider below sm. */
 function SpiderLayer({
   anchor,
   alarm,
@@ -699,6 +789,7 @@ function SpiderLayer({
   moving,
   jump,
   stale,
+  facingDown,
 }: {
   anchor: number;
   /** Diagnosed fetch stall: the red accents intensify. */
@@ -712,6 +803,8 @@ function SpiderLayer({
   /** This step goes to a lower anchor: no backward glide. */
   jump: boolean;
   stale: boolean;
+  /** Phone track only: head turned down the wrap. */
+  facingDown: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -730,8 +823,13 @@ function SpiderLayer({
   // own, so the layer's transform carries it with the glide. It
   // exists only while the spider travels or waits (never at rest,
   // never before the first ring) and fades with the spider through
-  // the fade cycle, so repositioning never draws it backwards.
+  // the fade cycle, so repositioning never draws it backwards. On
+  // the phone track the wrap leg's thread needs all three spans
+  // (down the channel's right side, left along it, down into the
+  // next ring); their geometry hangs off the step classes in
+  // globals.css, and the two extra spans never render from sm up.
   const silk = !idle && anchor > 0;
+  const silkCls = faded ? "spider-silk-faded" : "";
   return (
     <div
       aria-hidden
@@ -741,12 +839,18 @@ function SpiderLayer({
       } pointer-events-none absolute inset-0 z-20`}
     >
       {silk && (
-        <span className={`spider-silk ${faded ? "spider-silk-faded" : ""}`} />
+        <>
+          <span className={`spider-silk ${silkCls}`} />
+          <span className={`spider-silk-b ${silkCls}`} />
+          <span className={`spider-silk-c ${silkCls}`} />
+        </>
       )}
       <span
         className={`spider-body ${alarm ? "spider-alarm" : ""} ${
           idle ? "spider-idle" : ""
-        } ${faded ? "spider-faded" : ""} ${moving ? "spider-moving" : ""}`}
+        } ${faded ? "spider-faded" : ""} ${moving ? "spider-moving" : ""} ${
+          facingDown ? "spider-facing-down" : ""
+        }`}
       >
         <SpiderSvg />
       </span>
