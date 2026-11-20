@@ -47,6 +47,14 @@ func seedMigrateSource(t *testing.T, s *Store) {
 		"dddddddddddddddddddddddddddddddddddddddd", "spam", "Blocked One", 4000); err != nil {
 		t.Fatalf("seed blocked: %v", err)
 	}
+	// Fetch backoff state: operator state that takes days to
+	// accumulate, so it crosses backends too (see migrate.go).
+	if _, err := s.exec(`INSERT INTO fetch_attempts
+		(info_hash, fails, next_retry_at, last_outcome, updated_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", 3, 1700003600, "timeout", 1700000000); err != nil {
+		t.Fatalf("seed fetch_attempts: %v", err)
+	}
 	// Swarm snapshots, streak columns included: user-visible data
 	// that must cross backends like everything else in the copy set.
 	for _, r := range []SwarmStats{
@@ -107,7 +115,7 @@ func TestMigrateSQLiteToSQLite(t *testing.T) {
 	if rep.From != "sqlite" || rep.To != "sqlite" {
 		t.Fatalf("report dialects: %s -> %s", rep.From, rep.To)
 	}
-	for table, want := range map[string]int64{"torrents": 3, "stats": 2, "blocked": 1, "swarm_stats": 2} {
+	for table, want := range map[string]int64{"torrents": 3, "stats": 2, "blocked": 1, "swarm_stats": 2, "fetch_attempts": 1} {
 		tr := tableReport(t, rep, table)
 		if tr.Source != want || tr.Inserted != want || tr.Skipped != 0 || tr.Dest != want || tr.Missing != 0 {
 			t.Fatalf("%s report = %+v, want source/inserted/dest=%d skipped/missing=0", table, tr, want)
@@ -147,6 +155,14 @@ func TestMigrateSQLiteToSQLite(t *testing.T) {
 	}
 	if stats["seen"] != 42 || stats["fetched"] != 7 {
 		t.Fatalf("migrated stats: %v", stats)
+	}
+	att, found, err := dst.FetchAttemptRow(context.Background(),
+		"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	if err != nil || !found {
+		t.Fatalf("migrated fetch_attempts row: found=%v err=%v", found, err)
+	}
+	if att.Fails != 3 || att.NextRetryAt != 1700003600 || att.LastOutcome != "timeout" || att.UpdatedAt != 1700000000 {
+		t.Fatalf("migrated fetch_attempts row mismatch: %+v", att)
 	}
 	if ok, err := dst.IsBlocked("dddddddddddddddddddddddddddddddddddddddd"); err != nil || !ok {
 		t.Fatalf("blocked row not migrated: %v %v", ok, err)

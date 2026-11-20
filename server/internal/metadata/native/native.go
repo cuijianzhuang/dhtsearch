@@ -187,11 +187,13 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (metadata.Record, b
 	rec := metadata.Record{InfoHash: hexHash}
 	if !validInfohash(hexHash) {
 		f.count(&f.failed)
+		f.report(hexHash, metadata.OutcomeFailed)
 		return rec, false
 	}
 	raw, err := hex.DecodeString(hexHash)
 	if err != nil || len(raw) != 20 {
 		f.count(&f.failed)
+		f.report(hexHash, metadata.OutcomeFailed)
 		return rec, false
 	}
 	var ih [20]byte
@@ -208,16 +210,30 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (metadata.Record, b
 	switch outcome {
 	case outcomeSuccess:
 		f.count(&f.fetched)
+		f.report(hexHash, metadata.OutcomeFetched)
 		return outRec, true
 	case outcomePrescreened:
 		f.count(&f.prescreenDropped)
+		f.report(hexHash, metadata.OutcomePrescreened)
 	case outcomeTimeout:
 		f.count(&f.timedOut)
+		f.report(hexHash, metadata.OutcomeTimedOut)
 	case outcomeFailed:
 		f.count(&f.failed)
+		f.report(hexHash, metadata.OutcomeFailed)
 	case outcomeAborted:
 	}
 	return rec, false
+}
+
+// report delivers a fetch outcome to Config.ResultFunc, when set,
+// mirroring the incumbent fetcher's contract (metadata.FetchOutcome).
+// Aborted attempts (context cancelled) are never reported, so a
+// shutdown does not push live hashes into the failure backoff.
+func (f *Fetcher) report(hash string, outcome metadata.FetchOutcome) {
+	if f.cfg.ResultFunc != nil {
+		f.cfg.ResultFunc(hash, outcome)
+	}
 }
 
 // prescreenWindow resolves the prescreen phase length for one fetch

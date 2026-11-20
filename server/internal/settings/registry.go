@@ -31,14 +31,16 @@ const (
 	KeyFetchMetadata          = "FETCH_METADATA"
 	KeyCrawlerWatchdogEnabled = "CRAWLER_WATCHDOG_ENABLED"
 	// metadata
-	KeyMetaWorkers          = "META_WORKERS"
-	KeyMetaShards           = "META_SHARDS"
-	KeyMetaFetcher          = "META_FETCHER"
-	KeyMetaTimeout          = "META_TIMEOUT"
-	KeyMetaPrescreenEnabled = "META_PRESCREEN_ENABLED"
-	KeyMetaPrescreenTimeout = "META_PRESCREEN_TIMEOUT"
-	KeyMetaPriorityEnabled  = "META_PRIORITY_ENABLED"
-	KeyMinTorrentSize       = "MIN_TORRENT_SIZE"
+	KeyMetaWorkers             = "META_WORKERS"
+	KeyMetaShards              = "META_SHARDS"
+	KeyMetaFetcher             = "META_FETCHER"
+	KeyMetaTimeout             = "META_TIMEOUT"
+	KeyMetaPrescreenEnabled    = "META_PRESCREEN_ENABLED"
+	KeyMetaPrescreenTimeout    = "META_PRESCREEN_TIMEOUT"
+	KeyMetaPriorityEnabled     = "META_PRIORITY_ENABLED"
+	KeyMetaNegCacheEnabled     = "META_NEG_CACHE_ENABLED"
+	KeyMetaNegCacheMaxBackoffH = "META_NEG_CACHE_MAX_BACKOFF_H"
+	KeyMinTorrentSize          = "MIN_TORRENT_SIZE"
 	// scrape
 	KeyScrapeEnabled = "SCRAPE_ENABLED"
 	KeyTrackers      = "TRACKERS"
@@ -206,6 +208,10 @@ var Registry = []Item{
 		Min: f64(1), Max: f64(300), Desc: "早筛窗口，包含在元数据超时之内（不是额外叠加）；窗口内连上 peer 的种子仍享有完整的元数据超时。保存后立即生效"},
 	{Key: KeyMetaPriorityEnabled, Group: "metadata", Label: "抓取优先级队列", Type: TypeBool, Default: "true", Editable: true, Restart: true,
 		Desc: "待抓 infohash 先进优先级队列（做种数 > 来源 > 新鲜度），worker 按优先级取；关 = 回到先进先出直连抓取"},
+	{Key: KeyMetaNegCacheEnabled, Group: "metadata", Label: "抓取失败退避（负缓存）", Type: TypeBool, Default: "true", Editable: true,
+		Desc: "入队前先查：已入库的 infohash 直接跳过、不再重复抓取；抓取失败的按 1 小时起步翻倍的退避期跳过（刚被 tracker 报过做种的、订阅源来的不受退避限制，但已入库的一律跳过）。省下的 worker 槽位留给没试过的哈希。保存后立即生效"},
+	{Key: KeyMetaNegCacheMaxBackoffH, Group: "metadata", Label: "失败退避上限（小时）", Type: TypeInt, Default: "24", Editable: true,
+		Min: f64(1), Max: f64(168), Desc: "连续失败的退避间隔 1h → 2h → 4h → 8h … 翻倍到此上限封顶；抓取成功一次即清零重来。保存后对新记录的失败立即生效"},
 	{Key: KeyMinTorrentSize, Group: "metadata", Label: "最小收录体积（字节）", Type: TypeInt64, Default: "104857600", Editable: true,
 		Min: f64(0), Max: f64(1 << 40), Desc: "小于该体积的种子不收录，保存后对新抓取立即生效"},
 

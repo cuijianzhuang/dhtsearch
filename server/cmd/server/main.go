@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"dhtsearch/server/internal/admission"
 	"dhtsearch/server/internal/api"
 	"dhtsearch/server/internal/crawler"
 	"dhtsearch/server/internal/envfile"
@@ -341,6 +342,8 @@ func main() {
 	reg(settings.KeyMetaPrescreenEnabled, strconv.FormatBool(*metaPrescreen))
 	reg(settings.KeyMetaPrescreenTimeout, metaPrescreenTimeout.String())
 	reg(settings.KeyMetaPriorityEnabled, strconv.FormatBool(*metaPriority))
+	reg(settings.KeyMetaNegCacheEnabled, strconv.FormatBool(envBool("META_NEG_CACHE_ENABLED", true)))
+	reg(settings.KeyMetaNegCacheMaxBackoffH, strconv.Itoa(envInt("META_NEG_CACHE_MAX_BACKOFF_H", 24)))
 	reg(settings.KeyMinTorrentSize, strconv.FormatInt(*minSize, 10))
 	reg(settings.KeyScrapeEnabled, strconv.FormatBool(*scrapeEnabled))
 	reg(settings.KeyTrackers, *trackersCSV)
@@ -491,6 +494,7 @@ func main() {
 	var feedSvc *feeds.Service
 	var feedFetch *metadata.Fetcher
 	var metaQueue *metadata.Queue
+	var admGate *admission.Gate
 	prescreenCfg := func(c *metadata.Config) {
 		c.PrescreenEnabled = mgr.Bool(settings.KeyMetaPrescreenEnabled)
 		c.PrescreenTimeout = mgr.Duration(settings.KeyMetaPrescreenTimeout)
@@ -499,6 +503,20 @@ func main() {
 	}
 	if fetchMeta {
 		var err error
+		// Fetch admission gate (internal/admission): refuses queue
+		// slots to hashes already indexed and to hashes in failure
+		// backoff, and records every fetch outcome back into the
+		// backoff table via the fetchers' ResultFunc. Both settings
+		// are read live, so the settings page toggles it without a
+		// restart. The feeds fetcher records outcomes through the
+		// same gate but is never gated itself: the feeds service
+		// already skips indexed hashes (SetAlias) and feed items
+		// are backoff-exempt by design.
+		admGate = admission.New(st, logger)
+		admGate.EnabledFunc = func() bool { return mgr.Bool(settings.KeyMetaNegCacheEnabled) }
+		admGate.MaxBackoffFunc = func() time.Duration {
+			return time.Duration(mgr.Int(settings.KeyMetaNegCacheMaxBackoffH)) * time.Hour
+		}
 		mainMetaCfg := metadata.Config{
 			Workers:     mgr.Int(settings.KeyMetaWorkers),
 			Shards:      mgr.Int(settings.KeyMetaShards),
@@ -506,6 +524,7 @@ func main() {
 			TimeoutFunc: func() time.Duration { return mgr.Duration(settings.KeyMetaTimeout) },
 			Trackers:    trackerList,
 			Logger:      logger,
+			ResultFunc:  admGate.RecordOutcome,
 		}
 		prescreenCfg(&mainMetaCfg)
 		// The main pipeline's fetch foundation is switchable
@@ -616,6 +635,7 @@ func main() {
 			TimeoutFunc: func() time.Duration { return mgr.Duration(settings.KeyFeedsMetaTimeout) },
 			Trackers:    trackerList,
 			Logger:      logger,
+			ResultFunc:  admGate.RecordOutcome,
 		}
 		prescreenCfg(&feedMetaCfg)
 		feedFetcher, err := metadata.NewFetcher(feedMetaCfg)
@@ -668,13 +688,19 @@ func main() {
 			if scraped != nil {
 				go func() {
 					for it := range scraped {
-						q.Push(metadata.Item{Hash: it.Hash, Seeders: it.Seeders, Source: metadata.SourceScrape, At: time.Now()})
+						item := metadata.Item{Hash: it.Hash, Seeders: it.Seeders, Source: metadata.SourceScrape, At: time.Now()}
+						if admGate.Admit(item) {
+							q.Push(item)
+						}
 					}
 				}()
 			} else {
 				go func() {
 					for h := range feed {
-						q.Push(metadata.Item{Hash: h, Seeders: -1, Source: metadata.SourceDHT, At: time.Now()})
+						item := metadata.Item{Hash: h, Seeders: -1, Source: metadata.SourceDHT, At: time.Now()}
+						if admGate.Admit(item) {
+							q.Push(item)
+						}
 					}
 				}()
 			}
@@ -684,6 +710,10 @@ func main() {
 			go func() {
 				defer close(hashes)
 				for it := range scraped {
+					item := metadata.Item{Hash: it.Hash, Seeders: it.Seeders, Source: metadata.SourceScrape, At: time.Now()}
+					if !admGate.Admit(item) {
+						continue
+					}
 					select {
 					case hashes <- it.Hash:
 					case <-ctx.Done():
@@ -693,7 +723,22 @@ func main() {
 			}()
 			fetcher.Run(ctx, hashes, onRecord)
 		} else {
-			fetcher.Run(ctx, feed, onRecord)
+			hashes := make(chan string)
+			go func() {
+				defer close(hashes)
+				for h := range feed {
+					item := metadata.Item{Hash: h, Seeders: -1, Source: metadata.SourceDHT, At: time.Now()}
+					if !admGate.Admit(item) {
+						continue
+					}
+					select {
+					case hashes <- h:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}()
+			fetcher.Run(ctx, hashes, onRecord)
 		}
 		if feedFetcher != nil {
 			feedFetcher.Run(ctx, feedSvc.Out(), onRecord)
@@ -775,6 +820,7 @@ func main() {
 	go func() {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
+		lastPrune := time.Now()
 		for {
 			select {
 			case <-ctx.Done():
@@ -789,6 +835,23 @@ func main() {
 					st.IncrStatContext(wctx, "meta_failed", failed-prevFailed(&failed))
 					pd := fetcher.PrescreenDropped()
 					st.IncrStatContext(wctx, "prescreen_dropped", pd-prevPrescreen(&pd))
+				}
+				if admGate != nil {
+					skStored, skBackoff := admGate.Skipped()
+					st.IncrStatContext(wctx, "admission_skipped_stored", skStored-prevAdmStored(&skStored))
+					st.IncrStatContext(wctx, "admission_skipped_backoff", skBackoff-prevAdmBackoff(&skBackoff))
+				}
+				// Hourly sweep of the negative cache: rows whose
+				// backoff expired over a week ago belong to hashes
+				// the network stopped re-reporting; left alone they
+				// would grow the table forever. Piggybacked here
+				// rather than on a timer of its own — this loop
+				// already wakes on the stats cadence.
+				if time.Since(lastPrune) >= time.Hour {
+					lastPrune = time.Now()
+					if _, err := st.PruneFetchAttempts(wctx, time.Now().Add(-7*24*time.Hour).Unix()); err != nil {
+						logger.Printf("fetch attempts prune: %v", err)
+					}
 				}
 				wcancel()
 			}
@@ -934,10 +997,12 @@ func main() {
 }
 
 var (
-	lastSeen      int64
-	lastTimedOut  int64
-	lastFailed    int64
-	lastPrescreen int64
+	lastSeen       int64
+	lastTimedOut   int64
+	lastFailed     int64
+	lastPrescreen  int64
+	lastAdmStored  int64
+	lastAdmBackoff int64
 )
 
 // prevSeen returns the previously reported seen count and records the new
@@ -964,6 +1029,20 @@ func prevFailed(cur *int64) int64 {
 func prevPrescreen(cur *int64) int64 {
 	prev := lastPrescreen
 	lastPrescreen = *cur
+	return prev
+}
+
+// prevAdmStored and prevAdmBackoff do the same for the admission
+// gate's refusal counters.
+func prevAdmStored(cur *int64) int64 {
+	prev := lastAdmStored
+	lastAdmStored = *cur
+	return prev
+}
+
+func prevAdmBackoff(cur *int64) int64 {
+	prev := lastAdmBackoff
+	lastAdmBackoff = *cur
 	return prev
 }
 
