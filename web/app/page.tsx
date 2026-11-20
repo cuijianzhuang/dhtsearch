@@ -61,7 +61,7 @@ export default async function Home() {
         </p>
 
         {rows.length > 0 && (
-          <div className="mt-8">
+          <div id="trending" className="mt-8 scroll-mt-6">
             {rows.map((r) => (
               <TrendingRow key={r.label} label={r.label} titles={r.titles} />
             ))}
