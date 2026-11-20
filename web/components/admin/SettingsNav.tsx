@@ -2,10 +2,10 @@ import Link from "next/link";
 import { settingsGroupHref } from "@/lib/settings-groups";
 
 // Sub-navigation for the settings area. Every group is its own page
-// (/admin/settings/<key>); these are the two renderings of the same
-// list — a sticky rail on desktop, a sticky chip bar on mobile —
-// following the shapes the old single-page anchor index used, but
-// with real links instead of in-page anchors.
+// (/admin/settings/<key>); this file carries the desktop rendering —
+// a sticky rail — while the mobile pill row lives in
+// SettingsNavChips.tsx (it needs client-side scroll handling). Both
+// render the same list with real links.
 
 export interface SettingsNavEntry {
   key: string;
@@ -73,36 +73,3 @@ export function SettingsNavRail({
   );
 }
 
-export function SettingsNavChips({
-  groups,
-  active,
-}: {
-  groups: SettingsNavEntry[];
-  active: string;
-}) {
-  return (
-    <nav
-      aria-label="设置分组"
-      className="sticky top-2 z-20 flex gap-2 overflow-x-auto rounded-xl border border-line bg-surface p-2 shadow-card lg:hidden"
-    >
-      <Link
-        href="/admin/settings"
-        className="inline-flex min-h-9 shrink-0 items-center rounded-lg px-3 text-sm whitespace-nowrap text-mute transition-colors hover:text-accent-ink"
-      >
-        总览
-      </Link>
-      {groups.map((g) => (
-        <Link
-          key={g.key}
-          href={settingsGroupHref(g.key)}
-          aria-current={active === g.key ? "page" : undefined}
-          className={`inline-flex min-h-9 shrink-0 items-center rounded-lg px-3 text-sm whitespace-nowrap transition-colors ${entryClass(
-            active === g.key
-          )}`}
-        >
-          {g.label}
-        </Link>
-      ))}
-    </nav>
-  );
-}
