@@ -950,21 +950,85 @@ download_package() {
     (cd "$dest" && sha256sum -c "${name}.tar.gz.sha256") \
         || die "sha256 verification failed for ${name}.tar.gz"
     PKG_TARBALL="${dest}/${name}.tar.gz"
-    # Optional libtorrent sidecar asset — best-effort, unlike the
-    # package itself: a release whose sidecar job failed (or that
-    # predates the sidecar) simply has no asset, and installation
-    # must not care. Only META_FETCHER=libtorrent is unavailable
-    # then, which the server itself reports loudly at startup if
-    # selected. A checksum mismatch, however, discards the download.
+    # Optional libtorrent sidecar asset: downloaded and verified by
+    # fetch_sidecar_asset, which classifies the outcome into
+    # LT_SIDECAR_STATE for the final summary instead of the old
+    # best-effort block that silently continued on every failure —
+    # that silence is how a host ended up with META_FETCHER=libtorrent
+    # selected but no sidecar on disk and a service that would not
+    # start. The install itself never fails over the sidecar.
+    fetch_sidecar_asset "$version" "$arch" "$dest" "$base"
+}
+
+# fetch_sidecar_once <base-url> <asset-name> <dest-dir> — one attempt
+# at downloading the sidecar asset and its .sha256 and verifying it.
+# Returns 0 when the asset is on disk and sha256-verified, 1 when the
+# release simply carries no such asset (HTTP 404 on the asset or on
+# its checksum file — releases that predate the sidecar, or whose
+# sidecar job failed), 2 on any other failure (network error, other
+# HTTP status, checksum mismatch).
+fetch_sidecar_once() {
+    local base="$1" lt_name="$2" dest="$3"
+    local code
+    code="$(curl -sSL -o "${dest}/${lt_name}" -w '%{http_code}' "${base}/${lt_name}" 2>/dev/null)" || return 2
+    [ "$code" = "404" ] && return 1
+    [ "$code" = "200" ] || return 2
+    code="$(curl -sSL -o "${dest}/${lt_name}.sha256" -w '%{http_code}' "${base}/${lt_name}.sha256" 2>/dev/null)" || return 2
+    [ "$code" = "404" ] && return 1
+    [ "$code" = "200" ] || return 2
+    (cd "$dest" && sha256sum -c "${lt_name}.sha256" >/dev/null 2>&1) || return 2
+    return 0
+}
+
+# fetch_sidecar_asset <version> <arch> <dest-dir> <base-url> — get
+# the release's libtorrent sidecar asset into <dest-dir> and record
+# the outcome in LT_SIDECAR_STATE / LT_SIDECAR_SRC. Never dies: the
+# sidecar is an optional component (only META_FETCHER=libtorrent
+# needs it) and its absence must not fail an install or upgrade. A
+# download/checksum failure is retried once, then reported loudly;
+# a 404 is not retried — the asset is simply not in this release.
+fetch_sidecar_asset() {
+    local version="$1" arch="$2" dest="$3" base="$4"
     local lt_name="dhtsearch-lt-sidecar-linux-${arch}"
-    if curl -fsSL -o "${dest}/${lt_name}" "${base}/${lt_name}" \
-        && curl -fsSL -o "${dest}/${lt_name}.sha256" "${base}/${lt_name}.sha256" \
-        && (cd "$dest" && sha256sum -c "${lt_name}.sha256" >/dev/null); then
-        LT_SIDECAR_SRC="${dest}/${lt_name}"
-        log "Downloaded libtorrent sidecar asset ${lt_name} (sha256 OK)"
-    else
+    local attempt rc
+    for attempt in 1 2; do
+        rc=0
+        fetch_sidecar_once "$base" "$lt_name" "$dest" || rc=$?
+        if [ "$rc" = "0" ]; then
+            LT_SIDECAR_SRC="${dest}/${lt_name}"
+            log "Downloaded libtorrent sidecar asset ${lt_name} (sha256 OK)"
+            return 0
+        fi
         rm -f "${dest}/${lt_name}" "${dest}/${lt_name}.sha256"
-        log "No usable libtorrent sidecar asset in release ${version} (optional; META_FETCHER=libtorrent stays unavailable)"
+        if [ "$rc" = "1" ]; then
+            LT_SIDECAR_STATE="absent-in-release"
+            log "Release ${version} carries no libtorrent sidecar asset (optional; META_FETCHER=libtorrent stays unavailable until a release ships one)"
+            return 0
+        fi
+        [ "$attempt" = "1" ] && warn "libtorrent sidecar download failed; retrying once"
+    done
+    LT_SIDECAR_STATE="download-failed"
+    warn "libtorrent sidecar asset could not be downloaded or verified after a retry; continuing without it (META_FETCHER=libtorrent will be unavailable)"
+}
+
+# lt_sidecar_line — the one-line sidecar state shown at the end of
+# every install/upgrade, in `dhtsearch status`, and (via the captured
+# upgrade log) in the panel's update-status message, so a missing
+# sidecar is impossible to miss instead of a silent surprise the day
+# someone selects the libtorrent foundation.
+lt_sidecar_line() {
+    if [ -f "$LT_SIDECAR_FILE" ]; then
+        case "$LT_SIDECAR_STATE" in
+            absent-in-release) printf 'libtorrent 边车：已安装 %s（此前已装；本次发布未附带边车资产，未更新）\n' "$LT_SIDECAR_FILE" ;;
+            download-failed) printf 'libtorrent 边车：已安装 %s（此前已装；本次下载新版失败，未更新）\n' "$LT_SIDECAR_FILE" ;;
+            *) printf 'libtorrent 边车：已安装 %s\n' "$LT_SIDECAR_FILE" ;;
+        esac
+    else
+        case "$LT_SIDECAR_STATE" in
+            absent-in-release) printf 'libtorrent 边车：未安装（该发布未附带边车资产，META_FETCHER=libtorrent 不可用）\n' ;;
+            download-failed) printf 'libtorrent 边车：未安装（边车资产下载失败，META_FETCHER=libtorrent 不可用；重新运行升级可重试）\n' ;;
+            *) printf 'libtorrent 边车：未安装（无边车文件，META_FETCHER=libtorrent 不可用；安装/升级时会自动下载发布资产）\n' ;;
+        esac
     fi
 }
 
@@ -1035,7 +1099,13 @@ install_package_files() {
     fi
     if [ -n "$lt_src" ]; then
         install -m 0755 "$lt_src" "$LT_SIDECAR_FILE"
+        LT_SIDECAR_STATE="installed"
         log "Installed libtorrent sidecar -> $LT_SIDECAR_FILE"
+    elif [ -z "$LT_SIDECAR_STATE" ] && [ -f "$LT_SIDECAR_FILE" ]; then
+        # Nothing new obtained and nothing recorded by the download
+        # step (e.g. a --file package without a bundled copy): the
+        # sidecar already on disk is what the summary reports.
+        LT_SIDECAR_STATE="already-present"
     fi
     rm -rf "$WEB_DIR"
     mkdir -p "$APP_DIR"
@@ -1189,6 +1259,15 @@ PKG_TARBALL=""
 # Set by download_package when the release carries the optional
 # libtorrent sidecar asset (verified against its .sha256).
 LT_SIDECAR_SRC=""
+# Outcome of the latest libtorrent sidecar acquisition, rendered by
+# lt_sidecar_line in the install/upgrade summary, in status output
+# and in the panel's update-status message:
+#   installed          a sidecar copy was installed by this run
+#   already-present    nothing new obtained, but a copy was on disk
+#   absent-in-release  the release carries no sidecar asset (404)
+#   download-failed    the asset exists but download/checksum failed
+#   ""                 not attempted (--file / --from-source package)
+LT_SIDECAR_STATE=""
 RESOLVED_VERSION=""
 obtain_package() {
     local arch="$1" workdir="$2"
@@ -1606,7 +1685,7 @@ do_upgrade_request() {
         return 0
     fi
 
-    local from to started finished rc=0 logf tail_msg last_progress last_phase
+    local from to started finished rc=0 logf tail_msg last_progress last_phase lt_note
     from="$(installed_version)"
     started="$(date '+%Y-%m-%d %H:%M:%S')"
     logf="$(mktemp)"
@@ -1635,8 +1714,13 @@ do_upgrade_request() {
                 "已是最新版本 $to，无需升级"
             log "upgrade-request: already up to date ($to); nothing to do"
         else
+            # Carry the sidecar outcome into the panel-visible
+            # message: do_upgrade ran in a subshell, so its
+            # LT_SIDECAR_STATE is gone here, but its summary line
+            # (lt_sidecar_line) is in the captured log.
+            lt_note="$(grep '^==> libtorrent 边车' "$logf" | tail -1 | sed 's/^==> //' || true)"
             write_update_status "succeeded" "$rid" "$rat" "$started" "$finished" "$from" "$to" \
-                "upgraded $from -> $to" "100" "完成"
+                "upgraded $from -> $to${lt_note:+; $lt_note}" "100" "完成"
             log "upgrade-request: succeeded ($from -> $to)"
         fi
     else
@@ -1709,6 +1793,10 @@ do_install() {
         log "  (it is also stored in $ENV_FILE, readable by root only)"
     fi
     log "Config: $ENV_FILE   Data: $DATA_DIR   Logs: journalctl -u $API_UNIT -f"
+    log "$(lt_sidecar_line)"
+    if [ "$LT_SIDECAR_STATE" = "download-failed" ]; then
+        warn "libtorrent 边车本次未能就位（下载失败）：不影响本次安装与其余底座；网络恢复后重新运行升级会自动重试下载"
+    fi
     log "Manage: run 'dhtsearch' for the interactive menu"
 }
 
@@ -1838,6 +1926,10 @@ do_upgrade() {
         au_apply
         request_apply
         log "Upgraded: $old_version -> $RESOLVED_VERSION"
+        log "$(lt_sidecar_line)"
+        if [ "$LT_SIDECAR_STATE" = "download-failed" ]; then
+            warn "libtorrent 边车本次未能就位（下载失败）：不影响本次升级与其余底座；网络恢复后重新运行升级会自动重试下载"
+        fi
         rotate_backups "$ts"
         return 0
     fi
@@ -1889,6 +1981,7 @@ do_status() {
     echo "Config:  $ENV_FILE"
     echo "Data:    $DATA_DIR"
     echo "Database: $(db_display)"
+    lt_sidecar_line
     echo "Ports:   API $(resolve_api_port)   Web $(resolve_web_port)"
     echo "Autostart: $(autostart_state)"
     echo "AutoUpdate: $(au_status_line)"
