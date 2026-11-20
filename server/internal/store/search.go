@@ -9,7 +9,7 @@ import (
 
 // Sort orders accepted by SearchEx.
 const (
-	SortRelevance = "relevance" // the historical order: newest first
+	SortRelevance = "relevance" // weighted match-quality score (see ranking.go)
 	SortNewest    = "newest"
 	SortSize      = "size"
 )
@@ -66,15 +66,25 @@ func (s *Store) SearchEx(ctx context.Context, p SearchParams) (items []Torrent, 
 		}
 	}
 	total = len(filtered)
-	if p.Sort == SortSize {
+	switch p.Sort {
+	case SortSize:
 		sort.SliceStable(filtered, func(i, j int) bool {
 			if filtered[i].TotalSize != filtered[j].TotalSize {
 				return filtered[i].TotalSize > filtered[j].TotalSize
 			}
 			return filtered[i].CreatedAt > filtered[j].CreatedAt
 		})
+	case SortNewest:
+		// Keep the SQL order (created_at DESC).
+	default: // SortRelevance (and the "" default)
+		// Score the category-filtered hits in memory (see
+		// ranking.go for the signals and why this is not SQL).
+		// An empty query has nothing to score and keeps the SQL
+		// order, so browsing stays newest-first.
+		if terms := queryTerms(p.Query); len(terms) > 0 {
+			sortByRelevance(filtered, terms)
+		}
 	}
-	// relevance/newest keep the SQL order (created_at DESC).
 	start := (p.Page - 1) * p.PageSize
 	if start >= total {
 		return []Torrent{}, total, counts, nil
