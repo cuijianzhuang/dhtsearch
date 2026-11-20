@@ -419,11 +419,22 @@ export function fetchAdminTrends(
 
 export function fetchAdminTorrents(
   token: string,
-  opts: { q?: string; status?: string; page?: number; pageSize?: number }
+  opts: {
+    q?: string;
+    status?: string;
+    sort?: string;
+    category?: string;
+    size?: string;
+    page?: number;
+    pageSize?: number;
+  }
 ): Promise<AdminListResponse> {
   const params = new URLSearchParams({
     q: opts.q ?? "",
     status: opts.status ?? "",
+    sort: opts.sort ?? "",
+    category: opts.category ?? "",
+    size: opts.size ?? "",
     page: String(opts.page ?? 1),
     page_size: String(opts.pageSize ?? 20),
   });

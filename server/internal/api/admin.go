@@ -396,10 +396,27 @@ func (s *Server) handleAdminList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := truncateUTF8(r.URL.Query().Get("q"), maxQueryLen)
+	// Sort and the category/size filters degrade to their defaults on
+	// unrecognized values instead of failing the request: the toolbar
+	// only ever sends valid ones, and a stale bookmark must not 400
+	// the operator's list. (status stays strict — it always has.)
+	sortOrder := store.NormalizeAdminSort(r.URL.Query().Get("sort"))
+	category := r.URL.Query().Get("category")
+	if !store.ValidCategory(category) {
+		category = ""
+	}
+	size := r.URL.Query().Get("size")
+	if !store.ValidAdminSize(size) {
+		size = store.AdminSizeAll
+	}
 	page, pageSize := adminPage(r)
 	ctx, cancel := s.adminCtx(r)
 	defer cancel()
-	items, total, err := s.st.AdminList(ctx, q, status, page, pageSize)
+	items, total, err := s.st.AdminListEx(ctx, store.AdminListParams{
+		Query: q, Status: status, Sort: sortOrder,
+		Category: category, Size: size,
+		Page: page, PageSize: pageSize,
+	})
 	if err != nil {
 		s.logger.Printf("api: admin list: %v", err)
 		writeError(w, http.StatusInternalServerError, "list failed")
