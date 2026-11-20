@@ -122,10 +122,17 @@ export default async function SearchPage({ searchParams }: PageProps) {
     // App shell: data-search-shell caps the document at 100dvh (see
     // globals.css), so the header, notice, controls and category
     // chips below stay pinned and only the results region scrolls.
-    // pt-6 only — the region carries the bottom padding.
+    // pt-6 only — the region carries the bottom padding. The column
+    // is max-w-3xl up to xl, then widens to 1120px: on a large
+    // monitor the 768px measure left the whole shell pinched in the
+    // middle with dead space on both sides, while result cards (long
+    // release names, right-anchored copy button) use the extra width
+    // without any layout change. Everything in the shell — header,
+    // notice, controls, chips, scroll region, footer line — shares
+    // this one measure, so the single class widens them together.
     <main
       data-search-shell
-      className="mx-auto flex w-full max-w-3xl min-h-0 flex-1 flex-col px-4 pt-6"
+      className="mx-auto flex w-full max-w-3xl min-h-0 flex-1 flex-col px-4 pt-6 xl:max-w-[1120px]"
     >
       {/* Header: logo + search box + appearance switcher. On phones
           the three no longer share one row: logo + switcher keep the
