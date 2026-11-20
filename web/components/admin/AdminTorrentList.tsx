@@ -87,18 +87,35 @@ export default function AdminTorrentList({
 
   return (
     <div>
-      {/* Desktop table */}
+      {/* Desktop table. From xl up the layout is fixed with explicit
+          column widths: the data columns are sized to their content
+          and the actions column absorbs the slack with its buttons
+          right-anchored, so on wide monitors the name column can no
+          longer hoard the extra width and leave a void before 大小.
+          At 2xl the name column itself is capped (33rem — roomier
+          than the old 105-wide content cap) and every remaining pixel
+          goes to the actions column. Below xl the auto layout stays:
+          it already composes fine at those widths. */}
       <div className="hidden overflow-x-auto rounded-xl border border-line bg-surface shadow-card md:block">
-        <table className="w-full text-left text-sm">
+        <table className="w-full text-left text-sm xl:table-fixed">
+          <colgroup>
+            {selectable && <col className="xl:w-12" />}
+            <col className="2xl:w-[33rem]" />
+            <col className="xl:w-28" />
+            <col className="xl:w-20" />
+            <col className="xl:w-32" />
+            <col className="xl:w-24" />
+            <col />
+          </colgroup>
           <thead>
             <tr className="border-b border-line text-xs text-mute">
               {selectable && <th className="px-3 py-3 font-medium">选择</th>}
               <th className="px-3 py-3 font-medium">名称</th>
-              <th className="px-3 py-3 font-medium whitespace-nowrap">大小</th>
-              <th className="px-3 py-3 font-medium whitespace-nowrap">文件</th>
+              <th className="px-3 py-3 font-medium whitespace-nowrap text-right">大小</th>
+              <th className="px-3 py-3 font-medium whitespace-nowrap text-right">文件</th>
               <th className="px-3 py-3 font-medium whitespace-nowrap">收录</th>
               <th className="px-3 py-3 font-medium whitespace-nowrap">状态</th>
-              <th className="px-3 py-3 font-medium whitespace-nowrap">操作</th>
+              <th className="px-3 py-3 font-medium whitespace-nowrap text-right">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -117,7 +134,7 @@ export default function AdminTorrentList({
                     </label>
                   </td>
                 )}
-                <td className="max-w-105 px-3 py-3">
+                <td className="max-w-105 px-3 py-3 2xl:max-w-none">
                   {/* Clamp the name to two lines: release names run to
                       200+ characters and an unclamped wrap made single
                       rows 4-6 lines tall, wrecking the table's scan
@@ -140,10 +157,10 @@ export default function AdminTorrentList({
                     {t.info_hash}
                   </p>
                 </td>
-                <td className="px-3 py-3 font-medium whitespace-nowrap tabular-nums text-ink-2">
+                <td className="px-3 py-3 font-medium whitespace-nowrap tabular-nums text-right text-ink-2">
                   {formatSize(t.total_size)}
                 </td>
-                <td className="px-3 py-3 whitespace-nowrap tabular-nums text-mute">
+                <td className="px-3 py-3 whitespace-nowrap tabular-nums text-right text-mute">
                   {formatCount(t.file_count)}
                 </td>
                 <td className="px-3 py-3 whitespace-nowrap text-mute">
@@ -153,7 +170,13 @@ export default function AdminTorrentList({
                   <ReviewBadge reviewed={t.reviewed_at > 0} />
                 </td>
                 <td className="px-3 py-3">
-                  <TorrentActions hash={t.info_hash} name={t.name || t.info_hash} reviewed={t.reviewed_at > 0} />
+                  {/* Right-anchored: in the fixed layout this column
+                      absorbs the wide-screen slack, and the buttons
+                      belong at the table's right edge, not floating
+                      wherever the slack begins. */}
+                  <div className="flex justify-end">
+                    <TorrentActions hash={t.info_hash} name={t.name || t.info_hash} reviewed={t.reviewed_at > 0} />
+                  </div>
                 </td>
               </tr>
             ))}

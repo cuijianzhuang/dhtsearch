@@ -89,7 +89,11 @@ export default async function AdminTorrentBrowser({
         >
           筛选
         </button>
-        <span className="text-sm text-mute">
+        {/* The total anchors the row's right edge (ml-auto), so the
+            toolbar reads controls-left / count-right instead of
+            everything clustering at the left on wide screens. On
+            mobile it wraps onto the select/button row, still right. */}
+        <span className="ml-auto text-sm text-mute">
           共 {formatCount(data.total)} 条
         </span>
       </form>
