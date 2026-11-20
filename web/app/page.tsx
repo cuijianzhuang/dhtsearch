@@ -52,18 +52,24 @@ export default async function Home() {
       <div className="absolute right-4 top-4">
         <AppearanceSwitcher defaultAppearance={site.themeAppearance} />
       </div>
-      <div className="w-full max-w-2xl">
-        <h1 className="text-center text-4xl font-bold tracking-tight sm:text-5xl">
+      {/* The measure widens at xl: at 672px the block was a pinched
+          island on wide monitors (rails faded mid-title despite the
+          empty screen around them). 54rem gives the search box and
+          rails room to breathe; below xl the geometry is exactly
+          what the one-viewport layout was tuned with. The hero type
+          steps up with it (the logo is em-sized, so it follows). */}
+      <div className="w-full max-w-2xl xl:max-w-[54rem]">
+        <h1 className="text-center text-4xl font-bold tracking-tight sm:text-5xl xl:text-6xl">
           <SiteLogo name={site.name} />
         </h1>
-        <p className="mt-3 text-center text-sm text-mute sm:text-base">
+        <p className="mt-3 text-center text-sm text-mute sm:text-base xl:text-lg">
           无广告的磁力链接搜索引擎
           <br className="sm:hidden" />
           <span className="hidden sm:inline"> · </span>
           基于 DHT 网络实时收录，索引持续更新
         </p>
 
-        <div className="mt-8">
+        <div className="mt-8 xl:mt-10">
           <SearchBox large />
         </div>
 
@@ -93,7 +99,7 @@ export default async function Home() {
         </p>
 
         {rows.length > 0 && (
-          <div id="trending" className="mt-6 scroll-mt-6">
+          <div id="trending" className="mt-6 scroll-mt-6 xl:mt-8">
             {rows.map((r) => (
               <TrendingRow key={r.label} label={r.label} titles={r.titles} />
             ))}
