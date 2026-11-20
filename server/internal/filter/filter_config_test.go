@@ -67,7 +67,7 @@ func TestFilterSpamSwitchOffOnlySparesSpam(t *testing.T) {
 		t.Fatalf("spam off: stuffed name flagged: %+v", r)
 	}
 	// Block words ride the spam switch too.
-	if r := Check("Ubuntu 24.04 LTS ISO", nil, bigSize); r.Spam {
+	if r := Check("Ubuntu 24.04 LTS ISO", nil, bigSize); r.Blocked || r.Rejected() {
 		t.Fatalf("spam off: block word still flagged: %+v", r)
 	}
 	if r := Check(adultName, nil, bigSize); !r.Adult {
@@ -165,7 +165,7 @@ func TestFilterAllowWordsExemptAdultOnly(t *testing.T) {
 	SetBlockWords([]string{"ubuntu"})
 	t.Cleanup(func() { SetBlockWords(nil) })
 	SetAllowWords([]string{"ubuntu"})
-	if r := Check("Ubuntu 24.04 LTS ISO", nil, bigSize); !r.Spam {
+	if r := Check("Ubuntu 24.04 LTS ISO", nil, bigSize); !r.Blocked {
 		t.Fatalf("allow word neutralised a block word: %+v", r)
 	}
 }

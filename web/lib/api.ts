@@ -131,6 +131,7 @@ export interface StatsResponse {
   fetched?: number;
   adult_filtered?: number;
   spam_filtered?: number;
+  blocked_filtered?: number;
   crawler_running?: boolean;
 }
 

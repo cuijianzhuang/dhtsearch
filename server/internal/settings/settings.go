@@ -286,6 +286,11 @@ type GroupState struct {
 	Key   string      `json:"key"`
 	Label string      `json:"label"`
 	Items []ItemState `json:"items"`
+	// Presets are one-click value bundles for this group's form
+	// (currently only the filter group has them). The settings page
+	// fills its fields from a preset without saving; the values are
+	// canonical strings, exactly what an Update would accept.
+	Presets []Preset `json:"presets,omitempty"`
 }
 
 // Snapshot returns the full configuration, grouped, with sensitive
@@ -296,6 +301,9 @@ func (m *Manager) Snapshot() []GroupState {
 	out := make([]GroupState, 0, len(Groups))
 	for _, g := range Groups {
 		gs := GroupState{Key: g.Key, Label: g.Label}
+		if g.Key == "filter" {
+			gs.Presets = FilterPresets
+		}
 		for _, it := range Registry {
 			if it.Group != g.Key {
 				continue
@@ -657,6 +665,16 @@ func validateStringKey(key, v string) error {
 
 func validateListEntry(key, e string) error {
 	switch key {
+	case KeyFilterBlockDomains:
+		// The filter normalises pasted URLs down to a bare host, but
+		// the stored entry should already look like a domain: no
+		// whitespace, and at least one dot.
+		if strings.ContainsAny(e, " \t") {
+			return fmt.Errorf("domain %q must not contain whitespace", e)
+		}
+		if !strings.Contains(e, ".") {
+			return fmt.Errorf("domain %q must be a bare domain like example.com", e)
+		}
 	case KeyTrackers:
 		if !strings.Contains(e, "://") {
 			return fmt.Errorf("tracker %q is not an announce URL", e)

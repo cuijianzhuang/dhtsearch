@@ -480,6 +480,8 @@ func main() {
 	reg(settings.KeyFilterNonAlnumMaxRatio, strconv.FormatFloat(envFloat("FILTER_NON_ALNUM_MAX_RATIO", 0.5), 'f', -1, 64))
 	reg(settings.KeyFilterRandomFileMaxRatio, strconv.FormatFloat(envFloat("FILTER_RANDOM_FILE_MAX_RATIO", 0.3), 'f', -1, 64))
 	reg(settings.KeyFilterBlockWords, envDefault("FILTER_BLOCK_WORDS", ""))
+	reg(settings.KeyFilterAdultWords, envDefault("FILTER_ADULT_WORDS", ""))
+	reg(settings.KeyFilterBlockDomains, envDefault("FILTER_BLOCK_DOMAINS", ""))
 	reg(settings.KeyFilterAllowWords, envDefault("FILTER_ALLOW_WORDS", ""))
 	reg(settings.KeyTrendingEnabled, strconv.FormatBool(*trendEnabled))
 	reg(settings.KeyTrendingInterval, trendInterval.String())
@@ -522,6 +524,8 @@ func main() {
 	applyFilter := func() {
 		filter.SetMinTotalSize(mgr.Int64(settings.KeyMinTorrentSize))
 		filter.SetBlockWords(mgr.List(settings.KeyFilterBlockWords))
+		filter.SetAdultWords(mgr.List(settings.KeyFilterAdultWords))
+		filter.SetBlockDomains(mgr.List(settings.KeyFilterBlockDomains))
 		filter.SetAllowWords(mgr.List(settings.KeyFilterAllowWords))
 		filter.SetConfig(filter.Config{
 			Enabled:            mgr.Bool(settings.KeyFilterEnabled),
@@ -763,6 +767,10 @@ func main() {
 			res := filter.Check(rec.Name, rec.Files, rec.TotalSize)
 			if res.Adult {
 				st.IncrStatContext(wctx, "adult_filtered", 1)
+				return
+			}
+			if res.Blocked {
+				st.IncrStatContext(wctx, "blocked_filtered", 1)
 				return
 			}
 			if res.Spam {
