@@ -1,6 +1,6 @@
 "use client";
 
-// Admin chrome layout: content column + RIGHT sidebar.
+// Admin chrome layout: LEFT sidebar + content column.
 //
 // Desktop (lg+): the sidebar is sticky and can be collapsed to an
 // icon rail. The collapsed choice persists in localStorage; a boot
@@ -10,7 +10,7 @@
 // no flash and no hydration state to mismatch. The toggle therefore
 // needs no React state — it flips the attribute and the store.
 //
-// Mobile (<lg): the same sidebar becomes a right-side drawer —
+// Mobile (<lg): the same sidebar becomes a left-side drawer —
 // fixed, translated off-canvas until the top bar's menu button opens
 // it, with a backdrop, Escape-to-close, body scroll lock, and
 // close-on-navigation. The collapsed attribute never applies here,
@@ -121,29 +121,10 @@ export default function AdminShellClient({
       </div>
 
       <div className="flex flex-1 flex-row items-stretch">
-        {/* Content column. min-w-0 so wide inner content (tables,
-            truncating names) can never push the sidebar off or widen
-            the page. */}
-        <div className="flex min-w-0 flex-1 flex-col px-4 py-6 sm:px-6">
-          {children}
-          <footer className="mt-auto pt-10 text-center text-xs text-faint">
-            {siteName} 管理端 · 数据来自后端 /api/admin
-          </footer>
-        </div>
-
-        {drawerOpen && (
-          <button
-            type="button"
-            aria-label="关闭导航"
-            onClick={() => setDrawerOpen(false)}
-            className="fixed inset-0 z-30 bg-black/40 lg:hidden"
-          />
-        )}
-
         <aside
           aria-label="管理端导航"
-          className={`admin-sidebar fixed inset-y-0 right-0 z-40 flex w-72 max-w-[85vw] flex-col border-l border-line bg-surface transition-transform duration-200 ${
-            drawerOpen ? "translate-x-0" : "translate-x-full max-lg:invisible"
+          className={`admin-sidebar fixed inset-y-0 left-0 z-40 flex w-72 max-w-[85vw] flex-col border-r border-line bg-surface transition-transform duration-200 ${
+            drawerOpen ? "translate-x-0" : "-translate-x-full max-lg:invisible"
           } lg:sticky lg:top-0 lg:z-auto lg:h-dvh lg:max-w-none lg:translate-x-0 lg:transition-[width]`}
         >
           <div className="flex items-center gap-2 px-3 pt-3 pb-1">
@@ -166,7 +147,7 @@ export default function AdminShellClient({
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5" aria-hidden>
                 <rect x="3" y="3" width="18" height="18" rx="2" />
-                <path d="M15 3v18" />
+                <path d="M9 3v18" />
               </svg>
             </button>
             <button
@@ -223,6 +204,24 @@ export default function AdminShellClient({
             </div>
           </div>
         </aside>
+        {/* Content column. min-w-0 so wide inner content (tables,
+            truncating names) can never push the sidebar off or widen
+            the page. */}
+        <div className="flex min-w-0 flex-1 flex-col px-4 py-6 sm:px-6">
+          {children}
+          <footer className="mt-auto pt-10 text-center text-xs text-faint">
+            {siteName} 管理端 · 数据来自后端 /api/admin
+          </footer>
+        </div>
+
+        {drawerOpen && (
+          <button
+            type="button"
+            aria-label="关闭导航"
+            onClick={() => setDrawerOpen(false)}
+            className="fixed inset-0 z-30 bg-black/40 lg:hidden"
+          />
+        )}
       </div>
     </div>
   );
