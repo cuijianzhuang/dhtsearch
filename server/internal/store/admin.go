@@ -120,25 +120,48 @@ func scanAdminList(rows *sql.Rows) (items []AdminTorrent, err error) {
 // AdminGet returns one torrent with its file list, or (nil, nil) when the
 // hash is not indexed.
 func (s *Store) AdminGet(ctx context.Context, infoHash string) (*AdminTorrent, error) {
+	return s.adminGet(ctx, infoHash, true)
+}
+
+// AdminGetMeta is AdminGet without the file list: the detail endpoint
+// serves metadata only and pages the files through FilesPage, so a
+// torrent with thousands of files no longer pays a full decompress
+// (or ships a ~300 KB response) just to render its header.
+func (s *Store) AdminGetMeta(ctx context.Context, infoHash string) (*AdminTorrent, error) {
+	return s.adminGet(ctx, infoHash, false)
+}
+
+func (s *Store) adminGet(ctx context.Context, infoHash string, withFiles bool) (*AdminTorrent, error) {
+	cols := `info_hash, name, ` + s.d.displayNameExpr() + `, clean_name, alias, total_size, file_count, created_at, reviewed_at`
+	if withFiles {
+		cols = `info_hash, name, ` + s.d.displayNameExpr() + `, clean_name, alias, total_size, file_count, files, created_at, reviewed_at`
+	}
 	row := s.queryRowContext(ctx,
-		`SELECT info_hash, name, `+s.d.displayNameExpr()+`, clean_name, alias, total_size, file_count, files, created_at, reviewed_at FROM torrents WHERE info_hash = ?`,
-		infoHash)
+		`SELECT `+cols+` FROM torrents WHERE info_hash = ?`, infoHash)
 	var t AdminTorrent
 	var fb []byte
-	err := row.Scan(&t.InfoHash, &t.RawName, &t.Name, &t.CleanName, &t.Alias,
-		&t.TotalSize, &t.FileCount, &fb, &t.CreatedAt, &t.ReviewedAt)
+	var err error
+	if withFiles {
+		err = row.Scan(&t.InfoHash, &t.RawName, &t.Name, &t.CleanName, &t.Alias,
+			&t.TotalSize, &t.FileCount, &fb, &t.CreatedAt, &t.ReviewedAt)
+	} else {
+		err = row.Scan(&t.InfoHash, &t.RawName, &t.Name, &t.CleanName, &t.Alias,
+			&t.TotalSize, &t.FileCount, &t.CreatedAt, &t.ReviewedAt)
+	}
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	fj, err := decompressFiles(fb)
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(fj, &t.Files); err != nil {
-		return nil, err
+	if withFiles {
+		fj, err := decompressFiles(fb)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(fj, &t.Files); err != nil {
+			return nil, err
+		}
 	}
 	return &t, nil
 }

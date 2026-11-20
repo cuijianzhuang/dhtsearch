@@ -43,6 +43,7 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/torrents", s.handleAdminList)
 	mux.HandleFunc("POST /api/admin/torrents/batch", s.handleAdminBatch)
 	mux.HandleFunc("GET /api/admin/torrents/{hash}", s.handleAdminDetail)
+	mux.HandleFunc("GET /api/admin/torrents/{hash}/files", s.handleAdminTorrentFiles)
 	mux.HandleFunc("POST /api/admin/torrents/{hash}/block", s.handleAdminBlock)
 	mux.HandleFunc("POST /api/admin/torrents/{hash}/approve", s.handleAdminApprove)
 	mux.HandleFunc("DELETE /api/admin/torrents/{hash}", s.handleAdminDelete)
@@ -393,7 +394,10 @@ func (s *Server) handleAdminDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := s.adminCtx(r)
 	defer cancel()
-	t, err := s.st.AdminGet(ctx, r.PathValue("hash"))
+	// Metadata only: the file list is paged separately through
+	// GET /api/admin/torrents/{hash}/files. (This response used to
+	// embed every stored file — ~300 KB for a 5000-file torrent.)
+	t, err := s.st.AdminGetMeta(ctx, r.PathValue("hash"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "detail failed")
 		return
@@ -410,7 +414,6 @@ func (s *Server) handleAdminDetail(w http.ResponseWriter, r *http.Request) {
 		"alias":       t.Alias,
 		"total_size":  t.TotalSize,
 		"file_count":  t.FileCount,
-		"files":       t.Files,
 		"created_at":  t.CreatedAt,
 		"reviewed_at": t.ReviewedAt,
 		"magnet":      magnetURI(t.InfoHash, t.Name, s.trackers()),

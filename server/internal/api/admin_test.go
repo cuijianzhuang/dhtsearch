@@ -143,10 +143,19 @@ func TestAdminListAndReviewFlow(t *testing.T) {
 	if m["total"].(float64) != 1 {
 		t.Fatalf("keyword list: %v", m)
 	}
-	// Detail carries the file list.
+	// Detail carries metadata only; the file list is paged separately
+	// through the files endpoint (see files_test.go for the full
+	// paging contract).
 	code, m = adminReq(t, "GET", base+"/api/admin/torrents/"+hashA, testAdminToken, nil)
-	if code != 200 || len(m["files"].([]any)) != 1 {
+	if code != 200 {
 		t.Fatalf("detail: %d %v", code, m)
+	}
+	if _, ok := m["files"]; ok {
+		t.Fatalf("detail still embeds the file list: %v", m)
+	}
+	code, m = adminReq(t, "GET", base+"/api/admin/torrents/"+hashA+"/files", testAdminToken, nil)
+	if code != 200 || len(m["files"].([]any)) != 1 {
+		t.Fatalf("detail files: %d %v", code, m)
 	}
 	if code, _ := adminReq(t, "GET", base+"/api/admin/torrents/"+strings.Repeat("z", 40), testAdminToken, nil); code != http.StatusNotFound {
 		t.Fatalf("missing detail: %d", code)

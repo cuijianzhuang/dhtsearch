@@ -252,6 +252,7 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 	mux.HandleFunc("GET /api/healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/site", s.handleSite)
 	mux.HandleFunc("GET /api/torrents/{hash}/similar", s.handleSimilar)
+	mux.HandleFunc("GET /api/torrents/{hash}/files", s.handleTorrentFiles)
 	mux.HandleFunc("GET /rss", s.handleRSS)
 	mux.HandleFunc("POST /api/report", s.handleReport)
 	s.registerAdminRoutes(mux)
@@ -363,13 +364,21 @@ type resultItem struct {
 }
 
 func (s *Server) toResultItem(t store.Torrent, trackers []string) resultItem {
+	// Embed only the first files page as a preview: the full stored
+	// list of a huge torrent once inflated a one-result search
+	// response to ~300 KB. The card pages the rest in through
+	// GET /api/torrents/{hash}/files; file_count keeps the true total.
+	files := t.Files
+	if len(files) > maxEmbeddedFiles {
+		files = files[:maxEmbeddedFiles]
+	}
 	return resultItem{
 		InfoHash:  t.InfoHash,
 		Name:      t.Name,
 		Alias:     t.Alias,
 		TotalSize: t.TotalSize,
 		FileCount: t.FileCount,
-		Files:     t.Files,
+		Files:     files,
 		Magnet:    magnetURI(t.InfoHash, t.Name, trackers),
 		CreatedAt: t.CreatedAt,
 		Category:  t.Category,
