@@ -400,6 +400,21 @@ type resultItem struct {
 	Magnet    string `json:"magnet"`
 	CreatedAt int64  `json:"created_at"`
 	Category  string `json:"category"`
+	// Swarm snapshot (tracker scrape): pointers so "no tracker has
+	// ever reported on this hash" marshals as null while a scraped
+	// true zero marshals as 0 — unknown and zero must stay
+	// distinguishable. Health is the derived label (see
+	// store.SwarmHealth); it is "unknown" exactly when the counters
+	// are null. ZeroSince/ZeroCount expose the evidence behind a
+	// likely_dead label so clients can phrase it ("5th consecutive
+	// zero scrape, going on 3 days").
+	Seeders   *int64 `json:"seeders"`
+	Leechers  *int64 `json:"leechers"`
+	Completed *int64 `json:"completed"`
+	ScrapedAt *int64 `json:"scraped_at"`
+	ZeroSince *int64 `json:"zero_since"`
+	ZeroCount *int64 `json:"zero_count"`
+	Health    string `json:"health"`
 }
 
 func (s *Server) toResultItem(t store.Torrent, trackers []string) resultItem {
@@ -411,7 +426,7 @@ func (s *Server) toResultItem(t store.Torrent, trackers []string) resultItem {
 	if len(files) > maxEmbeddedFiles {
 		files = files[:maxEmbeddedFiles]
 	}
-	return resultItem{
+	item := resultItem{
 		InfoHash:  t.InfoHash,
 		Name:      t.Name,
 		Alias:     t.Alias,
@@ -421,7 +436,17 @@ func (s *Server) toResultItem(t store.Torrent, trackers []string) resultItem {
 		Magnet:    magnetURI(t.InfoHash, t.Name, trackers),
 		CreatedAt: t.CreatedAt,
 		Category:  t.Category,
+		Health:    store.SwarmHealth(t.Swarm),
 	}
+	if sw := t.Swarm; sw != nil {
+		item.Seeders = &sw.Seeders
+		item.Leechers = &sw.Leechers
+		item.Completed = &sw.Completed
+		item.ScrapedAt = &sw.ScrapedAt
+		item.ZeroSince = &sw.ZeroSince
+		item.ZeroCount = &sw.ZeroCount
+	}
+	return item
 }
 
 // trackers returns the announce URLs magnets are stamped with (nil
@@ -489,10 +514,19 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	switch sortOrder {
 	case "", store.SortRelevance:
 		sortOrder = store.SortRelevance
-	case store.SortNewest, store.SortSize:
+	case store.SortNewest, store.SortSize, store.SortSeeders:
 		// ok
 	default:
 		writeError(w, http.StatusBadRequest, "invalid sort")
+		return
+	}
+	hideDead := false
+	switch r.URL.Query().Get("hide_dead") {
+	case "", "0", "false":
+	case "1", "true":
+		hideDead = true
+	default:
+		writeError(w, http.StatusBadRequest, "invalid hide_dead")
 		return
 	}
 
@@ -517,11 +551,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		counts map[string]int
 		err    error
 	)
-	if strings.TrimSpace(q) == "" && category == "" && sortOrder != store.SortSize {
+	if strings.TrimSpace(q) == "" && category == "" && sortOrder != store.SortSize &&
+		sortOrder != store.SortSeeders && !hideDead {
 		// The no-keyword browse path. Latest walks the created_at index
 		// instead of counting matches, the total comes from the shared
 		// cache, and the category counts ride their own TTL cache (they
 		// cost a full classification pass, see cachedCategoryCounts).
+		// Seeder sort and dead filtering need every match's swarm
+		// snapshot, so they take the SearchEx path like size sort.
 		items, err = s.st.Latest(ctx, page, pageSize)
 		if err == nil {
 			total, err = s.cachedCount(ctx)
@@ -536,6 +573,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			Sort:     sortOrder,
 			Page:     page,
 			PageSize: pageSize,
+			HideDead: hideDead,
 		})
 	}
 	if err != nil {
@@ -556,6 +594,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		"results":    results,
 		"category":   category,
 		"sort":       sortOrder,
+		"hide_dead":  hideDead,
 		"categories": counts,
 		"trackers":   trackers,
 	})

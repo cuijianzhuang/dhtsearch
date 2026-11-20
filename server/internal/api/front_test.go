@@ -78,7 +78,7 @@ func TestSearchCategoryAndSort(t *testing.T) {
 	}
 
 	// Invalid parameters are 400s, not silent fallbacks.
-	for _, u := range []string{"/api/search?category=movies", "/api/search?sort=seeders", "/rss?category=x"} {
+	for _, u := range []string{"/api/search?category=movies", "/api/search?sort=popular", "/rss?category=x"} {
 		resp, err := http.Get(base + u)
 		if err != nil {
 			t.Fatal(err)

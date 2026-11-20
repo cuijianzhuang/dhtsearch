@@ -409,7 +409,7 @@ func (s *Server) handleAdminDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"info_hash":   t.InfoHash,
 		"name":        t.Name,
 		"raw_name":    t.RawName,
@@ -420,7 +420,33 @@ func (s *Server) handleAdminDetail(w http.ResponseWriter, r *http.Request) {
 		"created_at":  t.CreatedAt,
 		"reviewed_at": t.ReviewedAt,
 		"magnet":      magnetURI(t.InfoHash, t.Name, s.trackers()),
-	})
+	}
+	// Swarm snapshot, same wire shape as the public search results:
+	// the counters are null when no tracker has ever reported on
+	// this hash, and health carries the derived label either way.
+	// A lookup failure degrades to the null shape — swarm data is
+	// advisory and must not fail the detail view.
+	var swp *store.SwarmStats
+	if m, err := s.st.SwarmStatsFor(ctx, []string{t.InfoHash}); err == nil {
+		if v, ok := m[t.InfoHash]; ok {
+			vv := v
+			swp = &vv
+		}
+	}
+	swarmField := func(get func(*store.SwarmStats) int64) any {
+		if swp == nil {
+			return nil
+		}
+		return get(swp)
+	}
+	resp["seeders"] = swarmField(func(s *store.SwarmStats) int64 { return s.Seeders })
+	resp["leechers"] = swarmField(func(s *store.SwarmStats) int64 { return s.Leechers })
+	resp["completed"] = swarmField(func(s *store.SwarmStats) int64 { return s.Completed })
+	resp["scraped_at"] = swarmField(func(s *store.SwarmStats) int64 { return s.ScrapedAt })
+	resp["zero_since"] = swarmField(func(s *store.SwarmStats) int64 { return s.ZeroSince })
+	resp["zero_count"] = swarmField(func(s *store.SwarmStats) int64 { return s.ZeroCount })
+	resp["health"] = store.SwarmHealth(swp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // adminTarget resolves the {hash} path value to a stored torrent,

@@ -11,14 +11,17 @@ interface PaginationProps {
   /** Active category filter and sort, preserved across pages. */
   category?: string;
   sort?: string;
+  /** Active 隐藏疑似死种 filter, preserved across pages. */
+  hideDead?: boolean;
 }
 
-export default function Pagination({ q, page, total, pageSize, category = "", sort = "" }: PaginationProps) {
+export default function Pagination({ q, page, total, pageSize, category = "", sort = "", hideDead = false }: PaginationProps) {
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const mkHref = (p: number) => {
     const params = new URLSearchParams({ q, page: String(p) });
     if (category) params.set("category", category);
     if (sort && sort !== "relevance") params.set("sort", sort);
+    if (hideDead) params.set("hide_dead", "1");
     return `/search?${params.toString()}`;
   };
 

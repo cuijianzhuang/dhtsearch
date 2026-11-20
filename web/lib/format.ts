@@ -36,6 +36,27 @@ export function formatRelativeTime(ts: number | undefined | null): string {
   return formatDate(ts);
 }
 
+// Whether a unix timestamp is older than the given age — used to
+// grey out swarm snapshots past their freshness window.
+export function isOlderThan(tsSeconds: number, maxAgeSeconds: number): boolean {
+  return Date.now() / 1000 - tsSeconds > maxAgeSeconds;
+}
+
+// Format a duration in seconds as a coarse Chinese span, e.g.
+// "3 天" / "26 小时" / "5 分钟" — for evidence phrases like the
+// dead-torrent basis ("已持续 3 天"), where day granularity is the
+// honest precision.
+export function formatSpan(seconds: number | undefined | null): string {
+  if (seconds === undefined || seconds === null || !Number.isFinite(seconds) || seconds < 0) {
+    return "-";
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${Math.max(1, minutes)} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours} 小时`;
+  return `${Math.floor(hours / 24)} 天`;
+}
+
 // Format a count with thousands separators
 export function formatCount(n: number | undefined | null): string {
   if (n === undefined || n === null || !Number.isFinite(n)) return "-";

@@ -86,6 +86,22 @@ export interface SearchResult {
   /** Category key computed by the backend from the main file's
    *  extension: video/audio/image/doc/software/archive/other. */
   category: string;
+  /** Tracker-scrape swarm snapshot. All counters are null when no
+   *  tracker has ever reported on this torrent — distinct from a
+   *  scraped true 0, which arrives as 0. scraped_at is the unix
+   *  time of the latest scrape round. */
+  seeders: number | null;
+  leechers: number | null;
+  completed: number | null;
+  scraped_at: number | null;
+  /** The current consecutive zero-seeder streak: zero_count
+   *  scrapes since zero_since. The evidence behind health. */
+  zero_since: number | null;
+  zero_count: number | null;
+  /** Derived swarm health: alive / no_seed / suspect /
+   *  likely_dead / unknown (no scrape data). A probability
+   *  judgement by the backend, never a certainty. */
+  health: string;
 }
 
 // Category/sort constants live in lib/search-ui.ts (client-safe) and
@@ -144,7 +160,8 @@ export async function fetchSearch(
   page: number,
   pageSize = 20,
   category = "",
-  sort: SearchSort = "relevance"
+  sort: SearchSort = "relevance",
+  hideDead = false
 ): Promise<SearchResponse> {
   const params = new URLSearchParams({
     q,
@@ -153,6 +170,7 @@ export async function fetchSearch(
   });
   if (category) params.set("category", category);
   if (sort !== "relevance") params.set("sort", sort);
+  if (hideDead) params.set("hide_dead", "1");
   let res: Response;
   try {
     res = await fetch(`${API_BASE}/api/search?${params.toString()}`, {

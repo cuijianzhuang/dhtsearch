@@ -23,6 +23,7 @@ import {
   formatDate,
   formatRelativeTime,
   formatSize,
+  formatSpan,
 } from "@/lib/format";
 
 export const metadata: Metadata = { title: "种子详情" };
@@ -118,6 +119,40 @@ export default async function AdminTorrentDetailPage({
             <dt className="text-xs text-mute">审核时间</dt>
             <dd className="mt-1 font-medium text-ink-2">
               {t.reviewed_at > 0 ? formatDate(t.reviewed_at) : "未审核"}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-mute">做种 / 下载 / 完成</dt>
+            <dd className="mt-1 font-medium text-ink-2">
+              {t.scraped_at != null
+                ? `${formatCount(t.seeders)} / ${formatCount(t.leechers)} / ${formatCount(t.completed)}`
+                : "暂无抓取数据"}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-mute">健康度</dt>
+            <dd className="mt-1 font-medium text-ink-2">
+              {t.health === "likely_dead" ? (
+                <span className="inline-flex items-center rounded-md bg-soft px-2 py-1 text-xs font-medium text-warn-ink">
+                  疑似死种
+                </span>
+              ) : t.health === "alive" ? (
+                "有做种"
+              ) : t.health === "no_seed" ? (
+                "无完整源（有人在下）"
+              ) : t.health === "suspect" ? (
+                "无做种（观察中）"
+              ) : (
+                "未知"
+              )}
+              {t.scraped_at != null && (
+                <span className="ml-2 text-xs font-normal text-mute">
+                  更新于 {formatRelativeTime(t.scraped_at)}
+                  {t.health === "likely_dead" &&
+                    t.zero_since != null &&
+                    ` · 连续 ${formatCount(t.zero_count)} 次零做种，已持续 ${formatSpan(t.scraped_at - t.zero_since)}`}
+                </span>
+              )}
             </dd>
           </div>
         </dl>

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sync"
 	"testing"
 	"time"
 )
@@ -23,10 +24,10 @@ func quietLogger() *log.Logger { return log.New(io.Discard, "", 0) }
 // fakeSeeders installs a scrape stub that reports seeders[hash] for known
 // hashes and 0 otherwise.
 func fakeSeeders(s *Scraper, seeders map[string]int32) {
-	s.scrapeTracker = func(_ context.Context, _ *trackerConn, ihs [][20]byte) ([]int32, error) {
-		out := make([]int32, len(ihs))
+	s.scrapeTracker = func(_ context.Context, _ *trackerConn, ihs [][20]byte) ([]SwarmSample, error) {
+		out := make([]SwarmSample, len(ihs))
 		for i, ih := range ihs {
-			out[i] = seeders[hex.EncodeToString(ih[:])]
+			out[i] = SwarmSample{Seeders: seeders[hex.EncodeToString(ih[:])]}
 		}
 		return out, nil
 	}
@@ -164,7 +165,7 @@ func TestAllTrackersFailingStillDelivers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.scrapeTracker = func(context.Context, *trackerConn, [][20]byte) ([]int32, error) {
+	s.scrapeTracker = func(context.Context, *trackerConn, [][20]byte) ([]SwarmSample, error) {
 		return nil, fmt.Errorf("tracker down")
 	}
 	h1, h2 := hashN(1), hashN(2)
@@ -180,6 +181,129 @@ func TestAllTrackersFailingStillDelivers(t *testing.T) {
 	}
 	if errs := s.Stats().ScrapeErrs; errs == 0 {
 		t.Fatal("want ScrapeErrs > 0")
+	}
+}
+
+// TestSinkReceivesPerFieldMax installs two trackers that disagree on
+// every field and checks the sink gets the per-field maximum, that an
+// all-zero answer from a live tracker is persisted as zeros (a real
+// observation, not a gap), and that the queue still ranks by the
+// aggregated seeders.
+func TestSinkReceivesPerFieldMax(t *testing.T) {
+	var mu sync.Mutex
+	var sunk []SwarmStat
+	s, err := New(Config{
+		Trackers: []string{
+			"udp://tracker-a.invalid:1337/announce",
+			"udp://tracker-b.invalid:1337/announce",
+		},
+		BatchMax: 2,
+		Logger:   quietLogger(),
+		Sink: func(stats []SwarmStat) {
+			mu.Lock()
+			sunk = append(sunk, stats...)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h1, h2 := hashN(11), hashN(12)
+	// Tracker A knows h1 well but nothing of h2; tracker B the
+	// reverse, with different fields winning on each side.
+	byHost := map[string]map[string]SwarmSample{
+		"tracker-a.invalid:1337": {
+			h1: {Seeders: 10, Leechers: 1, Completed: 100},
+			h2: {Seeders: 0, Leechers: 0, Completed: 0},
+		},
+		"tracker-b.invalid:1337": {
+			h1: {Seeders: 3, Leechers: 9, Completed: 40},
+			h2: {Seeders: 0, Leechers: 0, Completed: 0},
+		},
+	}
+	s.scrapeTracker = func(_ context.Context, tc *trackerConn, ihs [][20]byte) ([]SwarmSample, error) {
+		out := make([]SwarmSample, len(ihs))
+		for i, ih := range ihs {
+			out[i] = byHost[tc.host][hex.EncodeToString(ih[:])]
+		}
+		return out, nil
+	}
+
+	in := make(chan string, 2)
+	in <- h1
+	in <- h2
+	s.Run(context.Background(), in)
+	defer s.Close()
+
+	if got := recvOrFail(t, s.Out()); got != h1 {
+		t.Fatalf("queue head = %s, want %s (10 seeders)", got, h1)
+	}
+	// The sink runs after the queue hand-off; drain the second item
+	// too so the round is fully settled before asserting.
+	if got := recvOrFail(t, s.Out()); got != h2 {
+		t.Fatalf("second = %s, want %s", got, h2)
+	}
+	// The sink runs on the scrape worker just after the hand-off;
+	// poll briefly rather than assume the ordering.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := len(sunk)
+		mu.Unlock()
+		if n == 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sunk) != 2 {
+		t.Fatalf("sink got %d stats, want 2: %v", len(sunk), sunk)
+	}
+	got := map[string]SwarmStat{}
+	for _, st := range sunk {
+		got[st.Hash] = st
+	}
+	want1 := SwarmStat{Hash: h1, Seeders: 10, Leechers: 9, Completed: 100}
+	if got[h1] != want1 {
+		t.Fatalf("h1 aggregated = %+v, want per-field max %+v", got[h1], want1)
+	}
+	// h2 was answered all-zero by both trackers: present, with zeros.
+	want2 := SwarmStat{Hash: h2}
+	if got[h2] != want2 {
+		t.Fatalf("h2 aggregated = %+v, want zeros %+v", got[h2], want2)
+	}
+}
+
+// TestSinkSilentWhenAllTrackersFail: a round nobody answered teaches
+// nothing, so the sink must not be called — persisting zeros here
+// would fabricate observations and feed the dead-torrent streaks.
+func TestSinkSilentWhenAllTrackersFail(t *testing.T) {
+	called := make(chan []SwarmStat, 1)
+	s, err := New(Config{
+		Trackers: []string{"udp://tracker.invalid:1337/announce"},
+		BatchMax: 2,
+		Logger:   quietLogger(),
+		Sink:     func(stats []SwarmStat) { called <- stats },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.scrapeTracker = func(context.Context, *trackerConn, [][20]byte) ([]SwarmSample, error) {
+		return nil, fmt.Errorf("tracker down")
+	}
+	in := make(chan string, 2)
+	in <- hashN(1)
+	in <- hashN(2)
+	s.Run(context.Background(), in)
+	defer s.Close()
+
+	recvOrFail(t, s.Out())
+	recvOrFail(t, s.Out())
+	select {
+	case stats := <-called:
+		t.Fatalf("sink called with %v despite every tracker failing", stats)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 

@@ -17,6 +17,7 @@ import ResultList from "@/components/ResultList";
 import BackToTop from "@/components/BackToTop";
 import Pagination from "@/components/Pagination";
 import SortSelect from "@/components/SortSelect";
+import HideDeadToggle from "@/components/HideDeadToggle";
 import SiteLogo from "@/components/SiteLogo";
 import AppearanceSwitcher from "@/components/AppearanceSwitcher";
 
@@ -26,18 +27,26 @@ interface PageProps {
     page?: string;
     category?: string;
     sort?: string;
+    hide_dead?: string;
   }>;
 }
 
 const VALID_CATEGORIES = new Set(CATEGORIES.map((c) => c.key));
-const VALID_SORTS = new Set(["relevance", "newest", "size"]);
+const VALID_SORTS = new Set(["relevance", "newest", "size", "seeders"]);
 
-/** Builds a /search href preserving q and sort, switching category. */
-function categoryHref(q: string, sort: SearchSort, category: string): string {
+/** Builds a /search href preserving q, sort and the dead filter,
+ *  switching category. */
+function categoryHref(
+  q: string,
+  sort: SearchSort,
+  category: string,
+  hideDead: boolean
+): string {
   const params = new URLSearchParams();
   if (q) params.set("q", q);
   if (category) params.set("category", category);
   if (sort !== "relevance") params.set("sort", sort);
+  if (hideDead) params.set("hide_dead", "1");
   const qs = params.toString();
   return qs ? `/search?${qs}` : "/search";
 }
@@ -65,12 +74,13 @@ export default async function SearchPage({ searchParams }: PageProps) {
   const sort: SearchSort = VALID_SORTS.has(params.sort ?? "")
     ? (params.sort as SearchSort)
     : "relevance";
+  const hideDead = params.hide_dead === "1" || params.hide_dead === "true";
 
   let data: SearchResponse | null = null;
   let error: string | null = null;
   let errorKind: SearchErrorKind = "unavailable";
   try {
-    data = await fetchSearch(q, page, pageSize, category, sort);
+    data = await fetchSearch(q, page, pageSize, category, sort, hideDead);
   } catch (e) {
     if (e instanceof SearchError) {
       errorKind = e.kind;
@@ -179,13 +189,14 @@ export default async function SearchPage({ searchParams }: PageProps) {
                 </svg>{" "}
                 RSS 订阅
               </a>
-              <SortSelect q={q} category={category} sort={sort} />
+              <HideDeadToggle q={q} category={category} sort={sort} hideDead={hideDead} />
+              <SortSelect q={q} category={category} sort={sort} hideDead={hideDead} />
             </span>
           </div>
 
           <nav aria-label="按分类筛选" className="mt-3 flex flex-wrap gap-2">
             <Link
-              href={categoryHref(q, sort, "")}
+              href={categoryHref(q, sort, "", hideDead)}
               prefetch={false}
               className={`inline-flex min-h-11 items-center rounded-lg border px-3 text-sm transition-colors ${
                 category === ""
@@ -203,7 +214,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
             {CATEGORIES.map((c) => (
               <Link
                 key={c.key}
-                href={categoryHref(q, sort, c.key)}
+                href={categoryHref(q, sort, c.key, hideDead)}
                 prefetch={false}
                 className={`inline-flex min-h-11 items-center rounded-lg border px-3 text-sm transition-colors ${
                   category === c.key
@@ -229,6 +240,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
                 pageSize={data.page_size ?? pageSize}
                 category={category}
                 sort={sort}
+                hideDead={hideDead}
               />
             </>
           ) : (
@@ -241,11 +253,23 @@ export default async function SearchPage({ searchParams }: PageProps) {
                   ? "换个关键词试试，或者稍后再来——爬虫正在持续收录新资源。"
                   : "索引暂时为空，爬虫正在收录中，请稍后再来。"}
               </p>
+              {hideDead && (
+                <p className="mt-2 text-sm text-mute">
+                  当前已隐藏疑似死种，
+                  <Link
+                    href={categoryHref(q, sort, category, false)}
+                    prefetch={false}
+                    className="text-accent-ink hover:underline"
+                  >
+                    点此显示全部结果
+                  </Link>
+                </p>
+              )}
               {(category || q) && (
                 <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
                   {category && (
                     <Link
-                      href={categoryHref(q, sort, "")}
+                      href={categoryHref(q, sort, "", hideDead)}
                       prefetch={false}
                       className="inline-flex min-h-11 items-center rounded-lg bg-accent px-4 text-sm font-medium text-on-accent transition-colors hover:bg-accent-hover"
                     >

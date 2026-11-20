@@ -64,6 +64,19 @@ var migrateTables = []migrateTable{
 		cols: []string{"info_hash", "reason", "name", "created_at"},
 		kind: []colKind{colText, colText, colText, colInt},
 	},
+	{
+		// swarm_stats is copied, unlike the dht_nodes snapshot and
+		// the trending cache (both absent from this list): those are
+		// runtime state a fresh process rebuilds, while swarm rows
+		// are user-visible data — search responses serve them, and
+		// the zero-seeder streaks behind the dead-torrent health
+		// derivation take days to re-accumulate after a switch.
+		name: "swarm_stats",
+		pk:   "info_hash",
+		cols: []string{"info_hash", "seeders", "leechers", "completed",
+			"scraped_at", "zero_since", "zero_count"},
+		kind: []colKind{colText, colInt, colInt, colInt, colInt, colInt, colInt},
+	},
 }
 
 // migrateBatchSize bounds one read batch (and one target transaction).
