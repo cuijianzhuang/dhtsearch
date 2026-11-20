@@ -10,10 +10,12 @@ export default function SortSelect({
   q,
   category,
   sort,
+  hideDead = false,
 }: {
   q: string;
   category: string;
   sort: SearchSort;
+  hideDead?: boolean;
 }) {
   function onChange(e: React.ChangeEvent<HTMLSelectElement>) {
     const next = e.target.value as SearchSort;
@@ -21,6 +23,7 @@ export default function SortSelect({
     if (q) params.set("q", q);
     if (category) params.set("category", category);
     if (next !== "relevance") params.set("sort", next);
+    if (hideDead) params.set("hide_dead", "1");
     const qs = params.toString();
     window.location.assign(qs ? `/search?${qs}` : "/search");
   }

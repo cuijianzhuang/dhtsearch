@@ -484,6 +484,27 @@ func main() {
 			scr, err = scraper.New(scraper.Config{
 				Trackers: trackerList,
 				Logger:   logger,
+				// Persist every scrape round's swarm snapshots: the
+				// search API serves them (seeder counts, dead-torrent
+				// health), and the zero-seeder streaks behind the
+				// health derivation only exist if rounds land in the
+				// store as they happen.
+				Sink: func(stats []scraper.SwarmStat) {
+					rows := make([]store.SwarmStats, 0, len(stats))
+					now := time.Now().Unix()
+					for _, sw := range stats {
+						rows = append(rows, store.SwarmStats{
+							InfoHash:  sw.Hash,
+							Seeders:   int64(sw.Seeders),
+							Leechers:  int64(sw.Leechers),
+							Completed: int64(sw.Completed),
+							ScrapedAt: now,
+						})
+					}
+					if err := st.UpsertSwarmStats(ctx, rows); err != nil {
+						logger.Printf("swarm stats: %v", err)
+					}
+				},
 			})
 			if err != nil {
 				logger.Printf("scraper: disabled: %v", err)

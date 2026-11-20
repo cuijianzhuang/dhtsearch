@@ -47,6 +47,19 @@ func seedMigrateSource(t *testing.T, s *Store) {
 		"dddddddddddddddddddddddddddddddddddddddd", "spam", "Blocked One", 4000); err != nil {
 		t.Fatalf("seed blocked: %v", err)
 	}
+	// Swarm snapshots, streak columns included: user-visible data
+	// that must cross backends like everything else in the copy set.
+	for _, r := range []SwarmStats{
+		{InfoHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Seeders: 42, Leechers: 3, Completed: 500, ScrapedAt: 5000},
+		{InfoHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Seeders: 0, Leechers: 0, Completed: 9, ScrapedAt: 9000, ZeroSince: 6000, ZeroCount: 4},
+	} {
+		if _, err := s.exec(`INSERT INTO swarm_stats
+			(info_hash, seeders, leechers, completed, scraped_at, zero_since, zero_count)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			r.InfoHash, r.Seeders, r.Leechers, r.Completed, r.ScrapedAt, r.ZeroSince, r.ZeroCount); err != nil {
+			t.Fatalf("seed swarm %s: %v", r.InfoHash, err)
+		}
+	}
 }
 
 // torrentRow reads one full torrents row for content comparison.
@@ -94,11 +107,22 @@ func TestMigrateSQLiteToSQLite(t *testing.T) {
 	if rep.From != "sqlite" || rep.To != "sqlite" {
 		t.Fatalf("report dialects: %s -> %s", rep.From, rep.To)
 	}
-	for table, want := range map[string]int64{"torrents": 3, "stats": 2, "blocked": 1} {
+	for table, want := range map[string]int64{"torrents": 3, "stats": 2, "blocked": 1, "swarm_stats": 2} {
 		tr := tableReport(t, rep, table)
 		if tr.Source != want || tr.Inserted != want || tr.Skipped != 0 || tr.Dest != want || tr.Missing != 0 {
 			t.Fatalf("%s report = %+v, want source/inserted/dest=%d skipped/missing=0", table, tr, want)
 		}
+	}
+	swarm, err := dst.SwarmStatsFor(context.Background(), []string{
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := swarm["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]; got.Seeders != 42 || got.Completed != 500 {
+		t.Fatalf("migrated swarm row: %+v", got)
+	}
+	if got := swarm["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]; got.ZeroCount != 4 || got.ZeroSince != 6000 {
+		t.Fatalf("migrated swarm streak: %+v, want count 4 since 6000", got)
 	}
 
 	// Content must cross verbatim, including the files blob, the
@@ -133,7 +157,7 @@ func TestMigrateSQLiteToSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-run Migrate: %v", err)
 	}
-	for table, want := range map[string]int64{"torrents": 3, "stats": 2, "blocked": 1} {
+	for table, want := range map[string]int64{"torrents": 3, "stats": 2, "blocked": 1, "swarm_stats": 2} {
 		tr := tableReport(t, rep, table)
 		if tr.Inserted != 0 || tr.Skipped != want || tr.Dest != want || tr.Missing != 0 {
 			t.Fatalf("re-run %s report = %+v, want inserted=0 skipped=dest=%d", table, tr, want)
@@ -172,6 +196,7 @@ func TestMigratePostgres(t *testing.T) {
 	}
 	for _, stmt := range []string{
 		`DROP TABLE IF EXISTS torrents`, `DROP TABLE IF EXISTS stats`, `DROP TABLE IF EXISTS blocked`,
+		`DROP TABLE IF EXISTS swarm_stats`,
 	} {
 		if _, err := admin.Exec(stmt); err != nil {
 			t.Fatalf("reset test database: %v", err)
@@ -201,7 +226,7 @@ func TestMigratePostgres(t *testing.T) {
 	if rep.From != "sqlite" || rep.To != "postgres" {
 		t.Fatalf("report dialects: %s -> %s", rep.From, rep.To)
 	}
-	for table, want := range map[string]int64{"torrents": 3, "stats": 2, "blocked": 1} {
+	for table, want := range map[string]int64{"torrents": 3, "stats": 2, "blocked": 1, "swarm_stats": 2} {
 		tr := tableReport(t, rep, table)
 		if tr.Source != want || tr.Inserted != want || tr.Skipped != 0 || tr.Dest != want || tr.Missing != 0 {
 			t.Fatalf("sqlite->postgres %s report = %+v, want %d/%d", table, tr, want, want)
@@ -241,11 +266,18 @@ func TestMigratePostgres(t *testing.T) {
 	if rep.From != "postgres" || rep.To != "sqlite" {
 		t.Fatalf("report dialects: %s -> %s", rep.From, rep.To)
 	}
-	for table, want := range map[string]int64{"torrents": 3, "stats": 2, "blocked": 1} {
+	for table, want := range map[string]int64{"torrents": 3, "stats": 2, "blocked": 1, "swarm_stats": 2} {
 		tr := tableReport(t, rep, table)
 		if tr.Inserted != want || tr.Dest != want || tr.Missing != 0 {
 			t.Fatalf("postgres->sqlite %s report = %+v, want inserted=dest=%d", table, tr, want)
 		}
+	}
+	swarmBack, err := back.SwarmStatsFor(ctx, []string{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := swarmBack["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]; got.ZeroCount != 4 || got.ZeroSince != 6000 || got.Completed != 9 {
+		t.Fatalf("round-tripped swarm row: %+v", got)
 	}
 	name, size, files, created, reviewed, clean, alias := torrentRow(t, back,
 		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")

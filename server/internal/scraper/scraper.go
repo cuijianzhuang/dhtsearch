@@ -42,6 +42,28 @@ const (
 	batchQueueSize = 16
 )
 
+// SwarmSample is one tracker's BEP 15 answer for one infohash:
+// Seeders (complete), Leechers (incomplete) and Completed
+// (downloaded) as the tracker reported them.
+type SwarmSample struct {
+	Seeders   int32
+	Leechers  int32
+	Completed int32
+}
+
+// SwarmStat is one infohash's aggregated swarm snapshot, handed to
+// Config.Sink: each field is the maximum across the trackers that
+// answered the round. Trackers track disjoint swarms and answer
+// zero for hashes they do not know, so the maximum is the only
+// combination that never lets one tracker's ignorance erase
+// another's knowledge.
+type SwarmStat struct {
+	Hash      string
+	Seeders   int32
+	Leechers  int32
+	Completed int32
+}
+
 // Config controls the scraper.
 type Config struct {
 	// Trackers are udp:// announce URLs to scrape. Non-UDP entries are
@@ -56,6 +78,14 @@ type Config struct {
 	BatchWait time.Duration
 	// Timeout is the budget for scraping one batch against one tracker.
 	Timeout time.Duration
+	// Sink, when non-nil, receives every scrape round's aggregated
+	// swarm snapshots (see SwarmStat) for persistence. It is called
+	// from a scrape worker after the round's queue hand-off; hashes
+	// no tracker answered are absent (nothing was learned about
+	// them), while a hash a tracker answered all-zero for is present
+	// with zeros — a real observation, not a gap. Nil disables
+	// persistence; the queue ranking is unaffected either way.
+	Sink func([]SwarmStat)
 	// Logger, nil for log.Default().
 	Logger *log.Logger
 }
@@ -111,7 +141,7 @@ type Scraper struct {
 	evicted    atomic.Int64
 
 	// scrapeTracker is swapped in tests to avoid network I/O.
-	scrapeTracker func(ctx context.Context, tc *trackerConn, ihs [][20]byte) ([]int32, error)
+	scrapeTracker func(ctx context.Context, tc *trackerConn, ihs [][20]byte) ([]SwarmSample, error)
 }
 
 // New validates the tracker list and builds a scraper. At least one valid
@@ -297,7 +327,8 @@ func (s *Scraper) scrapeWorker(ctx context.Context, batches <-chan []string, wg 
 // scrapeBatch queries every tracker in parallel and enqueues each hash with
 // the highest seeder count any tracker reported. A hash unknown everywhere
 // (or a batch where every tracker errored) enqueues at zero — deprioritized,
-// not lost.
+// not lost. The round's full swarm answers (seeders, leechers, completed)
+// are aggregated per-field-max and handed to the sink for persistence.
 func (s *Scraper) scrapeBatch(ctx context.Context, hexes []string) {
 	ihs := make([][20]byte, 0, len(hexes))
 	kept := make([]string, 0, len(hexes))
@@ -314,7 +345,12 @@ func (s *Scraper) scrapeBatch(ctx context.Context, hexes []string) {
 	if len(ihs) == 0 {
 		return
 	}
-	best := make([]int32, len(ihs))
+	best := make([]SwarmSample, len(ihs))
+	// covered[i] records whether any tracker actually answered for
+	// hash i. A short response (fewer entries than requested) only
+	// covers its prefix; the sink must not persist invented zeros
+	// for the tail.
+	covered := make([]bool, len(ihs))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, tc := range s.trackers {
@@ -330,8 +366,18 @@ func (s *Scraper) scrapeBatch(ctx context.Context, hexes []string) {
 			}
 			mu.Lock()
 			for i, n := range res {
-				if i < len(best) && n > best[i] {
-					best[i] = n
+				if i >= len(best) {
+					break
+				}
+				covered[i] = true
+				if n.Seeders > best[i].Seeders {
+					best[i].Seeders = n.Seeders
+				}
+				if n.Leechers > best[i].Leechers {
+					best[i].Leechers = n.Leechers
+				}
+				if n.Completed > best[i].Completed {
+					best[i].Completed = n.Completed
 				}
 			}
 			mu.Unlock()
@@ -342,14 +388,32 @@ func (s *Scraper) scrapeBatch(ctx context.Context, hexes []string) {
 	items := make([]Item, len(kept))
 	var seededN int64
 	for i, h := range kept {
-		if best[i] > 0 {
+		if best[i].Seeders > 0 {
 			seededN++
 		}
-		items[i] = Item{Hash: h, Seeders: best[i]}
+		items[i] = Item{Hash: h, Seeders: best[i].Seeders}
 	}
 	s.scraped.Add(int64(len(kept)))
 	s.seeded.Add(seededN)
 	s.enqueue(items)
+
+	if s.cfg.Sink != nil {
+		stats := make([]SwarmStat, 0, len(kept))
+		for i, h := range kept {
+			if !covered[i] {
+				continue
+			}
+			stats = append(stats, SwarmStat{
+				Hash:      h,
+				Seeders:   best[i].Seeders,
+				Leechers:  best[i].Leechers,
+				Completed: best[i].Completed,
+			})
+		}
+		if len(stats) > 0 {
+			s.cfg.Sink(stats)
+		}
+	}
 }
 
 // enqueue merges a scraped batch into the priority queue. Sorting the whole
@@ -417,7 +481,7 @@ func (s *Scraper) pushLoop(ctx context.Context) {
 
 // realScrape performs one BEP 15 scrape. BEP 15 defines the response as one
 // result per requested infohash, in request order, so alignment is by index.
-func realScrape(ctx context.Context, tc *trackerConn, ihs [][20]byte) ([]int32, error) {
+func realScrape(ctx context.Context, tc *trackerConn, ihs [][20]byte) ([]SwarmSample, error) {
 	cc, err := tc.conn()
 	if err != nil {
 		return nil, err
@@ -430,9 +494,9 @@ func realScrape(ctx context.Context, tc *trackerConn, ihs [][20]byte) ([]int32, 
 	if len(resp) > len(ihs) {
 		resp = resp[:len(ihs)]
 	}
-	out := make([]int32, len(resp))
+	out := make([]SwarmSample, len(resp))
 	for i, r := range resp {
-		out[i] = r.Seeders
+		out[i] = SwarmSample{Seeders: r.Seeders, Leechers: r.Leechers, Completed: r.Completed}
 	}
 	return out, nil
 }

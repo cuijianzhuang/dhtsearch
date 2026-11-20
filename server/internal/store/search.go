@@ -12,6 +12,7 @@ const (
 	SortRelevance = "relevance" // weighted match-quality score (see ranking.go)
 	SortNewest    = "newest"
 	SortSize      = "size"
+	SortSeeders   = "seeders" // scraped seeder count (see swarm.go)
 )
 
 // SearchParams bundles the public search's knobs. Category "" means all
@@ -22,6 +23,10 @@ type SearchParams struct {
 	Sort     string
 	Page     int
 	PageSize int
+	// HideDead drops hits whose swarm health derives to likely_dead
+	// (see SwarmHealth). Torrents with no scrape data are kept:
+	// unknown is not dead.
+	HideDead bool
 }
 
 // SearchEx is Search plus category filtering, per-category counts and
@@ -65,6 +70,36 @@ func (s *Store) SearchEx(ctx context.Context, p SearchParams) (items []Torrent, 
 			filtered = append(filtered, t)
 		}
 	}
+	// Swarm snapshots for the whole filtered set are loaded only
+	// when an operation needs every hit's: sorting by seeders, or
+	// dropping the likely-dead. Plain searches attach snapshots to
+	// the returned page only (below), so they pay one small lookup
+	// instead of one per match.
+	var swarm map[string]SwarmStats
+	if p.Sort == SortSeeders || p.HideDead {
+		hashes := make([]string, len(filtered))
+		for i, t := range filtered {
+			hashes[i] = t.InfoHash
+		}
+		var err error
+		swarm, err = s.SwarmStatsFor(ctx, hashes)
+		if err != nil {
+			return nil, 0, nil, err
+		}
+	}
+	if p.HideDead {
+		kept := filtered[:0]
+		for _, t := range filtered {
+			var sw *SwarmStats
+			if v, ok := swarm[t.InfoHash]; ok {
+				sw = &v
+			}
+			if SwarmHealth(sw) != HealthLikelyDead {
+				kept = append(kept, t)
+			}
+		}
+		filtered = kept
+	}
 	total = len(filtered)
 	switch p.Sort {
 	case SortSize:
@@ -74,6 +109,8 @@ func (s *Store) SearchEx(ctx context.Context, p SearchParams) (items []Torrent, 
 			}
 			return filtered[i].CreatedAt > filtered[j].CreatedAt
 		})
+	case SortSeeders:
+		sortBySeeders(filtered, swarm)
 	case SortNewest:
 		// Keep the SQL order (created_at DESC).
 	default: // SortRelevance (and the "" default)
@@ -93,7 +130,13 @@ func (s *Store) SearchEx(ctx context.Context, p SearchParams) (items []Torrent, 
 	if end > total {
 		end = total
 	}
-	return filtered[start:end], total, counts, nil
+	page := filtered[start:end]
+	if swarm != nil {
+		attachSwarmFrom(page, swarm)
+	} else if err := s.attachSwarm(ctx, page); err != nil {
+		return nil, 0, nil, err
+	}
+	return page, total, counts, nil
 }
 
 // Get returns one torrent by info hash (the public projection Search
@@ -109,6 +152,9 @@ func (s *Store) Get(ctx context.Context, infoHash string) (*Torrent, error) {
 	}
 	if len(items) == 0 {
 		return nil, nil
+	}
+	if err := s.attachSwarm(ctx, items); err != nil {
+		return nil, err
 	}
 	return &items[0], nil
 }

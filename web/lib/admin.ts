@@ -305,6 +305,15 @@ export interface AdminListResponse {
 
 export interface AdminTorrentDetail extends AdminTorrentItem {
   clean_name?: string;
+  /** Tracker-scrape swarm snapshot, same shape as the public
+   *  search results: counters null when never scraped. */
+  seeders?: number | null;
+  leechers?: number | null;
+  completed?: number | null;
+  scraped_at?: number | null;
+  zero_since?: number | null;
+  zero_count?: number | null;
+  health?: string;
 }
 
 /** One page of a torrent's stored file list (admin detail view). */

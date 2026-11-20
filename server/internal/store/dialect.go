@@ -172,6 +172,23 @@ func (d dialect) schemaStatements() []string {
 			attempts   ` + intType + ` NOT NULL DEFAULT 0,
 			updated_at ` + intType + ` NOT NULL
 		)`,
+		// Tracker-scrape swarm snapshots (see swarm.go): the latest
+		// BEP 15 answer per infohash — seeders/leechers/completed as
+		// the per-field maximum across the trackers that answered,
+		// plus the current consecutive zero-seeder streak
+		// (zero_since/zero_count) the dead-torrent health derivation
+		// reads. Unlike dht_nodes this IS user-visible data (search
+		// responses serve it), so the cross-backend Migrate copies
+		// it like any other table.
+		`CREATE TABLE IF NOT EXISTS swarm_stats (
+			info_hash  TEXT PRIMARY KEY,
+			seeders    ` + intType + ` NOT NULL,
+			leechers   ` + intType + ` NOT NULL,
+			completed  ` + intType + ` NOT NULL,
+			scraped_at ` + intType + ` NOT NULL,
+			zero_since ` + intType + ` NOT NULL DEFAULT 0,
+			zero_count ` + intType + ` NOT NULL DEFAULT 0
+		)`,
 		// Public API tokens (see internal/api's token gate). Only the
 		// SHA-256 hash of a token is stored — the plaintext is shown to
 		// the operator exactly once, at creation. prefix is the

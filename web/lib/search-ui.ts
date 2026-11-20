@@ -15,10 +15,11 @@ export const CATEGORIES: { key: string; label: string }[] = [
   { key: "other", label: "其他" },
 ];
 
-export type SearchSort = "relevance" | "newest" | "size";
+export type SearchSort = "relevance" | "newest" | "size" | "seeders";
 
 export const SORTS: { key: SearchSort; label: string }[] = [
   { key: "relevance", label: "默认排序" },
   { key: "newest", label: "最新收录" },
   { key: "size", label: "体积最大" },
+  { key: "seeders", label: "做种数" },
 ];

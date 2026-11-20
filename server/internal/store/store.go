@@ -36,6 +36,13 @@ type Torrent struct {
 	// Category is computed at read time from the file list (see
 	// CategoryOf); it is never stored.
 	Category string `json:"category,omitempty"`
+	// Swarm is the torrent's latest tracker-scrape snapshot (see
+	// swarm.go), attached at read time by Get, Latest and SearchEx.
+	// Nil means no tracker has ever reported on this hash — the API
+	// serves that as nulls, distinct from a scraped true zero. It
+	// lives in its own table, not on the torrent row, so it is
+	// excluded from this struct's stored/serialized shape.
+	Swarm *SwarmStats `json:"-"`
 }
 
 // Candidate is the slim projection of a torrent handed to the moderation
@@ -430,7 +437,14 @@ func (s *Store) Latest(ctx context.Context, page, pageSize int) ([]Torrent, erro
 	if err != nil {
 		return nil, err
 	}
-	return scanTorrents(rows)
+	items, err := scanTorrents(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.attachSwarm(ctx, items); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 // scanTorrents drains rows from a selectCols query, decompressing each file

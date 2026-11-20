@@ -12,6 +12,8 @@ import {
   formatCount,
   formatRelativeTime,
   formatSize,
+  formatSpan,
+  isOlderThan,
   shortenDir,
 } from "@/lib/format";
 import CopyMagnetButton from "./CopyMagnetButton";
@@ -241,6 +243,16 @@ export default function ResultCard({
               {formatSize(result.total_size)}
             </span>
             <span className="tabular-nums">{formatCount(totalFiles)} 个文件</span>
+            {/* Seeder badge only when a tracker has actually reported:
+                an unknown count shows nothing rather than a fake 0. */}
+            {result.seeders != null && (
+              <span className="tabular-nums">做种 {formatCount(result.seeders)}</span>
+            )}
+            {result.health === "likely_dead" && (
+              <span className="rounded-md bg-soft px-1.5 py-0.5 text-[11px] font-medium text-warn-ink">
+                疑似死种
+              </span>
+            )}
             <span>收录于 {formatRelativeTime(result.created_at)}</span>
           </p>
         </button>
@@ -249,6 +261,65 @@ export default function ResultCard({
 
       {expanded && (
         <div className="mt-3 rounded-lg border border-line bg-canvas/60 p-3">
+          {/* Swarm health from tracker scrapes. Rendered only when a
+              scrape actually reported: no section at all beats a
+              section of invented zeros. */}
+          {result.scraped_at != null && (
+            <div className="mb-3 border-b border-line-2 pb-2">
+              <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-mute">
+                <span>
+                  做种{" "}
+                  <span className="font-medium tabular-nums text-ink-2">
+                    {formatCount(result.seeders)}
+                  </span>
+                </span>
+                <span>
+                  正在下载{" "}
+                  <span className="font-medium tabular-nums text-ink-2">
+                    {formatCount(result.leechers)}
+                  </span>
+                </span>
+                <span>
+                  已完成{" "}
+                  <span className="font-medium tabular-nums text-ink-2">
+                    {formatCount(result.completed)}
+                  </span>
+                </span>
+                {(() => {
+                  const stale = isOlderThan(result.scraped_at, 24 * 3600);
+                  return (
+                    <span className={stale ? "text-faint" : undefined}>
+                      数据更新于 {formatRelativeTime(result.scraped_at)}
+                      {stale && "（数据较旧）"}
+                    </span>
+                  );
+                })()}
+              </p>
+              {result.health === "likely_dead" && (
+                <p className="mt-2 flex flex-wrap items-center gap-2">
+                  <span className="inline-flex items-center rounded-md bg-soft px-2 py-1 text-xs font-medium text-warn-ink">
+                    疑似死种
+                  </span>
+                  <span className="text-xs text-mute">
+                    连续 {formatCount(result.zero_count)} 次抓取均无做种
+                    {result.zero_since != null &&
+                      `，已持续 ${formatSpan(result.scraped_at - result.zero_since)}`}
+                    。这只是概率判断，种子仍可能复活。
+                  </span>
+                </p>
+              )}
+              {result.health === "no_seed" && (
+                <p className="mt-1 text-xs text-mute">
+                  暂无完整做种源，但仍有人在下载，凑齐的希望还在。
+                </p>
+              )}
+              {result.health === "suspect" && (
+                <p className="mt-1 text-xs text-mute">
+                  最近抓取未见做种，但记录还太短，暂不能判断是否已死。
+                </p>
+              )}
+            </div>
+          )}
           {totalFiles > 0 ? (
             <>
               <div className="mb-2 flex flex-wrap items-center gap-2">
