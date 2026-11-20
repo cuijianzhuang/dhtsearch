@@ -228,6 +228,11 @@ export interface AdminCrawler {
 
 export interface AdminOverview {
   torrents: number;
+  /** The library's current row count under the pipeline's name:
+   *  the hero's 入库 stage displays this (same value as torrents,
+   *  which the 种子总数 KPI shows). Optional so a page built against
+   *  an older server falls back to torrents. */
+  stored_total?: number;
   today: number;
   pending_review: number;
   reviewed: number;

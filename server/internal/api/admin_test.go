@@ -96,6 +96,44 @@ func TestAdminAuthRequired(t *testing.T) {
 	}
 }
 
+// The pipeline hero's 入库 stage reads stored_total: the library's
+// actual row count, not a derivation from the cumulative counters.
+// A re-fetch of an already-known hash upserts the same row again —
+// main.go's onRecord increments "fetched" for every successful
+// upsert — so after 4 upserts over 3 distinct hashes the fetched
+// counter says 4 while stored_total must still say 3.
+func TestAdminOverviewStoredTotal(t *testing.T) {
+	base, st := adminFixture(t, testAdminToken)
+	if err := st.Upsert(store.Torrent{
+		InfoHash:  strings.Repeat("a", 40), // same hash as a seeded torrent
+		Name:      "Big Buck Bunny",
+		TotalSize: 1 << 30,
+		FileCount: 1,
+		Files:     []filter.File{{Path: "Big Buck Bunny.mkv", Size: 1 << 30}},
+		CreatedAt: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := st.IncrStat("fetched", 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, m := adminReq(t, "GET", base+"/api/admin/overview", testAdminToken, nil)
+	if code != 200 {
+		t.Fatalf("overview: %d %v", code, m)
+	}
+	if got := m["stored_total"].(float64); got != 3 {
+		t.Fatalf("stored_total = %v, want 3 (distinct torrents)", got)
+	}
+	if got := m["torrents"].(float64); got != 3 {
+		t.Fatalf("torrents = %v, want 3", got)
+	}
+	if got := m["stats"].(map[string]any)["fetched"].(float64); got != 4 {
+		t.Fatalf("stats.fetched = %v, want 4 (every upsert counts)", got)
+	}
+}
+
 func TestAdminLogin(t *testing.T) {
 	base, _ := adminFixture(t, testAdminToken)
 	if code, _ := adminReq(t, "POST", base+"/api/admin/login", "", map[string]string{"token": "nope"}); code != http.StatusUnauthorized {
