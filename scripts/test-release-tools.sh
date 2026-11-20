@@ -23,7 +23,12 @@ scope_is() {
 
 scope_is false "README.md"
 scope_is false "docs/design.md"
-scope_is false "scripts/install.sh"
+# scripts/install.sh is the shipped management entry point: it releases.
+scope_is true  "scripts/install.sh"
+# …but the rest of scripts/ is release tooling and still does not.
+scope_is false "scripts/package-release.sh"
+scope_is false "scripts/release-scope.sh"
+scope_is false "scripts/next-version.sh"
 scope_is false ".github/workflows/ci.yml"
 scope_is false "env.example" "LICENSE"
 scope_is false "web/AGENTS.md"
@@ -42,6 +47,7 @@ scope_is true  "web/next.config.ts"
 scope_is true  "web/tsconfig.json"
 scope_is true  "web/postcss.config.mjs"
 # Business code mixed with docs/scripts still releases.
+scope_is true  "README.md" "scripts/install.sh"
 scope_is true  "README.md" "scripts/install.sh" "server/internal/api/api.go"
 scope_is true  ".github/workflows/release.yml" "web/components/SearchBox.tsx"
 # Empty change set never releases.

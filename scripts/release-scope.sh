@@ -2,8 +2,9 @@
 # release-scope.sh — decide whether a set of changed files is a release.
 #
 # Used by .github/workflows/auto-release.yml: a push to main only gets an
-# automatic release when it touches business code. Docs, scripts and CI
-# changes alone never release; business code mixed with docs does.
+# automatic release when it touches business code. Docs, CI changes and
+# release tooling alone never release; business code mixed with docs does.
+# One scripts/ file counts as business code: scripts/install.sh (below).
 #
 # Usage:
 #   git diff --name-only <before> <after> | scripts/release-scope.sh
@@ -30,8 +31,14 @@ is_business_file() {
         web/tsconfig*.json) return 0 ;;
         web/postcss.config.*) return 0 ;;
         web/*.css) return 0 ;;
-        # Everything else — *.md, docs/, scripts/, .github/, env.example,
-        # deploy.sh, LICENSE — never triggers a release on its own.
+        # Management script: install.sh is the shipped entry point users
+        # run daily (install/upgrade/menu), so its changes are user-visible
+        # product changes and release like business code. The other files
+        # in scripts/ are release tooling and do NOT match here.
+        scripts/install.sh) return 0 ;;
+        # Everything else — *.md, docs/, other scripts/, .github/,
+        # env.example, deploy.sh, LICENSE — never triggers a release on
+        # its own.
         *) return 1 ;;
     esac
 }
