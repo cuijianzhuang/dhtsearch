@@ -59,8 +59,8 @@
 // state at poll cadence; there is no per-frame JS in this layer.
 //
 // The spider always faces the direction of data flow — head right
-// on the horizontal track, head down the vertical one — including
-// while it waits or rests. It never crawls backwards: any move to
+// along the track — including while it waits or rests. It never
+// crawls backwards: any move to
 // a lower anchor (the loop wrap at the end of a traverse, or the
 // frontier retreating) is a fade cycle — fade out in place,
 // reposition while invisible, fade back in, crawl forward again.
@@ -95,22 +95,18 @@
 // hair-thin silk thread trails from it back to the previous ring
 // while it travels or waits (never at rest, faded with it through
 // the fade cycle). The whole hero is deliberately compact — rings
-// step 60px phones / 84px sm / 80px lg with tightened stacks and
+// step 52px phones / 84px sm / 80px lg with tightened stacks and
 // chrome — so the overview's KPI row and trend chart stay in the
 // first viewport instead of below the fold.
 //
-// On phones the track folds into two rows — DHT 网络 → 采样发现 →
-// 元数据抓取 across the top, 内容过滤 → 入库 below, starting under
-// the top row's left edge — joined at the wrap by an elbow
-// connector (down out of 元数据抓取， left along the channel, down
-// into 内容过滤） whose dots run the same tier as the segment it
-// replaces. The spider's path folds with it into a Z: right along
-// the top row, down the wrap (head turned down for that leg), then
-// right along the bottom row; waiting at 元数据抓取 it faces down
-// the wrap, waiting anywhere else it faces right, and the wrap
-// back to the start node is the usual fade cycle, never a
-// backwards crawl. From sm up the track is the single row it
-// always was.
+// On phones the same single row is miniaturised rather than
+// folded (an earlier two-row fold put a long elbow between the
+// rows and left the spider crossing caption text): 52px rings on
+// 6px connectors, compact type — the count in a viewport-clamped
+// size so even a seven-digit count fits its ≈60px column — and
+// captions that wrap inside their column instead of truncating.
+// The spider's path is the desktop's straight line, so every
+// position and facing rule above holds unchanged at every width.
 
 import {
   useEffect,
@@ -342,19 +338,9 @@ export default function PipelineFlow({
   const toneOf = (d: number | null): NodeTone =>
     !disabled && d !== null && d > 0 ? "accent" : "faint";
 
-  // Which way the spider's head points on the folded phone track:
-  // down only for the wrap leg — while gliding from 元数据抓取 to
-  // 内容过滤 (the traveling state whose anchor is 3), and while
-  // waiting at 元数据抓取, whose next segment is the drop. Everywhere
-  // else it faces right, the direction of the next segment. From sm
-  // up the track is one row and the spider always faces right (the
-  // down rotation is scoped to below sm in globals.css).
-  const facingDown =
-    (traveling && spider.anchor === 3) || (waiting && spider.anchor === 2);
-
   return (
-    <section className="overflow-hidden rounded-xl border border-line bg-surface p-3 shadow-card sm:p-4 lg:py-3">
-      <div className="flex min-h-7 flex-wrap items-center justify-between gap-3 lg:min-h-5">
+    <section className="overflow-hidden rounded-xl border border-line bg-surface px-3 py-2 shadow-card sm:p-4 lg:py-3">
+      <div className="flex min-h-6 flex-wrap items-center justify-between gap-3 sm:min-h-7 lg:min-h-5">
         <h2 className="text-sm font-semibold text-ink">收录管线</h2>
         <span className="inline-flex items-center gap-1.5 text-xs text-faint">
           <span
@@ -376,11 +362,11 @@ export default function PipelineFlow({
       </div>
 
       <div
-        className={`relative mt-2 overflow-hidden lg:mt-1.5 ${stale ? "flow-paused" : ""}`}
+        className={`relative mt-1 overflow-hidden sm:mt-2 lg:mt-1.5 ${stale ? "flow-paused" : ""}`}
       >
         <div aria-hidden className="ambience-glow pointer-events-none absolute inset-0 z-0" />
         <MeshBackdrop tier={seg(dSeen)} />
-        <div className="relative z-10 grid grid-cols-[minmax(0,1fr)_2rem_minmax(0,1fr)_2rem_minmax(0,1fr)] sm:flex sm:flex-row sm:items-start">
+        <div className="relative z-10 flex flex-row items-start">
           <Stage label="DHT 网络" value={nodes} sub={`排队节点 ${formatCount(queuedNodes)}`} dim={disabled} nodeTone={disabled ? "faint" : "accent"} backdropTier={seg(dSeen)} breatheTier={seg(dSeen)} />
           <Segment tier={seg(dSeen)} />
           <Stage label="采样发现" value={cur.seen} delta={dSeen} dim={disabled} nodeTone={toneOf(dSeen)} breatheTier={seg(dSeen)} />
@@ -395,7 +381,7 @@ export default function PipelineFlow({
             nodeTone={fetchStalled ? "warn" : toneOf(dAttempts)}
             breatheTier={seg(dAttempts)}
           />
-          <WrapSegment tier={seg(dFetched)} />
+          <Segment tier={seg(dFetched)} />
           <Stage label="内容过滤" value={cur.filtered} delta={dFiltered} dim={disabled} nodeTone={toneOf(dFetched)} breatheTier={seg(dFetched)} />
           <Segment tier={seg(dStored)} />
           <Stage label="入库" value={cur.stored} delta={dStored} dim={disabled} nodeTone={toneOf(dStored)} breatheTier={seg(dStored)} />
@@ -408,11 +394,10 @@ export default function PipelineFlow({
           moving={traveling && !stale}
           jump={spider.jump}
           stale={stale}
-          facingDown={facingDown}
         />
       </div>
 
-      <p className="mt-2 border-t border-line-2 pt-1.5 text-[11px] leading-4 text-faint">
+      <p className="mt-1.5 border-t border-line-2 pt-1 text-[10px] leading-[14px] text-faint sm:mt-2 sm:pt-1.5 sm:text-[11px] sm:leading-4">
         元数据超时 {formatCount(cur.timedOut)} · 元数据失败{" "}
         {formatCount(cur.failed)} · 早筛丢弃 {formatCount(cur.prescreen)}
         。除「入库」外，管线计数为进程累计值，「本轮」为最近一次
@@ -457,7 +442,7 @@ function Stage({
     breatheTier.dots > 0;
   return (
     <div
-      className={`relative flex min-w-0 flex-col items-center text-center sm:flex-1 ${
+      className={`relative flex min-w-0 flex-1 flex-col items-center text-center ${
         dim ? "opacity-60" : ""
       }`}
     >
@@ -485,20 +470,24 @@ function Stage({
       >
         <StageRingSvg />
       </div>
-      <div className="relative z-10 flex flex-col items-center">
-        <p className="mt-1 h-[15px] text-[13px] leading-[15px] font-semibold text-ink sm:mt-2 sm:h-5 sm:text-sm sm:leading-5 lg:mt-0.5 lg:h-4 lg:leading-4">
+      <div className="relative z-10 flex w-full flex-col items-center">
+        <p className="mt-0.5 h-[13px] text-[11px] leading-[13px] font-semibold whitespace-nowrap text-ink sm:mt-2 sm:h-5 sm:text-sm sm:leading-5 lg:mt-0.5 lg:h-4 lg:leading-4">
           {label}
         </p>
-        <p className="mt-px h-5 text-base leading-5 font-bold tabular-nums text-ink sm:mt-0.5 sm:h-8 sm:text-2xl sm:leading-8 lg:mt-0 lg:h-7 lg:text-xl lg:leading-7">
+        <p className="mt-px h-4 text-[clamp(11.5px,3.4vw,15px)] leading-4 font-bold tracking-tight whitespace-nowrap tabular-nums text-ink sm:mt-0.5 sm:h-8 sm:text-2xl sm:leading-8 sm:tracking-normal lg:mt-0 lg:h-7 lg:text-xl lg:leading-7">
           <AnimatedNumber value={value} />
         </p>
-        {/* Both caption lines always render (sub may be empty) so
-            every stage keeps the same height — the phone track's
-            row pitch and the spider's anchors are fixed steps of
-            that height. A stage with no delta concept (DHT 网络)
-            carries its sub on the first line. */}
+        {/* Both caption lines always render (sub may be empty). From
+            sm up each reserves a fixed single line (truncated), so
+            the desktop stacks stay uniform. On phones the track is
+            a single row — the spider's anchors depend only on the
+            ring centres, whose height the ring alone fixes — so the
+            captions instead wrap inside their mini column (two
+            lines for the longer ones) and the stacks may differ in
+            height. A stage with no delta concept (DHT 网络) carries
+            its sub on the first line. */}
         <p
-          className={`mt-px h-3 max-w-full truncate text-[10px] leading-3 tabular-nums sm:mt-0.5 sm:h-4 sm:text-[11px] sm:leading-4 lg:mt-0 lg:h-[11px] lg:leading-[11px] ${
+          className={`mt-px max-w-full text-[10px] leading-3 tabular-nums sm:mt-0.5 sm:h-4 sm:truncate sm:text-[11px] sm:leading-4 lg:mt-0 lg:h-[11px] lg:leading-[11px] ${
             warn ? "font-medium text-warn-ink" : "text-faint"
           }`}
         >
@@ -512,7 +501,7 @@ function Stage({
                   ? `本轮 +${formatCount(d)}`
                   : "本轮 +0"}
         </p>
-        <p className="h-3 max-w-full truncate text-[10px] leading-3 tabular-nums text-faint sm:h-4 sm:text-[11px] sm:leading-4 lg:h-[11px] lg:leading-[11px]">
+        <p className="max-w-full text-[10px] leading-3 tabular-nums text-faint sm:h-4 sm:truncate sm:text-[11px] sm:leading-4 lg:h-[11px] lg:leading-[11px]">
           {d === undefined ? "" : (sub ?? "")}
         </p>
       </div>
@@ -574,7 +563,7 @@ function WebBackdrop({ tier }: { tier: Tier }) {
   return (
     <svg
       aria-hidden
-      className="web-fade pointer-events-none absolute top-[30px] left-1/2 z-0 h-[300px] w-[300px] -translate-x-1/2 -translate-y-1/2 sm:top-[42px] sm:h-[440px] sm:w-[440px] lg:top-10 lg:h-[620px] lg:w-[620px]"
+      className="web-fade pointer-events-none absolute top-[26px] left-1/2 z-0 h-[260px] w-[260px] -translate-x-1/2 -translate-y-1/2 sm:top-[42px] sm:h-[440px] sm:w-[440px] lg:top-10 lg:h-[620px] lg:w-[620px]"
       viewBox="0 0 240 240"
       fill="none"
     >
@@ -615,11 +604,11 @@ function WebBackdrop({ tier }: { tier: Tier }) {
   );
 }
 
-/** A rail with tier-driven dots between two stages in the same
- *  row. Renders the phone variant (a short horizontal rail at ring
- *  height — the phone track's rows run left to right) and the sm+
- *  variant; the dots exist only when the tier says the stage moved
- *  during the last poll interval. */
+/** A rail with tier-driven dots between two stages. Renders the
+ *  phone variant (a 6px-wide rail at the mini ring's height — the
+ *  spider's anchor geometry in globals.css keys off that 6px) and
+ *  the sm+ variant; the dots exist only when the tier says the
+ *  stage moved during the last poll interval. */
 function Segment({ tier }: { tier: Tier }) {
   const dots = Array.from({ length: tier.dots }, (_, i) => i);
   const style = (i: number) => ({
@@ -630,7 +619,7 @@ function Segment({ tier }: { tier: Tier }) {
     <>
       <div
         aria-hidden
-        className="relative h-[60px] w-full shrink-0 overflow-hidden sm:hidden"
+        className="relative h-[52px] w-1.5 shrink-0 overflow-hidden sm:hidden"
       >
         <div className="absolute top-1/2 right-0 left-0 h-px -translate-y-1/2 bg-input" />
         {dots.map((i) => (
@@ -650,73 +639,12 @@ function Segment({ tier }: { tier: Tier }) {
   );
 }
 
-/** The segment between 元数据抓取 and 内容过滤. From sm up it is the
- *  same horizontal rail as every other segment. On phones the
- *  track folds here, so it renders the wrap instead: a full-width
- *  elbow that drops out of 元数据抓取 (top row, right column), runs
- *  left along the channel between the rows, and drops into 内容
- *  过滤 (bottom row, left column). All three pieces carry the
- *  segment's tier — dots flow down, then right-to-left along the
- *  channel (the .flow-dot-x-rev class), then down again. The
- *  stage-centre offset from each side edge is (track − 64px of
- *  connector columns) / 6: the centre of the outer grid cells. */
-function WrapSegment({ tier }: { tier: Tier }) {
-  const dots = Array.from({ length: tier.dots }, (_, i) => i);
-  const style = (i: number) => ({
-    animationDuration: `${tier.seconds}s`,
-    animationDelay: `${(-tier.seconds * i) / Math.max(1, tier.dots)}s`,
-  });
-  const edge = "calc((100% - 64px) / 6)";
-  return (
-    <>
-      <div aria-hidden className="relative col-span-5 h-8 sm:hidden">
-        <div
-          className="absolute top-0 h-4 w-6 overflow-hidden"
-          style={{ left: `calc(100% - ${edge})`, transform: "translateX(-50%)" }}
-        >
-          <div className="absolute top-0 bottom-0 left-1/2 w-px -translate-x-1/2 bg-input" />
-          {dots.map((i) => (
-            <span key={i} className="flow-dot flow-dot-y" style={style(i)} />
-          ))}
-        </div>
-        <div
-          className="absolute top-1/2 h-6 -translate-y-1/2 overflow-hidden"
-          style={{ left: edge, right: edge }}
-        >
-          <div className="absolute top-1/2 right-0 left-0 h-px -translate-y-1/2 bg-input" />
-          {dots.map((i) => (
-            <span key={i} className="flow-dot flow-dot-x-rev" style={style(i)} />
-          ))}
-        </div>
-        <div
-          className="absolute bottom-0 h-4 w-6 overflow-hidden"
-          style={{ left: edge, transform: "translateX(-50%)" }}
-        >
-          <div className="absolute top-0 bottom-0 left-1/2 w-px -translate-x-1/2 bg-input" />
-          {dots.map((i) => (
-            <span key={i} className="flow-dot flow-dot-y" style={style(i)} />
-          ))}
-        </div>
-      </div>
-      <div
-        aria-hidden
-        className="relative hidden h-[84px] w-12 shrink-0 overflow-hidden sm:block lg:h-[80px] lg:w-16"
-      >
-        <div className="absolute top-1/2 right-0 left-0 h-px -translate-y-1/2 bg-input" />
-        {dots.map((i) => (
-          <span key={i} className="flow-dot flow-dot-x" style={style(i)} />
-        ))}
-      </div>
-    </>
-  );
-}
-
-/** The node-mesh behind the whole track (sm and up; on phones the
- *  spider web behind the first ring carries the motif alone): a
- *  static SVG routing graph whose nodes thin out from the DHT end
- *  toward 入库 but never vanish — the graph runs the full width of
- *  the hero so the ambience stays perceptible behind the last ring
- *  too. It is sliced from the left so the dense end always shows.
+/** The node-mesh behind the whole track: a static SVG routing
+ *  graph whose nodes thin out from the DHT end toward 入库 but
+ *  never vanish — the graph runs the full width of the hero so the
+ *  ambience stays perceptible behind the last ring too. It is
+ *  sliced from the left so the dense end always shows (on phones
+ *  that slice is all that fits behind the mini row).
  *  Its group opacity pulses at segment 1's tier rate while
  *  discoveries arrive; at a zero Δseen tier it renders dim and
  *  still; .flow-paused freezes the pulse when the data goes stale. */
@@ -725,7 +653,7 @@ function MeshBackdrop({ tier }: { tier: Tier }) {
   return (
     <svg
       aria-hidden
-      className="pointer-events-none absolute inset-0 z-0 hidden h-full w-full sm:block"
+      className="pointer-events-none absolute inset-0 z-0 block h-full w-full"
       viewBox="0 0 1600 200"
       preserveAspectRatio="xMinYMid slice"
       fill="none"
@@ -777,10 +705,9 @@ function MeshBackdrop({ tier }: { tier: Tier }) {
  *  from the position rule (see the file header); movement is the
  *  .spider-step transform transition in globals.css, stepped by the
  *  parent's state. A stale poll pins the computed transform inline,
- *  freezing the spider mid-glide until fresh data lands. On the
- *  folded phone track the parent also passes facingDown for the
- *  wrap leg (see the facing rule at the call site); the class only
- *  rotates the spider below sm. */
+ *  freezing the spider mid-glide until fresh data lands. The track
+ *  is a single row at every width, so the spider always faces
+ *  right, the direction of flow. */
 function SpiderLayer({
   anchor,
   alarm,
@@ -789,7 +716,6 @@ function SpiderLayer({
   moving,
   jump,
   stale,
-  facingDown,
 }: {
   anchor: number;
   /** Diagnosed fetch stall: the red accents intensify. */
@@ -803,8 +729,6 @@ function SpiderLayer({
   /** This step goes to a lower anchor: no backward glide. */
   jump: boolean;
   stale: boolean;
-  /** Phone track only: head turned down the wrap. */
-  facingDown: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -823,13 +747,8 @@ function SpiderLayer({
   // own, so the layer's transform carries it with the glide. It
   // exists only while the spider travels or waits (never at rest,
   // never before the first ring) and fades with the spider through
-  // the fade cycle, so repositioning never draws it backwards. On
-  // the phone track the wrap leg's thread needs all three spans
-  // (down the channel's right side, left along it, down into the
-  // next ring); their geometry hangs off the step classes in
-  // globals.css, and the two extra spans never render from sm up.
+  // the fade cycle, so repositioning never draws it backwards.
   const silk = !idle && anchor > 0;
-  const silkCls = faded ? "spider-silk-faded" : "";
   return (
     <div
       aria-hidden
@@ -839,18 +758,12 @@ function SpiderLayer({
       } pointer-events-none absolute inset-0 z-20`}
     >
       {silk && (
-        <>
-          <span className={`spider-silk ${silkCls}`} />
-          <span className={`spider-silk-b ${silkCls}`} />
-          <span className={`spider-silk-c ${silkCls}`} />
-        </>
+        <span className={`spider-silk ${faded ? "spider-silk-faded" : ""}`} />
       )}
       <span
         className={`spider-body ${alarm ? "spider-alarm" : ""} ${
           idle ? "spider-idle" : ""
-        } ${faded ? "spider-faded" : ""} ${moving ? "spider-moving" : ""} ${
-          facingDown ? "spider-facing-down" : ""
-        }`}
+        } ${faded ? "spider-faded" : ""} ${moving ? "spider-moving" : ""}`}
       >
         <SpiderSvg />
       </span>
@@ -869,7 +782,7 @@ function SpiderSvg() {
   return (
     <svg
       viewBox="0 0 48 48"
-      className="spider-svg block h-7 w-7 sm:h-11 sm:w-11"
+      className="spider-svg block h-6 w-6 sm:h-11 sm:w-11"
       fill="none"
     >
       <circle cx="24" cy="24" r="21.5" className="spider-ring" />
