@@ -9,7 +9,7 @@
 # bookworm container job instead of Docker-in-Docker.
 FROM debian:bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        g++ cmake git pkg-config ca-certificates \
+        g++ cmake make git pkg-config ca-certificates \
         libboost-all-dev libssl-dev nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY . /src/sidecar
