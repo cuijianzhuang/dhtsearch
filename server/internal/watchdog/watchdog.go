@@ -19,6 +19,18 @@
 //   - If the stall reaches ExitAfter (30m) it dumps the stacks again
 //     and exits with code 1; the systemd unit's Restart=on-failure
 //     brings the process back, which unwedges whatever was parked.
+//   - A second detector covers the shape the zero-progress rule is
+//     blind to: a crawl, where ingest keeps trickling (in the
+//     2026-11-20 recurrence: +45 records per 10m against a ~330
+//     baseline — every trickle reset the 15m zero-progress clock, so
+//     the stall above never fired). Over each crawlWindow, if
+//     discovery moved, the fetch queue did not drain, and stored
+//     records grew by more than zero but less than crawlMinFetched,
+//     it dumps stacks and logs an ERROR; a second consecutive crawl
+//     window dumps again and exits as above. The queue-must-not-drain
+//     condition is what keeps the legitimate post-restart backlog
+//     plateau (workers chewing dead hashes while the queue falls)
+//     from tripping it.
 //   - When discovery is frozen too (whole-network outage shape), a
 //     restart cannot help: it dumps stacks and warns, but never
 //     exits.
@@ -105,6 +117,18 @@ type Config struct {
 // from looking like a one-off in the journal.
 const frozenRewarn = time.Hour
 
+// Crawl detection: the window over which throughput is judged, and
+// the minimum stored-records growth that counts as healthy within
+// it. crawlMinFetched is set at roughly a tenth of the observed
+// healthy ingest baseline (~330 records per 10m with the production
+// worker count): a window below it, with discovery moving and the
+// queue not draining, is a pipeline whose workers are parked, not a
+// quiet period — a quiet period drains its queue.
+const (
+	crawlWindow     = 10 * time.Minute
+	crawlMinFetched = 30
+)
+
 type Watchdog struct {
 	cfg    Config
 	logger *log.Logger
@@ -123,6 +147,15 @@ type Watchdog struct {
 
 	statusBase Probe // sample the status-line deltas are measured from
 	statusAt   time.Time
+
+	// Crawl detection bookkeeping: crawlBase/crawlBaseAt open the
+	// current evaluation window; crawlBadWindows counts consecutive
+	// crawl windows (first dumps stacks, second exits).
+	crawlBase       Probe
+	crawlBaseAt     time.Time
+	crawlStalled    bool
+	crawlSince      time.Time
+	crawlBadWindows int
 }
 
 // New builds a Watchdog; call Run to start it.
@@ -214,6 +247,8 @@ func (w *Watchdog) Tick(now time.Time, p Probe) {
 		w.seenAtProgress = p.Seen
 		w.statusBase = p
 		w.statusAt = now
+		w.crawlBase = p
+		w.crawlBaseAt = now
 	}
 	if w.haveSample && p.Fetched > w.last.Fetched {
 		// Any stored record is progress: the episode, if any, is over.
@@ -242,9 +277,18 @@ func (w *Watchdog) Tick(now time.Time, p Probe) {
 		return
 	}
 
+	// Crawl evaluation runs before the zero-progress logic: a
+	// trickling ingest keeps lastProgressAt fresh, so that logic
+	// would report ok forever without this.
+	w.evalCrawl(now, p)
+
 	stallFor := now.Sub(w.lastProgressAt)
 	if stallFor < w.cfg.WarnAfter {
-		w.setStatus(Status{State: StateOK})
+		if w.crawlStalled {
+			w.setStatus(Status{State: StateStalled, Since: w.crawlSince})
+		} else {
+			w.setStatus(Status{State: StateOK})
+		}
 		return
 	}
 
@@ -278,5 +322,60 @@ func (w *Watchdog) Tick(now time.Time, p Probe) {
 		w.logger.Printf("watchdog: ERROR pipeline frozen: no discovery and no ingest for %s (seen %d, queue_depth %d); not exiting (a restart cannot fix an external outage); goroutine dump follows",
 			stallFor.Round(time.Second), p.Seen, p.QueueDepth)
 		w.logger.Printf("watchdog: goroutine dump:\n%s", w.cfg.Stack())
+	}
+}
+
+// evalCrawl judges one crawlWindow of pipeline samples whenever a
+// window has elapsed since the last evaluation, and acts on the
+// verdict: first consecutive crawl window dumps the goroutine stacks
+// with an ERROR, the second dumps again and exits for systemd to
+// restart the process. A window is a crawl when all of these hold:
+//
+//   - discovery moved (Seen grew): a frozen discovery is the frozen
+//     path's case, not this one's;
+//   - ingest grew, but by less than crawlMinFetched: zero growth is
+//     the zero-progress path's case (WarnAfter/ExitAfter above) and
+//     keeps its existing timing untouched;
+//   - the fetch queue is non-empty and did not shrink over the
+//     window: workers that are merely chewing through a backlog of
+//     dead hashes (the post-restart plateau) drain the queue even
+//     when few records land, and a queue the workers cannot drain
+//     is the parked-worker signature.
+//
+// In FIFO-channel mode QueueDepth is always 0, so the crawl detector
+// never engages there; the zero-progress path still applies.
+func (w *Watchdog) evalCrawl(now time.Time, p Probe) {
+	if now.Sub(w.crawlBaseAt) < crawlWindow {
+		return
+	}
+	seenDelta := p.Seen - w.crawlBase.Seen
+	fetchedDelta := p.Fetched - w.crawlBase.Fetched
+	queueStuck := p.QueueDepth > 0 && p.QueueDepth >= w.crawlBase.QueueDepth
+	windowStart := w.crawlBaseAt
+	w.crawlBase = p
+	w.crawlBaseAt = now
+
+	if seenDelta <= 0 || fetchedDelta <= 0 || fetchedDelta >= crawlMinFetched || !queueStuck {
+		w.crawlStalled = false
+		w.crawlBadWindows = 0
+		return
+	}
+	if !w.crawlStalled {
+		w.crawlStalled = true
+		w.crawlSince = windowStart
+	}
+	w.crawlBadWindows++
+	if w.crawlBadWindows == 1 {
+		w.logger.Printf("watchdog: ERROR ingest crawling: only +%d records stored in %s while discovery kept moving (seen +%d) and the fetch queue did not drain (queue_depth %d); goroutine dump follows",
+			fetchedDelta, crawlWindow, seenDelta, p.QueueDepth)
+		w.logger.Printf("watchdog: goroutine dump:\n%s", w.cfg.Stack())
+		return
+	}
+	if !w.exited {
+		w.exited = true
+		w.logger.Printf("watchdog: ERROR ingest still crawling after another %s (+%d records stored, queue_depth %d); dumping goroutines and exiting for systemd to restart the process",
+			crawlWindow, fetchedDelta, p.QueueDepth)
+		w.logger.Printf("watchdog: goroutine dump:\n%s", w.cfg.Stack())
+		w.cfg.Exit(1)
 	}
 }
