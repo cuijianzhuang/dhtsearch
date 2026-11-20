@@ -52,10 +52,14 @@ export default async function AdminTorrentBrowser({
 
   return (
     <AdminShell active={tab}>
+      {/* The filter bar sticks to the top of the viewport while the
+          list scrolls: on a 20-row page the operator can re-filter
+          without scrolling back up first. Solid canvas background so
+          rows pass underneath it cleanly. */}
       <form
         method="get"
         action={basePath}
-        className="flex flex-wrap items-center gap-2"
+        className="sticky top-0 z-20 -mt-3 flex flex-wrap items-center gap-2 bg-canvas pt-3 pb-3"
       >
         <input
           type="search"

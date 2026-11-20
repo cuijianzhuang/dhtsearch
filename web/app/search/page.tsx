@@ -14,6 +14,7 @@ import { fetchSiteConfig } from "@/lib/site";
 import { formatCount } from "@/lib/format";
 import SearchBox from "@/components/SearchBox";
 import ResultList from "@/components/ResultList";
+import BackToTop from "@/components/BackToTop";
 import Pagination from "@/components/Pagination";
 import SortSelect from "@/components/SortSelect";
 import SiteLogo from "@/components/SiteLogo";
@@ -287,6 +288,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
       <footer className="mt-auto pt-10 text-center text-xs text-faint">
         {site.name} · 干净、无广告的磁力搜索
       </footer>
+      <BackToTop />
     </main>
   );
 }

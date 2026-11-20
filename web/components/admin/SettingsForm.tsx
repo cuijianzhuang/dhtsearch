@@ -12,11 +12,12 @@
 // secrets start empty and are only sent when typed into (an empty
 // secret field means "leave unchanged", never "clear").
 
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { AdminSettingItem, AdminSettingsGroup } from "@/lib/admin";
 import { THEME_PRESETS } from "@/lib/theme";
+import BackToTop from "@/components/BackToTop";
 
 const APPEARANCE_LABELS: Record<string, string> = {
   system: "跟随系统",
@@ -128,6 +129,40 @@ export default function SettingsForm({
   } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // Long-page relief: with a dozen groups and 65 items, the page is
+  // several viewports tall. Groups collapse (header click), and a
+  // group index — a sticky rail on desktop, a sticky chip bar on
+  // mobile — jumps to a group and highlights the one in view.
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const [activeGroup, setActiveGroup] = useState(groups[0]?.key ?? "");
+
+  function toggleGroup(key: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            setActiveGroup(e.target.id.replace("settings-group-", ""));
+          }
+        }
+      },
+      { rootMargin: "-10% 0px -75% 0px" }
+    );
+    for (const g of groups) {
+      const el = document.getElementById(`settings-group-${g.key}`);
+      if (el) observer.observe(el);
+    }
+    return () => observer.disconnect();
+  }, [groups]);
 
   // After a save, router.refresh() delivers fresh props (new sources
   // and effective values); resync the fields from them while keeping
@@ -412,19 +447,98 @@ export default function SettingsForm({
         </p>
       )}
 
+      <div className="flex items-start gap-6">
+        {/* Group index, desktop: a sticky rail. */}
+        <nav
+          aria-label="设置分组"
+          className="sticky top-4 hidden w-40 shrink-0 lg:block"
+        >
+          <ul className="space-y-1">
+            {groups.map((g) => (
+              <li key={g.key}>
+                <a
+                  href={`#settings-group-${g.key}`}
+                  aria-current={activeGroup === g.key ? "true" : undefined}
+                  className={`flex min-h-9 items-center justify-between gap-2 rounded-lg px-3 text-sm transition-colors ${
+                    activeGroup === g.key
+                      ? "bg-accent-soft font-medium text-accent-ink"
+                      : "text-mute hover:bg-soft hover:text-accent-ink"
+                  }`}
+                >
+                  <span className="min-w-0 truncate">{g.label}</span>
+                  <span className="shrink-0 text-xs tabular-nums opacity-70">
+                    {g.items.length}
+                  </span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+
+        <div className="flex min-w-0 flex-1 flex-col gap-6">
+          {/* Group index, mobile: a sticky horizontal chip bar. */}
+          <nav
+            aria-label="设置分组"
+            className="sticky top-2 z-20 flex gap-2 overflow-x-auto rounded-xl border border-line bg-surface p-2 shadow-card lg:hidden"
+          >
+            {groups.map((g) => (
+              <a
+                key={g.key}
+                href={`#settings-group-${g.key}`}
+                aria-current={activeGroup === g.key ? "true" : undefined}
+                className={`inline-flex min-h-9 shrink-0 items-center rounded-lg px-3 text-sm whitespace-nowrap transition-colors ${
+                  activeGroup === g.key
+                    ? "bg-accent-soft font-medium text-accent-ink"
+                    : "text-mute hover:text-accent-ink"
+                }`}
+              >
+                {g.label}
+              </a>
+            ))}
+          </nav>
+
       {groups.map((group) => (
         <section
           key={group.key}
-          className="rounded-xl border border-line bg-surface shadow-card"
+          id={`settings-group-${group.key}`}
+          className="scroll-mt-20 rounded-xl border border-line bg-surface shadow-card lg:scroll-mt-4"
         >
-          <h2 className="border-b border-line-2 px-4 py-3 text-sm font-semibold text-ink">
-            {group.label}
-            {group.key === "service" && (
-              <span className="ml-2 text-xs font-normal text-faint">
-                只读 · 在 env 文件里改，重启生效
+          <h2 className="border-b border-line-2 text-sm font-semibold text-ink">
+            <button
+              type="button"
+              onClick={() => toggleGroup(group.key)}
+              aria-expanded={!collapsed.has(group.key)}
+              className="flex w-full items-center gap-2 px-4 py-3 text-left"
+            >
+              <span className="min-w-0 flex-1">
+                {group.label}
+                {group.key === "service" && (
+                  <span className="ml-2 text-xs font-normal text-faint">
+                    只读 · 在 env 文件里改，重启生效
+                  </span>
+                )}
               </span>
-            )}
+              <span className="shrink-0 text-xs font-normal text-faint">
+                {group.items.length} 项
+              </span>
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className={`h-4 w-4 shrink-0 text-faint transition-transform ${
+                  collapsed.has(group.key) ? "-rotate-90" : ""
+                }`}
+                aria-hidden
+              >
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </button>
           </h2>
+          {!collapsed.has(group.key) && (
+            <>
           {group.key === "auth" && <AuthCallbackInfo />}
           {group.key === "moderation" ? (
             <div className="px-4 py-4">
@@ -484,6 +598,8 @@ export default function SettingsForm({
             ))}
           </div>
           )}
+            </>
+          )}
         </section>
       ))}
 
@@ -500,6 +616,10 @@ export default function SettingsForm({
           {saving ? "保存中…" : "保存设置"}
         </button>
       </div>
+        </div>
+      </div>
+      {/* Offset clears this page's own sticky save bar. */}
+      <BackToTop bottomClass="bottom-24" />
     </div>
   );
 }

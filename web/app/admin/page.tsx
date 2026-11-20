@@ -4,6 +4,7 @@ import AdminShell, {
   AdminDisabledNotice,
 } from "@/components/admin/AdminShell";
 import OverviewDashboard from "@/components/admin/overview/OverviewDashboard";
+import BackToTop from "@/components/BackToTop";
 import {
   fetchAdminOverview,
   fetchAdminTorrents,
@@ -54,6 +55,7 @@ export default async function AdminOverviewPage() {
         initialTrends={trends}
         initialLatest={latest}
       />
+      <BackToTop bottomClass="bottom-6" />
     </AdminShell>
   );
 }
