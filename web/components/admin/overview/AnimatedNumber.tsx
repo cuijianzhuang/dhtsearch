@@ -16,7 +16,7 @@
 // content, so SSR and no-JS still show the real number.
 
 import { useEffect, useRef, useState } from "react";
-import { formatCount } from "@/lib/format";
+import { formatCount, formatExactCount } from "@/lib/format";
 
 export default function AnimatedNumber({ value }: { value: number }) {
   const ref = useRef<HTMLSpanElement>(null);
@@ -58,5 +58,15 @@ export default function AnimatedNumber({ value }: { value: number }) {
     return () => cancelAnimationFrame(rafRef.current);
   }, [value]);
 
-  return <span ref={ref}>{formatCount(firstValue)}</span>;
+  // Big values render abbreviated (万/亿) so they fit their slot;
+  // the exact grouped figure rides in the title, one hover away.
+  // The attribute updates with the prop even though the text node
+  // stays mount-owned — React only rewrites what changed.
+  const exact = formatExactCount(value);
+  const title = formatCount(value) !== exact ? exact : undefined;
+  return (
+    <span ref={ref} title={title}>
+      {formatCount(firstValue)}
+    </span>
+  );
 }

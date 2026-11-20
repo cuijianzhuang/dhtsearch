@@ -116,7 +116,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import type { AdminOverview } from "@/lib/admin";
-import { formatCount } from "@/lib/format";
+import { formatCount, formatExactCount } from "@/lib/format";
 import AnimatedNumber from "./AnimatedNumber";
 
 interface Tier {
@@ -398,8 +398,8 @@ export default function PipelineFlow({
       </div>
 
       <p className="mt-1.5 border-t border-line-2 pt-1 text-[10px] leading-[14px] text-faint sm:mt-2 sm:pt-1.5 sm:text-[11px] sm:leading-4">
-        元数据超时 {formatCount(cur.timedOut)} · 元数据失败{" "}
-        {formatCount(cur.failed)} · 早筛丢弃 {formatCount(cur.prescreen)}
+        元数据超时 {formatExactCount(cur.timedOut)} · 元数据失败{" "}
+        {formatExactCount(cur.failed)} · 早筛丢弃 {formatExactCount(cur.prescreen)}
         。除「入库」外，管线计数为进程累计值，「本轮」为最近一次
         轮询间隔内的增量；「入库」为库内当前总数，与下方种子总数
         一致，其「本轮」为间隔内的净增行数。
