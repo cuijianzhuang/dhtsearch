@@ -81,7 +81,7 @@ export default async function AdminSettingsGroupPage({
         <div>
           <Link
             href="/admin/settings"
-            className="inline-flex min-h-9 items-center gap-1 text-sm text-mute transition-colors hover:text-accent-ink"
+            className="inline-flex min-h-11 items-center gap-1 text-sm text-mute transition-colors hover:text-accent-ink"
           >
             <svg
               viewBox="0 0 24 24"

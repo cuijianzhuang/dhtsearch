@@ -171,7 +171,7 @@ export default function UpdateCard({ initial }: { initial: AdminUpdate | null })
 
   if (!data) {
     return (
-      <section className="mb-4 rounded-xl border border-line bg-surface p-4 shadow-card">
+      <section className="rounded-xl border border-line bg-surface p-4 shadow-card">
         <h2 className="text-base font-semibold">系统更新</h2>
         <p className="mt-1 text-sm text-mute">
           暂时读不到更新状态（后端不可达或版本过旧），稍后刷新页面重试。
@@ -185,7 +185,7 @@ export default function UpdateCard({ initial }: { initial: AdminUpdate | null })
   const showUpgrade = up.state !== "idle" || up.pending;
 
   return (
-    <section className="mb-4 rounded-xl border border-line bg-surface p-4 shadow-card">
+    <section className="rounded-xl border border-line bg-surface p-4 shadow-card">
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="text-base font-semibold">系统更新</h2>
         {data.update_available ? (
