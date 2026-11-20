@@ -12,11 +12,17 @@ import (
 )
 
 // Load reads path and sets any variable not already present in the
-// environment. A missing file is not an error.
+// environment. A missing file is not an error, and neither is an
+// unreadable one: this layer is best-effort convenience for local runs,
+// and the real environment is authoritative. Production makes that
+// concrete — /etc/dhtsearch/dhtsearch.env is 0600 root-owned, the
+// server runs unprivileged, and systemd's EnvironmentFile has already
+// applied the values before exec; surfacing EACCES there only spams
+// the journal on every start.
 func Load(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
 			return nil
 		}
 		return err

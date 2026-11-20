@@ -267,6 +267,25 @@ func TestRateLimitFloors(t *testing.T) {
 }
 
 // A rate-limit override stored before the floors existed (e.g. the
+// The snapshot's restart flag and the item prose must agree: a Desc
+// that says 重启生效 with Restart=false shipped once (the whole service
+// group, HTTP_ADDR included) and made the settings page contradict
+// itself. The service group is captured once at process start, so all
+// of it is restart-required even though it is read-only here.
+func TestRegistryRestartFlagMatchesDesc(t *testing.T) {
+	for _, it := range Registry {
+		if strings.Contains(it.Desc, "重启生效") && !it.Restart {
+			t.Errorf("%s: Desc says 重启生效 but Restart=false", it.Key)
+		}
+		if strings.Contains(it.Desc, "立即生效") && it.Restart {
+			t.Errorf("%s: Desc says 立即生效 but Restart=true", it.Key)
+		}
+		if it.Group == "service" && !it.Restart {
+			t.Errorf("%s: service-group items are read once at startup, Restart must be true", it.Key)
+		}
+	}
+}
+
 // 0.01/1 pair from the lockout report) must be ignored on load, not
 // resurrected: the manager falls back to the base layer.
 func TestRateLimitFloorHealsStoredOverride(t *testing.T) {

@@ -19,7 +19,13 @@ import (
 // public API's — the token is the only credential, so guessing must be
 // slow even from an address the general limiter would still serve.
 const (
-	adminLoginRate  = 0.1 // 6 attempts/minute sustained per client
+	// Login limiter shape (documented verbatim in README): a token
+	// bucket per key, capacity adminLoginBurst, refilling one token
+	// per 1/adminLoginRate = 10s (a sustained 6 attempts/minute).
+	// A fresh client therefore gets 5 back-to-back attempts through
+	// and the 6th is a 429 — "6/minute" alone understates the burst
+	// behavior, which is why the docs state both numbers.
+	adminLoginRate  = 0.1
 	adminLoginBurst = 5
 	maxAdminBatch   = 100
 )

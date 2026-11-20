@@ -198,6 +198,26 @@ func TestAdminLogin(t *testing.T) {
 	}
 }
 
+// The documented login-limit semantics, pinned: the per-client token
+// bucket starts full at adminLoginBurst, so exactly that many attempts
+// pass the limiter back-to-back (bad ones answer 401) and the next one
+// is a 429; the bucket then refills one token per 1/adminLoginRate
+// seconds. README's wording states this burst-then-refill shape — if
+// the constants are retuned, this test and the README move together.
+func TestAdminLoginRateLimitBurstSemantics(t *testing.T) {
+	base, _ := adminFixture(t, testAdminToken)
+	for i := 1; i <= adminLoginBurst; i++ {
+		code, _ := adminReq(t, "POST", base+"/api/admin/login", "", map[string]string{"token": "nope"})
+		if code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d of %d: %d, want 401 (limiter must let the burst through)", i, adminLoginBurst, code)
+		}
+	}
+	code, _ := adminReq(t, "POST", base+"/api/admin/login", "", map[string]string{"token": "nope"})
+	if code != http.StatusTooManyRequests {
+		t.Fatalf("attempt %d: %d, want 429 (bucket empty)", adminLoginBurst+1, code)
+	}
+}
+
 // Login attempts are throttled well below the general API rate: a burst
 // of bad guesses must start drawing 429s.
 func TestAdminLoginRateLimited(t *testing.T) {

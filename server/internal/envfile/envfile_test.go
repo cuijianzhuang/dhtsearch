@@ -53,3 +53,21 @@ func TestLoadMissingFileIsNotAnError(t *testing.T) {
 		t.Fatalf("missing file returned %v, want nil", err)
 	}
 }
+
+// An env file the process cannot read (production: /etc/dhtsearch/
+// dhtsearch.env is 0600 root-owned while the server runs unprivileged,
+// with systemd's EnvironmentFile having already applied the values) is
+// not an error either: the file is a best-effort convenience layer and
+// the real environment is authoritative. When the tests run as root the
+// open succeeds despite mode 0000, so this only bites unprivileged —
+// run the compiled test binary as an unprivileged user to see it fail
+// against a loader that surfaces EACCES.
+func TestLoadUnreadableFileIsNotAnError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("FROM_UNREADABLE_FILE=1\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if err := Load(path); err != nil {
+		t.Fatalf("unreadable file returned %v, want nil", err)
+	}
+}
