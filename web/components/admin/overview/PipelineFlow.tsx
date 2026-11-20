@@ -72,8 +72,9 @@
 // warn treatment; at rest it sits slightly transparent.
 //
 // The visual layer follows the approved design mockup: each stage
-// is a large node ring — a saturated accent disc with a bright rim
-// and a soft glow — with the stage name, the big count and the
+// is a large node ring — a hollow, luminous donut band with a
+// hairline orbit and a fine inner ring, its centre open so the web
+// shows through — with the stage name, the big count and the
 // captions stacked under it, and the connector rails run ring to
 // ring at ring height. The ring carries the stage's state in the
 // same language: full saturation and glow while work reaches it,
@@ -84,7 +85,13 @@
 // across the whole track, densest at the DHT end; both pulse at
 // segment 1's tier rate and sit dim and still at a zero Δseen.
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import type { AdminOverview } from "@/lib/admin";
 import { formatCount } from "@/lib/format";
 import AnimatedNumber from "./AnimatedNumber";
@@ -405,11 +412,12 @@ function Stage({
       }`}
     >
       {backdropTier && <WebBackdrop tier={backdropTier} />}
-      {/* The stage as a network node: a large ring (its size and
-          palette live in globals.css) lit by the stage's tone —
-          saturated and glowing in the accent while work reaches it,
-          warning-colored on the stalled fetch stage, desaturated
-          when nothing arrived this poll. */}
+      {/* The stage as a network node: a large hollow ring (drawn by
+          StageRingSvg; its size and palette live in globals.css)
+          lit by the stage's tone — saturated and glowing in the
+          accent while work reaches it, warning-colored on the
+          stalled fetch stage, desaturated when nothing arrived
+          this poll. */}
       <div
         aria-hidden
         className={`stage-ring relative z-10 ${
@@ -419,7 +427,9 @@ function Stage({
               ? "stage-ring-faint"
               : ""
         }`}
-      />
+      >
+        <StageRingSvg />
+      </div>
       <div className="relative z-10 flex flex-col items-center">
         <p className="mt-2 h-5 text-sm leading-5 font-semibold text-ink">
           {label}
@@ -455,20 +465,56 @@ function Stage({
   );
 }
 
-/** The spider web behind the DHT ring: radial threads and
+/** The stage ring itself: a hollow donut in the mockup's language —
+ *  a hairline orbit circle, a luminous band (a gradient along the
+ *  stroke, bright at the top), a fine inner ring, and an open centre
+ *  over a barely-there deep tint, so the web and mesh show through.
+ *  All colors hang off the wrapper's --ring-c (see globals.css), so
+ *  the warn/faint states recolor the whole drawing by variable. The
+ *  gradient id is per-instance: five rings share the document, and a
+ *  shared id would resolve every band to the first ring's gradient
+ *  context. */
+function StageRingSvg() {
+  const gid = useId().replace(/:/g, "");
+  return (
+    <svg viewBox="0 0 96 96" className="block h-full w-full" fill="none">
+      <defs>
+        <linearGradient id={gid} x1="0" y1="0" x2="0.3" y2="1">
+          <stop offset="0%" className="ring-stop-hi" />
+          <stop offset="55%" className="ring-stop-mid" />
+          <stop offset="100%" className="ring-stop-lo" />
+        </linearGradient>
+      </defs>
+      <circle cx="48" cy="48" r="46.5" className="ring-orbit" strokeWidth="0.8" />
+      <circle cx="48" cy="48" r="31.5" className="ring-core" />
+      <circle
+        cx="48"
+        cy="48"
+        r="39"
+        stroke={`url(#${gid})`}
+        strokeWidth="10.5"
+      />
+      <circle cx="48" cy="48" r="31.5" className="ring-inner" strokeWidth="0.8" />
+    </svg>
+  );
+}
+
+/** The spider web behind the DHT ring: fine radial threads and
  *  concentric arcs drawn as one static SVG, centred on the ring and
- *  spilling past the stage cell (the track clips it to the band).
- *  Its group opacity pulses at segment 1's tier rate while
- *  discoveries arrive and sits dim and still at a zero Δseen;
- *  .flow-paused freezes the pulse with everything else when the
- *  data goes stale. */
+ *  reaching well past it — a radial fade mask dissolves the outer
+ *  arcs around the second and third rings instead of clipping them.
+ *  The threads are pale cyan-grey (--web-c in globals.css), never
+ *  the full-strength accent. Its group opacity pulses at segment
+ *  1's tier rate while discoveries arrive and sits dimmer and still
+ *  at a zero Δseen; .flow-paused freezes the pulse with everything
+ *  else when the data goes stale. */
 function WebBackdrop({ tier }: { tier: Tier }) {
   const active = tier.dots > 0;
   return (
     <svg
       aria-hidden
-      className="pointer-events-none absolute top-11 left-1/2 z-0 h-[300px] w-[300px] -translate-x-1/2 -translate-y-1/2 sm:top-[42px] lg:top-12 lg:h-[340px] lg:w-[340px]"
-      viewBox="0 0 200 200"
+      className="web-fade pointer-events-none absolute top-11 left-1/2 z-0 h-[440px] w-[440px] -translate-x-1/2 -translate-y-1/2 sm:top-[42px] lg:top-12 lg:h-[540px] lg:w-[540px]"
+      viewBox="0 0 240 240"
       fill="none"
     >
       <g
@@ -476,31 +522,31 @@ function WebBackdrop({ tier }: { tier: Tier }) {
         style={
           active
             ? { animationDuration: `${tier.seconds}s` }
-            : { opacity: 0.16 }
+            : { opacity: 0.3 }
         }
-        stroke="currentColor"
-        strokeWidth="0.8"
+        strokeWidth="0.5"
       >
-        <g className="text-accent">
-          <path d="M114 100 L197 100 M112.1 107 L184 148.5 M107 112.1 L148.5 184 M100 114 L100 197 M93 112.1 L51.5 184 M87.9 107 L16 148.5 M86 100 L3 100 M87.9 93 L16 51.5 M93 87.9 L51.5 16 M100 86 L100 3 M107 87.9 L148.5 16 M112.1 93 L184 51.5" />
-          <circle cx="100" cy="100" r="22" />
-          <circle cx="100" cy="100" r="38" />
-          <circle cx="100" cy="100" r="54" />
-          <circle cx="100" cy="100" r="70" />
-          <circle cx="100" cy="100" r="86" />
-          <circle cx="100" cy="100" r="97" />
-          <g fill="currentColor" stroke="none">
-            <circle cx="154" cy="100" r="1.6" />
-            <circle cx="127" cy="146.8" r="1.6" />
-            <circle cx="73" cy="146.8" r="1.6" />
-            <circle cx="46" cy="100" r="1.6" />
-            <circle cx="73" cy="53.2" r="1.6" />
-            <circle cx="127" cy="53.2" r="1.6" />
-            <circle cx="174.5" cy="143" r="1.6" />
-            <circle cx="25.5" cy="143" r="1.6" />
-            <circle cx="25.5" cy="57" r="1.6" />
-            <circle cx="100" cy="14" r="1.6" />
-            <circle cx="174.5" cy="57" r="1.6" />
+        <g className="web-thread">
+          <path d="M6 120 H234 M120 6 V234 M21.3 63 L218.7 177 M21.3 177 L218.7 63 M63 21.3 L177 218.7 M63 218.7 L177 21.3" />
+          <circle cx="120" cy="120" r="26" />
+          <circle cx="120" cy="120" r="44" />
+          <circle cx="120" cy="120" r="62" />
+          <circle cx="120" cy="120" r="80" />
+          <circle cx="120" cy="120" r="98" />
+          <circle cx="120" cy="120" r="114" />
+          <g className="web-node">
+            <circle cx="182" cy="120" r="1.3" />
+            <circle cx="173.7" cy="151" r="1.3" />
+            <circle cx="151" cy="173.7" r="1.3" />
+            <circle cx="120" cy="182" r="1.3" />
+            <circle cx="89" cy="173.7" r="1.3" />
+            <circle cx="66.3" cy="151" r="1.3" />
+            <circle cx="58" cy="120" r="1.3" />
+            <circle cx="66.3" cy="89" r="1.3" />
+            <circle cx="89" cy="66.3" r="1.3" />
+            <circle cx="120" cy="58" r="1.3" />
+            <circle cx="151" cy="66.3" r="1.3" />
+            <circle cx="173.7" cy="89" r="1.3" />
           </g>
         </g>
       </g>
@@ -563,35 +609,34 @@ function MeshBackdrop({ tier }: { tier: Tier }) {
         style={
           active
             ? { animationDuration: `${tier.seconds}s` }
-            : { opacity: 0.14 }
+            : { opacity: 0.3 }
         }
       >
         <path
           d="M30 60 L80 25 M30 60 L95 95 M80 25 L150 55 M80 25 L215 20 M95 95 L150 55 M95 95 L185 110 M150 55 L215 20 M150 55 L260 80 M185 110 L260 80 M185 110 L350 120 M215 20 L320 40 M260 80 L320 40 M260 80 L350 120 M260 80 L410 70 M320 40 L410 70 M350 120 L410 70 M410 70 L470 30 M410 70 L520 95 M470 30 L600 55 M520 95 L600 55 M600 55 L690 85 M690 85 L770 40 M690 85 L860 75 M770 40 L860 75 M860 75 L950 50 M950 50 L1050 90 M1050 90 L1150 45 M860 75 L1050 90"
-          stroke="currentColor"
           strokeWidth="1"
-          className="text-input"
+          className="mesh-lines"
         />
-        <g fill="currentColor">
-          <circle cx="30" cy="60" r="3.2" className="text-accent" />
-          <circle cx="80" cy="25" r="2" className="text-faint" />
-          <circle cx="95" cy="95" r="2" className="text-faint" />
-          <circle cx="150" cy="55" r="2.6" className="text-accent" />
-          <circle cx="185" cy="110" r="1.8" className="text-faint" />
-          <circle cx="215" cy="20" r="1.8" className="text-faint" />
-          <circle cx="260" cy="80" r="3" className="text-accent" />
-          <circle cx="320" cy="40" r="2" className="text-faint" />
-          <circle cx="350" cy="120" r="1.8" className="text-faint" />
-          <circle cx="410" cy="70" r="2.2" className="text-faint" />
-          <circle cx="470" cy="30" r="1.8" className="text-faint" />
-          <circle cx="520" cy="95" r="2" className="text-faint" />
-          <circle cx="600" cy="55" r="2.6" className="text-accent" />
-          <circle cx="690" cy="85" r="2" className="text-faint" />
-          <circle cx="770" cy="40" r="1.8" className="text-faint" />
-          <circle cx="860" cy="75" r="2.2" className="text-faint" />
-          <circle cx="950" cy="50" r="1.8" className="text-faint" />
-          <circle cx="1050" cy="90" r="2" className="text-faint" />
-          <circle cx="1150" cy="45" r="1.8" className="text-faint" />
+        <g>
+          <circle cx="30" cy="60" r="3.2" className="mesh-node-hot" />
+          <circle cx="80" cy="25" r="2" className="mesh-node" />
+          <circle cx="95" cy="95" r="2" className="mesh-node" />
+          <circle cx="150" cy="55" r="2.6" className="mesh-node-hot" />
+          <circle cx="185" cy="110" r="1.8" className="mesh-node" />
+          <circle cx="215" cy="20" r="1.8" className="mesh-node" />
+          <circle cx="260" cy="80" r="3" className="mesh-node-hot" />
+          <circle cx="320" cy="40" r="2" className="mesh-node" />
+          <circle cx="350" cy="120" r="1.8" className="mesh-node" />
+          <circle cx="410" cy="70" r="2.2" className="mesh-node" />
+          <circle cx="470" cy="30" r="1.8" className="mesh-node" />
+          <circle cx="520" cy="95" r="2" className="mesh-node" />
+          <circle cx="600" cy="55" r="2.6" className="mesh-node-hot" />
+          <circle cx="690" cy="85" r="2" className="mesh-node" />
+          <circle cx="770" cy="40" r="1.8" className="mesh-node" />
+          <circle cx="860" cy="75" r="2.2" className="mesh-node" />
+          <circle cx="950" cy="50" r="1.8" className="mesh-node" />
+          <circle cx="1050" cy="90" r="2" className="mesh-node" />
+          <circle cx="1150" cy="45" r="1.8" className="mesh-node" />
         </g>
       </g>
     </svg>

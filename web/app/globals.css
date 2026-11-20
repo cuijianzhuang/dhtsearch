@@ -35,6 +35,13 @@
   --pri-ink: var(--pri-ink-light, #155e75);
   --pri-soft: color-mix(in srgb, var(--pri) 7%, var(--card));
   --pri-line: color-mix(in srgb, var(--pri) 26%, var(--card));
+  /* Pipeline hero backdrops: the spider web's threads and the
+     node-mesh's lines are pale cyan-grey mixes of the accent into
+     the card — fine and light, never the full-strength accent.
+     The dark palette mixes further toward the accent so the same
+     hairlines stay visible on a dark card. */
+  --web-c: color-mix(in srgb, var(--pri) 40%, var(--card));
+  --mesh-c: color-mix(in srgb, var(--pri) 30%, var(--card));
   --on-pri: #ffffff;
   --warn: #d97706;
   --warn-ink: #92400e;
@@ -64,6 +71,8 @@
   --pri-ink: var(--pri-ink-dark, #2dd4bf);
   --pri-soft: color-mix(in srgb, var(--pri) 14%, var(--card));
   --pri-line: color-mix(in srgb, var(--pri) 40%, var(--card));
+  --web-c: color-mix(in srgb, var(--pri) 62%, var(--card));
+  --mesh-c: color-mix(in srgb, var(--pri) 50%, var(--card));
   --warn: #f59e0b;
   --warn-ink: #fcd34d;
   --danger: #f87171;
@@ -91,6 +100,8 @@
     --pri-ink: var(--pri-ink-dark, #2dd4bf);
     --pri-soft: color-mix(in srgb, var(--pri) 14%, var(--card));
     --pri-line: color-mix(in srgb, var(--pri) 40%, var(--card));
+    --web-c: color-mix(in srgb, var(--pri) 62%, var(--card));
+    --mesh-c: color-mix(in srgb, var(--pri) 50%, var(--card));
     --warn: #f59e0b;
     --warn-ink: #fcd34d;
     --danger: #f87171;
@@ -224,18 +235,18 @@
 
 .flow-dot-x {
   background: radial-gradient(
-    circle at calc(100% - 4px) 50%,
-    var(--pri) 0 2.5px,
-    transparent 3.5px
+    circle at calc(100% - 3px) 50%,
+    color-mix(in srgb, var(--pri) 78%, var(--card)) 0 1.8px,
+    transparent 2.8px
   );
   animation-name: flow-x;
 }
 
 .flow-dot-y {
   background: radial-gradient(
-    circle at 50% calc(100% - 4px),
-    var(--pri) 0 2.5px,
-    transparent 3.5px
+    circle at 50% calc(100% - 3px),
+    color-mix(in srgb, var(--pri) 78%, var(--card)) 0 1.8px,
+    transparent 2.8px
   );
   animation-name: flow-y;
 }
@@ -252,9 +263,13 @@
 
 /* Pipeline hero stage rings + spider web (PipelineFlow.tsx). Each
    stage is a large node ring in the approved mockup's language: a
-   saturated accent disc with a brighter heart and rim, a pale halo
-   and a soft glow, drawn as one radial-gradient over --ring-c so
-   the warning state recolors it by swapping the variable. A stage
+   HOLLOW donut — a luminous band with a brighter top rim, drawn as
+   an SVG stroke gradient over --ring-c so the warning state
+   recolors it by swapping the variable; a hairline orbit circle
+   outside the band and a fine inner ring inside it; the centre
+   left open (a barely-there deep tint at most) so the web and
+   mesh show through. No sphere shading, no highlight blob: the
+   only depth is a soft drop-shadow glow under the band. A stage
    whose inbound delta was zero renders desaturated, dimmer and
    glow-less (.stage-ring-faint); the crawler-disabled case mutes
    every ring through the stage's own opacity on top of that. Ring
@@ -270,22 +285,12 @@
   display: block;
   width: 88px;
   height: 88px;
-  border-radius: 9999px;
-  background: radial-gradient(
-    circle,
-    color-mix(in srgb, var(--ring-c) 68%, #fff) 0%,
-    var(--ring-c) 30%,
-    color-mix(in srgb, var(--ring-c) 84%, #000) 52%,
-    color-mix(in srgb, var(--ring-c) 58%, #fff) 61%,
-    var(--ring-c) 71%,
-    color-mix(in srgb, var(--ring-c) 20%, transparent) 85%,
-    transparent 96%
+  filter: drop-shadow(
+    0 0 12px color-mix(in srgb, var(--ring-c) 30%, transparent)
   );
-  box-shadow: 0 0 26px color-mix(in srgb, var(--ring-c) 34%, transparent);
   transition:
     filter 0.3s ease,
-    opacity 0.3s ease,
-    box-shadow 0.3s ease;
+    opacity 0.3s ease;
 }
 
 .stage-ring-warn {
@@ -294,8 +299,35 @@
 
 .stage-ring-faint {
   filter: saturate(0.22);
-  opacity: 0.8;
-  box-shadow: none;
+  opacity: 0.78;
+}
+
+/* The ring's drawn parts (StageRingSvg in PipelineFlow.tsx): the
+   orbit and inner hairlines are pale mixes of the ring color into
+   the card, the band's gradient stops run bright → full → deep,
+   and the centre disc is a whisper of the ring color, not a fill. */
+.ring-orbit {
+  stroke: color-mix(in srgb, var(--ring-c) 38%, var(--card));
+}
+
+.ring-inner {
+  stroke: color-mix(in srgb, var(--ring-c) 45%, var(--card));
+}
+
+.ring-core {
+  fill: color-mix(in srgb, var(--ring-c) 7%, transparent);
+}
+
+.ring-stop-hi {
+  stop-color: color-mix(in srgb, var(--ring-c) 52%, #fff);
+}
+
+.ring-stop-mid {
+  stop-color: var(--ring-c);
+}
+
+.ring-stop-lo {
+  stop-color: color-mix(in srgb, var(--ring-c) 82%, #000);
 }
 
 @media (min-width: 640px) {
@@ -312,13 +344,48 @@
   }
 }
 
+/* The web's threads and anchor dots take the pale --web-c, and a
+   radial mask dissolves the web's outer reaches so it fades into
+   the hero instead of ending at a hard edge. */
+.web-thread {
+  stroke: var(--web-c);
+}
+
+.web-node {
+  fill: var(--web-c);
+  stroke: none;
+}
+
+.web-fade {
+  -webkit-mask-image: radial-gradient(
+    closest-side,
+    #000 52%,
+    transparent 98%
+  );
+  mask-image: radial-gradient(closest-side, #000 52%, transparent 98%);
+}
+
+/* The node-mesh's hairlines and dots take the pale --mesh-c; its
+   busier nodes sit one step stronger. */
+.mesh-lines {
+  stroke: var(--mesh-c);
+}
+
+.mesh-node {
+  fill: var(--mesh-c);
+}
+
+.mesh-node-hot {
+  fill: color-mix(in srgb, var(--pri) 72%, var(--card));
+}
+
 @keyframes web-pulse {
   0%,
   100% {
-    opacity: 0.34;
+    opacity: 0.5;
   }
   50% {
-    opacity: 0.58;
+    opacity: 0.8;
   }
 }
 
@@ -408,10 +475,10 @@
 @keyframes mesh-pulse {
   0%,
   100% {
-    opacity: 0.15;
+    opacity: 0.32;
   }
   50% {
-    opacity: 0.4;
+    opacity: 0.58;
   }
 }
 
