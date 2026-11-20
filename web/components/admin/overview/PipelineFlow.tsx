@@ -5,8 +5,10 @@
 // It replaces the old static funnel bars. Every moving element is
 // driven by the deltas between the last two /api/admin-data polls
 // (the dashboard polls every 8s and passes the previous payload in):
-// no delta, no motion. The mapping is deliberately monotonic — a
-// bigger delta never renders slower or sparser than a smaller one:
+// no delta, no comets — the only motion left on a still segment is
+// the rail's slow idle dash drift. The mapping is deliberately
+// monotonic — a bigger delta never renders slower or sparser than
+// a smaller one:
 //
 //   segment            rate source (per-poll delta)
 //   DHT → 采样发现     Δ seen            (discoveries arriving)
@@ -21,22 +23,36 @@
 //                                         size, not a counter
 //                                         derivation)
 //
-//   delta tier         dots   dot period
-//   0                  0      — (stage visibly still)
-//   1–9                1      3.6s
-//   10–49              2      2.4s
-//   50–199             3      1.6s
-//   ≥200               3      0.9s
+//   delta tier         stream  period
+//   0                  0       — (no comets; the rail's dashes
+//                                 drift at the slow idle rate)
+//   1–9                3       3.6s
+//   10–49              5       2.4s
+//   50–199             7       1.6s
+//   ≥200               9       0.9s
+//
+// The stream is a row of comets evenly spaced across the segment's
+// FULL rail (ring edge to ring edge, drawn by the ConnectorLayer),
+// so a flowing segment reads as a pipe carrying packets end to
+// end, not a lone dot crossing the middle slot. Comets remain
+// strictly delta-driven — a zero delta renders none, because
+// packets are data. The rail's dash drift is ambience, not data:
+// it runs at the tier's pace on a flowing segment and at a much
+// slower idle rate on a still one, so an idle pipe reads
+// pressurised rather than dead — while the stalled segment (no
+// drift at all, warning palette) stays distinguishable from
+// merely idle, and a disabled crawler stops everything.
 //
 // Failure modes are first-class, because this pipeline has earned
 // them: the crawler being disabled stops the whole flow and says so;
 // discoveries arriving while the fetch stage completes nothing (and
 // its queue is non-empty) flags 元数据抓取 as 疑似停滞 in warn colors
-// with its outbound segments still; a failed poll freezes the dots
-// (animation-play-state via .flow-paused) at the last measured state
-// while the page's status line reports the failure. Dots are pure
-// CSS keyframes on transform (see globals.css), re-tiered only when
-// a poll lands — never per-frame React state — and are hidden under
+// with its outbound segments still; a failed poll freezes the
+// stream (animation-play-state via .flow-paused) at the last
+// measured state while the page's status line reports the
+// failure. The stream is pure CSS keyframes on transform (see
+// globals.css), re-tiered only when a poll lands — never
+// per-frame React state — and is hidden under
 // prefers-reduced-motion, leaving a static diagram with counters.
 //
 // The track also reads as what it is — a spider crawling a network:
@@ -105,14 +121,16 @@
 // the spider anchors' arithmetic — equal flex columns and fixed
 // spacers put every ring centre at a known calc position) with
 // an accent chevron at the downstream end pointing into the next
-// ring. The comets ride this rail through their slots. While a
-// segment flows, pale dashes drift downstream inside the rail
-// and the chevron pulses, both at the segment's tier period;
-// the segment feeding the stalled fetch stage takes the warning
-// palette, and the disabled state dims the whole layer. The rail
-// and chevron are structure, not motion: they stay under reduced
-// motion (only the drift and pulse stop) and freeze with
-// everything else on a stale poll.
+// ring. The comet stream rides this rail inside the layer. While
+// a segment flows, pale dashes drift downstream inside the rail
+// and the chevron pulses, both at the segment's tier period; on
+// a still segment the dashes keep drifting at the idle rate; the
+// segment feeding the stalled fetch stage takes the warning
+// palette and no drift, and the disabled state dims the whole
+// layer and stops it. The rail and chevron are structure, not
+// motion: they stay under reduced motion (only the drift, the
+// stream and the pulse stop) and freeze with everything else on
+// a stale poll.
 //
 // On phones the same single row is miniaturised rather than
 // folded (an earlier two-row fold put a long elbow between the
@@ -135,8 +153,16 @@ import { formatCount, formatExactCount } from "@/lib/format";
 import AnimatedNumber from "./AnimatedNumber";
 
 interface Tier {
+  /** Intensity flag of the original mapping: the backdrop pulses,
+   *  the ring breathing and the chevron pulse key off dots > 0,
+   *  and seconds is their shared period. */
   dots: number;
   seconds: number;
+  /** Comets in the segment's full-rail stream: the count that
+   *  stands evenly spaced along the rail while the segment flows
+   *  (denser per tier, at the tier's period). Zero renders no
+   *  comets — packets are data, and a zero delta has none. */
+  comets: number;
 }
 
 /** How a network node (a stage glyph, or the spider) is lit. */
@@ -145,6 +171,13 @@ type NodeTone = "accent" | "warn" | "faint";
 /** Mirrors POLL_MS in OverviewDashboard: the dashboard's poll
  *  interval, which the spider's traverse is paced against. */
 const POLL_MS = 8000;
+
+/** The rail-dash drift period on a segment whose delta is zero:
+ *  the pipe is pressurised, not dead — but at 10s per dash step
+ *  it is unmistakably slower than the slowest active tier
+ *  (3.6s), so idle and flowing never read alike. The segment
+ *  feeding a stalled fetch stage gets no drift at all. */
+const IDLE_DRIFT_SECONDS = 10;
 
 let motionQueryCache: MediaQueryList | null = null;
 function motionQuery(): MediaQueryList {
@@ -161,11 +194,11 @@ function subscribeMotion(cb: () => void): () => void {
 }
 
 function flowTier(delta: number | null): Tier {
-  if (delta === null || delta <= 0) return { dots: 0, seconds: 0 };
-  if (delta < 10) return { dots: 1, seconds: 3.6 };
-  if (delta < 50) return { dots: 2, seconds: 2.4 };
-  if (delta < 200) return { dots: 3, seconds: 1.6 };
-  return { dots: 3, seconds: 0.9 };
+  if (delta === null || delta <= 0) return { dots: 0, seconds: 0, comets: 0 };
+  if (delta < 10) return { dots: 1, seconds: 3.6, comets: 3 };
+  if (delta < 50) return { dots: 2, seconds: 2.4, comets: 5 };
+  if (delta < 200) return { dots: 3, seconds: 1.6, comets: 7 };
+  return { dots: 3, seconds: 0.9, comets: 9 };
 }
 
 /** Non-negative delta between two cumulative counters; a counter that
@@ -243,7 +276,8 @@ export default function PipelineFlow({
     dAttempts === 0 &&
     queueDepth > 0;
 
-  const seg = (d: number | null): Tier => (disabled ? { dots: 0, seconds: 0 } : flowTier(d));
+  const seg = (d: number | null): Tier =>
+    disabled ? { dots: 0, seconds: 0, comets: 0 } : flowTier(d);
 
   // --- Spider layer -------------------------------------------------
   // The frontier is the run of consecutive segments, from segment 1,
@@ -395,9 +429,9 @@ export default function PipelineFlow({
         />
         <div className="relative z-10 flex flex-row items-start">
           <Stage label="DHT 网络" value={nodes} sub={`排队节点 ${formatCount(queuedNodes)}`} dim={disabled} nodeTone={disabled ? "faint" : "accent"} backdropTier={seg(dSeen)} breatheTier={seg(dSeen)} />
-          <Segment tier={seg(dSeen)} />
+          <Segment />
           <Stage label="采样发现" value={cur.seen} delta={dSeen} dim={disabled} nodeTone={toneOf(dSeen)} breatheTier={seg(dSeen)} />
-          <Segment tier={seg(dAttempts)} />
+          <Segment />
           <Stage
             label="元数据抓取"
             value={cur.fetched}
@@ -408,9 +442,9 @@ export default function PipelineFlow({
             nodeTone={fetchStalled ? "warn" : toneOf(dAttempts)}
             breatheTier={seg(dAttempts)}
           />
-          <Segment tier={seg(dFetched)} />
+          <Segment />
           <Stage label="内容过滤" value={cur.filtered} delta={dFiltered} dim={disabled} nodeTone={toneOf(dFetched)} breatheTier={seg(dFetched)} />
-          <Segment tier={seg(dStored)} />
+          <Segment />
           <Stage label="入库" value={cur.stored} delta={dStored} dim={disabled} nodeTone={toneOf(dStored)} breatheTier={seg(dStored)} />
         </div>
         <SpiderLayer
@@ -637,10 +671,15 @@ function WebBackdrop({ tier }: { tier: Tier }) {
  *  spider anchors' arithmetic), each ending in an accent chevron
  *  that points into the next ring. The rail is always there —
  *  still segments included — so the five stages read as one
- *  connected pipeline; while a segment flows, dashes drift
- *  downstream inside the rail and the chevron pulses, both at
- *  the tier's period. The segment feeding the stalled fetch
- *  stage renders in the warning palette. */
+ *  connected pipeline. A flowing segment carries the comet
+ *  stream across the whole rail (tier-many spans with evenly
+ *  staggered negative delays, so the comets stand evenly spaced
+ *  along the rail at every instant), its dashes drift at the
+ *  tier's pace and the chevron pulses. A still segment renders
+ *  no comets — packets are data — but its dashes keep drifting
+ *  at the slow idle rate, unless it feeds the stalled fetch
+ *  stage: that segment renders in the warning palette with no
+ *  drift at all, frozen, so a stall never reads as mere idle. */
 function ConnectorLayer({
   segs,
   dim,
@@ -656,80 +695,93 @@ function ConnectorLayer({
         dim ? "opacity-50" : ""
       }`}
     >
-      {segs.map((s, i) => (
-        <div
-          key={i}
-          className={`seg-conn seg-conn-${i} ${
-            s.warn ? "seg-conn-warn" : ""
-          }`}
-        >
-          <div className="seg-track">
-            {s.tier.dots > 0 && (
-              <span
-                className="seg-track-drift"
-                style={{ animationDuration: `${s.tier.seconds}s` }}
-              />
-            )}
-          </div>
-          <svg
-            viewBox="0 0 12 18"
-            className={`seg-arrow ${
-              s.tier.dots > 0 ? "seg-arrow-pulse" : ""
+      {segs.map((s, i) => {
+        const active = s.tier.comets > 0;
+        // Idle is a live state, not an absence of one: the pipe
+        // is pressurised. Only a warning segment (the diagnosed
+        // stall) and the disabled layer are truly frozen.
+        const idle = !active && !s.warn && !dim;
+        return (
+          <div
+            key={i}
+            className={`seg-conn seg-conn-${i} ${
+              s.warn ? "seg-conn-warn" : ""
             }`}
-            style={
-              s.tier.dots > 0
-                ? { animationDuration: `${s.tier.seconds}s` }
-                : undefined
-            }
-            fill="none"
           >
-            <path
-              d="M2.5 2 L9.5 9 L2.5 16"
-              stroke="currentColor"
-              strokeWidth="3"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </div>
-      ))}
+            <div className="seg-track">
+              {active && (
+                <span
+                  className="seg-track-drift"
+                  style={{ animationDuration: `${s.tier.seconds}s` }}
+                />
+              )}
+              {idle && (
+                <span
+                  className="seg-track-drift seg-track-drift-idle"
+                  style={{ animationDuration: `${IDLE_DRIFT_SECONDS}s` }}
+                />
+              )}
+            </div>
+            {active && (
+              <div className="seg-flow">
+                {Array.from({ length: s.tier.comets }, (_, k) => (
+                  <span
+                    key={k}
+                    className={`flow-dot seg-flow-dot ${
+                      k % 3 === 0 ? "" : "flow-dot-wide"
+                    }`}
+                    style={{
+                      animationDuration: `${s.tier.seconds}s`,
+                      animationDelay: `${
+                        (-s.tier.seconds * k) / s.tier.comets
+                      }s`,
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+            <svg
+              viewBox="0 0 12 18"
+              className={`seg-arrow ${active ? "seg-arrow-pulse" : ""}`}
+              style={
+                active
+                  ? { animationDuration: `${s.tier.seconds}s` }
+                  : undefined
+              }
+              fill="none"
+            >
+              <path
+                d="M2.5 2 L9.5 9 L2.5 16"
+                stroke="currentColor"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-/** A slot with tier-driven flow comets between two stages,
- *  riding the ConnectorLayer's rail. Renders the phone variant
- *  (a 6px-wide slot at the mini ring's height — the spider's
- *  anchor geometry in globals.css keys off that 6px; its paint
- *  is head-and-halo only, the slot has no room for a trail) and
- *  the sm+ variant (full comet: bright head, halo, tapering
- *  trail — see .flow-dot-x in globals.css); the comets exist
- *  only when the tier says the stage moved during the last poll
- *  interval. */
-function Segment({ tier }: { tier: Tier }) {
-  const dots = Array.from({ length: tier.dots }, (_, i) => i);
-  const style = (i: number) => ({
-    animationDuration: `${tier.seconds}s`,
-    animationDelay: `${(-tier.seconds * i) / Math.max(1, tier.dots)}s`,
-  });
+/** The fixed-width spacer between two stage columns. It renders
+ *  nothing, but its widths are load-bearing: the ring pitch they
+ *  set is what the connector rails' and the spider anchors'
+ *  geometry in globals.css is arithmetic on (6px phones — the
+ *  mini ring's height fixes the phone variant — 48px from sm,
+ *  64px from lg). The flow comets used to cross just this slot;
+ *  they now ride the ConnectorLayer's full rail instead, and the
+ *  spacer stays purely so the layout — and every calc built on
+ *  it — is untouched. */
+function Segment() {
   return (
     <>
+      <div aria-hidden className="h-[52px] w-1.5 shrink-0 sm:hidden" />
       <div
         aria-hidden
-        className="relative h-[52px] w-1.5 shrink-0 overflow-hidden sm:hidden"
-      >
-        {dots.map((i) => (
-          <span key={i} className="flow-dot flow-dot-m" style={style(i)} />
-        ))}
-      </div>
-      <div
-        aria-hidden
-        className="relative hidden h-[84px] w-12 shrink-0 overflow-hidden sm:block lg:h-[80px] lg:w-16"
-      >
-        {dots.map((i) => (
-          <span key={i} className="flow-dot flow-dot-x" style={style(i)} />
-        ))}
-      </div>
+        className="hidden h-[84px] w-12 shrink-0 sm:block lg:h-[80px] lg:w-16"
+      />
     </>
   );
 }
