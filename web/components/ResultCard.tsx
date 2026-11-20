@@ -268,7 +268,10 @@ export default function ResultCard({
                   </span>
                 )}
               </div>
-              {root && (
+              {/* The root line describes the unfiltered list's common
+                  prefix; while filtering, each row shows its own
+                  directory, so the line would only mislead. */}
+              {root && !filtering && (
                 <p
                   className="mb-2 line-clamp-2 border-b border-line-2 pb-2 font-mono text-[11px] wrap-anywhere text-mute"
                   title={root}
