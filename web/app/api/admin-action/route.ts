@@ -86,6 +86,12 @@ export async function POST(request: Request) {
       path = `/api/admin/settings`;
       payload = { values: body.values ?? {} };
       break;
+    case "check-update":
+      path = `/api/admin/update/check`;
+      break;
+    case "request-upgrade":
+      path = `/api/admin/update/request`;
+      break;
     case "create-api-token":
       path = `/api/admin/api-tokens`;
       payload = {
@@ -176,6 +182,8 @@ export async function POST(request: Request) {
   } else if (
     body.kind !== "batch" &&
     body.kind !== "save-settings" &&
+    body.kind !== "check-update" &&
+    body.kind !== "request-upgrade" &&
     body.kind !== "test-llm" &&
     body.kind !== "create-user" &&
     body.kind !== "update-user" &&

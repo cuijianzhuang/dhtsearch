@@ -89,6 +89,14 @@ type Options struct {
 	// that search responses publish for the detail view. Nil means
 	// magnets carry no tr= parameters, as before.
 	Trackers func() []string
+	// DataDir is the deployment's data directory (the systemd unit's
+	// WorkingDirectory; main derives it from DB_PATH's directory). It
+	// hosts the system-update contract files shared with the root-side
+	// installer script (VERSION, update-panel, update-request,
+	// update-status — see update.go). Empty disables the update
+	// endpoints' file side: the current version reads "unknown" and
+	// upgrade requests answer 503.
+	DataDir string
 	// Settings, when non-nil, is the live configuration registry: it
 	// backs /api/site and /api/admin/settings, and the DoS knobs above
 	// (RateRPS, RateBurst, MaxInflight, SearchTimeout) are re-read
@@ -225,6 +233,10 @@ type Server struct {
 	catMu     sync.Mutex
 	catCounts map[string]int
 	catAt     time.Time
+
+	// upd caches the GitHub latest-release lookup behind the admin
+	// update endpoints (see update.go).
+	upd *updateChecker
 }
 
 // New builds the HTTP handler. crawlerStatus may be nil.
@@ -251,6 +263,7 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 		tokenLimiter:  newTokenLimiter(),
 		reportLimiter: newIPLimiter(reportRate, reportBurst),
 		authHTTP:      &http.Client{Timeout: 15 * time.Second},
+		upd:           newUpdateChecker(),
 	}
 	if opts.RateRPS > 0 {
 		burst := opts.RateBurst

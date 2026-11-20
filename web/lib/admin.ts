@@ -483,6 +483,58 @@ export function fetchAdminSettings(
   return adminFetch<AdminSettingsResponse>(token, "/api/admin/settings");
 }
 
+// --- System update (mirror server/internal/api/update.go) ---
+
+/**
+ * Effective auto-update state as the installer script resolves it:
+ * the panel's saved settings win while their contract file exists
+ * (source "panel"), then the script's own CLI state ("script"), then
+ * disabled ("none"). last_check/last_result come from the script's
+ * state file and describe the last scheduled check/upgrade.
+ */
+export interface AdminUpdateAuto {
+  enabled: boolean;
+  time: string;
+  freq: string;
+  source: "panel" | "script" | "none";
+  last_check: string;
+  last_result: string;
+}
+
+/** The last panel-requested upgrade as the root-side agent recorded it. */
+export interface AdminUpgradeState {
+  state: "idle" | "requested" | "running" | "succeeded" | "failed";
+  pending: boolean;
+  request_id: string;
+  requested_at: string;
+  requested_by: string;
+  started_at: string;
+  finished_at: string;
+  from_version: string;
+  to_version: string;
+  message: string;
+}
+
+export interface AdminUpdate {
+  current_version: string;
+  /** "" until a check has succeeded at least once. */
+  latest_version: string;
+  latest_published_at: string;
+  update_available: boolean;
+  /** Unix time of the last successful check; 0 = never. */
+  checked_at: number;
+  /** Last check attempt's error (the latest_* fields stay at the last good result). */
+  check_error: string;
+  auto_update: AdminUpdateAuto;
+  upgrade: AdminUpgradeState;
+  /** False on deployments whose data dir the API cannot reach. */
+  contract_ready: boolean;
+}
+
+export function fetchAdminUpdate(token: string): Promise<AdminUpdate> {
+  return adminFetch<AdminUpdate>(token, "/api/admin/update");
+}
+
 // --- Public API tokens (mirror server/internal/store/apitokens.go) ---
 
 /**

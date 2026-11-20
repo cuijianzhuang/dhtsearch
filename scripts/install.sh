@@ -5,7 +5,7 @@
 #
 # Subcommands: install | upgrade | uninstall | status | start | stop |
 # restart | check-update | backup | backups | restore | selfcheck |
-# config | set-token | autostart | auto-update
+# config | set-token | autostart | auto-update | upgrade-request
 # Run with no arguments in a terminal for an interactive menu.
 # install also copies this script to /usr/local/bin/dhtsearch, so on an
 # installed machine plain `dhtsearch` re-opens the menu (install / upgrade /
@@ -19,6 +19,23 @@
 # /var/lib/dhtsearch/autoupdate — a script-owned state file, not the
 # server env file, because it is installer state rather than server
 # configuration and it has to survive with the data dir.
+#
+# Panel contract: the admin panel (which runs unprivileged and must
+# never execute an upgrade itself) shares three more key=value files
+# in the data dir with this script:
+#   update-panel    written by the panel when an admin saves the
+#                   AUTO_UPDATE_* settings; while it exists, its
+#                   ENABLED/TIME override the CLI state above (the
+#                   `auto-update` command takes control back by
+#                   deleting it).
+#   update-request  an upgrade request flag written by the panel's
+#                   "upgrade now" button.
+#   update-status   written by the upgrade agent: the outcome of the
+#                   last panel-requested upgrade.
+# A per-minute timer (dhtsearch-upgrade-request.timer) runs the
+# agent (`dhtsearch upgrade-request`): it reconciles the auto-update
+# timer with the effective (panel-first) settings and consumes one
+# pending upgrade request, recording the result in update-status.
 #
 # Database: SQLite by default. install can instead pick PostgreSQL —
 # --db postgres-local installs and configures a local server, --db
@@ -82,6 +99,16 @@ WEB_UNIT="dhtsearch-web.service"
 UPDATE_UNIT="dhtsearch-update.service"
 UPDATE_TIMER="dhtsearch-update.timer"
 AUTOUPDATE_FILE="${DATA_DIR}/autoupdate"
+REQUEST_UNIT="dhtsearch-upgrade-request.service"
+REQUEST_TIMER="dhtsearch-upgrade-request.timer"
+# Panel contract files (see the header comment): the panel writes
+# update-panel / update-request, the upgrade agent writes
+# update-status, and .au-applied stamps the auto-update configuration
+# the agent last reconciled the systemd timer to.
+UPDATE_PANEL_FILE="${DATA_DIR}/update-panel"
+UPDATE_REQUEST_FILE="${DATA_DIR}/update-request"
+UPDATE_STATUS_FILE="${DATA_DIR}/update-status"
+AU_APPLIED_FILE="${DATA_DIR}/.au-applied"
 
 # Archive copies (package extraction, web tree, upgrade backups). In
 # DHTSEARCH_ROOT test mode the tree belongs to whoever runs the test,
@@ -175,6 +202,16 @@ Commands:
                        (off by default). Upgrades keep the normal
                        backup + health-check + rollback behaviour.
                        State is kept in /var/lib/dhtsearch/autoupdate.
+                       The admin panel's 系统更新 settings override
+                       this state while its contract file
+                       (/var/lib/dhtsearch/update-panel) exists; using
+                       this command deletes that file and takes control
+                       back.
+  upgrade-request      the panel upgrade agent (run by
+                       dhtsearch-upgrade-request.timer every minute):
+                       reconciles the auto-update timer with the
+                       panel/CLI settings and runs one panel-requested
+                       upgrade, if any. Not usually run by hand.
   help                 this text
 
 Options (install / upgrade):
@@ -1117,7 +1154,45 @@ au_value() {
     echo "${line#"$1"=}"
 }
 
-au_enabled() { [ "$(au_value ENABLED)" = "1" ]; }
+# panel_value KEY — value from the panel contract file ("" if unset).
+panel_value() {
+    local line=""
+    if [ -f "$UPDATE_PANEL_FILE" ]; then
+        line="$(grep -E "^$1=" "$UPDATE_PANEL_FILE" | tail -1 || true)"
+    fi
+    echo "${line#"$1"=}"
+}
+
+# panel_configured — the admin panel has taken over the auto-update
+# switch: an admin saved the AUTO_UPDATE_* settings at least once and
+# the panel synced them to $UPDATE_PANEL_FILE. While it exists, its
+# ENABLED/TIME win over the CLI state file; au_set (the CLI) deletes
+# it to take control back. FREQ always comes from the CLI state.
+panel_configured() { [ -f "$UPDATE_PANEL_FILE" ]; }
+
+au_enabled() {
+    if panel_configured; then
+        [ "$(panel_value ENABLED)" = "1" ]
+    else
+        [ "$(au_value ENABLED)" = "1" ]
+    fi
+}
+
+# au_time — the daily run time (HH:MM) for the auto-update timer:
+# the panel's TIME when the panel is in control, else the historical
+# built-in 03:37. A malformed panel value falls back to 03:37 rather
+# than producing a broken OnCalendar.
+au_time() {
+    local t=""
+    if panel_configured; then
+        t="$(panel_value TIME)"
+    fi
+    if [[ "$t" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+        echo "$t"
+    else
+        echo "03:37"
+    fi
+}
 
 au_freq() {
     local f
@@ -1157,8 +1232,8 @@ au_record() {
 write_update_units() {
     local oncal
     case "$(au_freq)" in
-        weekly) oncal="Mon *-*-* 03:37:00" ;;
-        *) oncal="*-*-* 03:37:00" ;;
+        weekly) oncal="Mon *-*-* $(au_time):00" ;;
+        *) oncal="*-*-* $(au_time):00" ;;
     esac
     cat > "${UNIT_DIR}/${UPDATE_UNIT}" <<EOF
 [Unit]
@@ -1188,25 +1263,33 @@ EOF
 
 # au_apply — install/upgrade regenerate the unit dir; when auto-update
 # is on, put its units back and re-arm the timer so the schedule
-# survives the upgrade (including the timer's own upgrades).
+# survives the upgrade (including the timer's own upgrades). Also
+# stamps $AU_APPLIED_FILE so the upgrade agent's reconcile does not
+# redo this work on its next tick.
 au_apply() {
-    au_enabled || return 0
+    if ! au_enabled; then
+        printf '0\n' > "$AU_APPLIED_FILE" 2>/dev/null || true
+        return 0
+    fi
     write_update_units
     svc daemon-reload
     if have_systemd; then
         systemctl enable --now "$UPDATE_TIMER" >/dev/null 2>&1 || true
     fi
+    printf '1 %s %s\n' "$(au_time)" "$(au_freq)" > "$AU_APPLIED_FILE"
 }
 
 au_status_line() {
+    local src="cli"
+    panel_configured && src="panel"
     if au_enabled; then
         local t="timer inactive"
         if have_systemd && systemctl is-active --quiet "$UPDATE_TIMER" 2>/dev/null; then
             t="timer active"
         fi
-        echo "enabled ($(au_freq), $t)"
+        echo "enabled ($(au_freq) $(au_time), source: $src, $t)"
     else
-        echo "disabled"
+        echo "disabled (source: $src)"
     fi
 }
 
@@ -1214,6 +1297,13 @@ au_status_line() {
 # the menu entry and the auto-update subcommand.
 au_set() {
     local mode="$1" freq="${2:-}"
+    # The CLI is an explicit operator action: it takes control back
+    # from the admin panel by dropping the panel contract file, so
+    # the two never fight over the switch.
+    if panel_configured; then
+        rm -f "$UPDATE_PANEL_FILE"
+        log "Removed the panel's update settings ($UPDATE_PANEL_FILE); the CLI state is authoritative again"
+    fi
     case "$mode" in
         on)
             [ -n "$freq" ] || freq="$(au_freq)"
@@ -1235,7 +1325,8 @@ au_set() {
                 systemctl enable --now "$UPDATE_TIMER" >/dev/null 2>&1 \
                     || warn "could not enable $UPDATE_TIMER; check: systemctl status $UPDATE_TIMER"
             fi
-            log "Auto-update enabled ($freq, early-morning with a random delay of up to 30m): $UPDATE_TIMER"
+            printf '1 %s %s\n' "$(au_time)" "$freq" > "$AU_APPLIED_FILE"
+            log "Auto-update enabled ($freq at $(au_time), with a random delay of up to 30m): $UPDATE_TIMER"
             ;;
         off)
             au_write 0 "$(au_freq)"
@@ -1244,6 +1335,7 @@ au_set() {
             fi
             rm -f "${UNIT_DIR}/${UPDATE_TIMER}" "${UNIT_DIR}/${UPDATE_UNIT}"
             svc daemon-reload
+            printf '0\n' > "$AU_APPLIED_FILE"
             log "Auto-update disabled"
             ;;
         *) die "usage: auto-update on [daily|weekly] | off | status" ;;
@@ -1273,6 +1365,167 @@ do_check_update() {
     echo "有新版本可升级：$cur -> $latest（运行 upgrade，或在 dhtsearch 菜单里选「升级」）"
     au_record "update available: $latest"
     return 2
+}
+
+# ------------------------------------------------------- upgrade agent
+# The agent is a per-minute oneshot (dhtsearch-upgrade-request.timer)
+# that bridges the admin panel and this script. The panel process is
+# unprivileged and never runs an upgrade; it only writes intent into
+# the data dir, and the agent — running as root — acts on it:
+#
+#   1. reconcile: keep the auto-update timer in sync with the
+#      effective (panel-first) AUTO_UPDATE state, so a panel change
+#      of the switch or the run time rebuilds/enables/disables the
+#      timer within about a minute. $AU_APPLIED_FILE stamps what was
+#      last applied; a matching stamp means no work (and no
+#      daemon-reload) on this tick.
+#   2. requests: consume $UPDATE_REQUEST_FILE exactly once — run the
+#      normal upgrade path and record the outcome in
+#      $UPDATE_STATUS_FILE for the panel to display. A status file
+#      already carrying the request's id means a previous tick
+#      handled it; the flag is then just dropped.
+
+write_request_units() {
+    cat > "${UNIT_DIR}/${REQUEST_UNIT}" <<EOF
+[Unit]
+Description=DHTSearch upgrade agent (panel auto-update reconcile + on-demand upgrade requests)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${L_MANAGER} upgrade-request
+EOF
+    cat > "${UNIT_DIR}/${REQUEST_TIMER}" <<EOF
+[Unit]
+Description=Run the DHTSearch upgrade agent every minute
+
+[Timer]
+OnCalendar=*:*
+Unit=${REQUEST_UNIT}
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+# request_apply — (re)install the agent's units and arm its timer.
+# Called on install and upgrade, unconditionally: the agent is what
+# makes panel-driven update settings work at all.
+request_apply() {
+    mkdir -p "$UNIT_DIR"
+    write_request_units
+    svc daemon-reload
+    if have_systemd; then
+        systemctl enable --now "$REQUEST_TIMER" >/dev/null 2>&1 || true
+    fi
+}
+
+au_reconcile() {
+    local want="0" applied=""
+    if au_enabled; then
+        want="1 $(au_time) $(au_freq)"
+    fi
+    if [ -f "$AU_APPLIED_FILE" ]; then
+        applied="$(cat "$AU_APPLIED_FILE")"
+    fi
+    [ "$want" = "$applied" ] && return 0
+    if au_enabled; then
+        mkdir -p "$DATA_DIR" "$UNIT_DIR"
+        [ -f "$MANAGER_FILE" ] || install_manager
+        write_update_units
+        svc daemon-reload
+        if have_systemd; then
+            systemctl enable --now "$UPDATE_TIMER" >/dev/null 2>&1 \
+                || warn "could not enable $UPDATE_TIMER; check: systemctl status $UPDATE_TIMER"
+        fi
+        log "Auto-update timer applied from $(panel_configured && echo panel || echo cli) settings: $(au_freq) at $(au_time)"
+    else
+        if have_systemd; then
+            systemctl disable --now "$UPDATE_TIMER" >/dev/null 2>&1 || true
+        fi
+        rm -f "${UNIT_DIR}/${UPDATE_TIMER}" "${UNIT_DIR}/${UPDATE_UNIT}"
+        svc daemon-reload
+        log "Auto-update timer removed (disabled)"
+    fi
+    printf '%s\n' "$want" > "$AU_APPLIED_FILE"
+}
+
+# kv_value FILE KEY — KEY's value from a panel contract file.
+kv_value() {
+    local line=""
+    if [ -f "$1" ]; then
+        line="$(grep -E "^$2=" "$1" | tail -1 || true)"
+    fi
+    echo "${line#"$2"=}"
+}
+
+# write_update_status STATE REQUEST_ID REQUESTED_AT STARTED_AT
+# FINISHED_AT FROM_VERSION TO_VERSION MESSAGE — atomically replace
+# the agent's outcome file the panel polls.
+write_update_status() {
+    mkdir -p "$DATA_DIR"
+    local tmp="${UPDATE_STATUS_FILE}.tmp.$$"
+    {
+        printf 'STATE=%s\n' "$1"
+        printf 'REQUEST_ID=%s\n' "$2"
+        printf 'REQUESTED_AT=%s\n' "$3"
+        printf 'STARTED_AT=%s\n' "$4"
+        printf 'FINISHED_AT=%s\n' "$5"
+        printf 'FROM_VERSION=%s\n' "$6"
+        printf 'TO_VERSION=%s\n' "$7"
+        printf 'MESSAGE=%s\n' "$(printf '%s' "$8" | tr '\n' ' ')"
+    } > "$tmp"
+    mv "$tmp" "$UPDATE_STATUS_FILE"
+}
+
+do_upgrade_request() {
+    mkdir -p "$DATA_DIR"
+    # Serialize ticks (and manual runs): two agents must never drive
+    # upgrades concurrently. systemd already serializes the oneshot
+    # unit; the flock covers manual invocations racing the timer.
+    exec 9>"${DATA_DIR}/.upgrade-agent.lock"
+    if command -v flock >/dev/null 2>&1; then
+        flock -n 9 || exit 0
+    fi
+
+    au_reconcile
+
+    [ -f "$UPDATE_REQUEST_FILE" ] || return 0
+    local rid rat rby
+    rid="$(kv_value "$UPDATE_REQUEST_FILE" REQUEST_ID)"
+    rat="$(kv_value "$UPDATE_REQUEST_FILE" REQUESTED_AT)"
+    rby="$(kv_value "$UPDATE_REQUEST_FILE" REQUESTED_BY)"
+    if [ -n "$rid" ] && [ "$(kv_value "$UPDATE_STATUS_FILE" REQUEST_ID)" = "$rid" ]; then
+        # Already handled by an earlier tick (its status is the
+        # record); just drop the flag so it is not re-run.
+        rm -f "$UPDATE_REQUEST_FILE"
+        return 0
+    fi
+
+    local from to started finished rc=0 logf tail_msg
+    from="$(installed_version)"
+    started="$(date '+%Y-%m-%d %H:%M:%S')"
+    logf="$(mktemp)"
+    write_update_status "running" "$rid" "$rat" "$started" "" "$from" "" \
+        "upgrade requested from the admin panel${rby:+ by $rby}; running"
+    log "upgrade-request: running panel-requested upgrade (request $rid, by ${rby:-unknown}) from $from; output captured to the journal"
+    ( parse_opts --yes; do_upgrade ) >>"$logf" 2>&1 || rc=$?
+    finished="$(date '+%Y-%m-%d %H:%M:%S')"
+    to="$(installed_version)"
+    if [ "$rc" = "0" ]; then
+        write_update_status "succeeded" "$rid" "$rat" "$started" "$finished" "$from" "$to" \
+            "upgraded $from -> $to"
+        log "upgrade-request: succeeded ($from -> $to)"
+    else
+        tail_msg="$(tail -n 3 "$logf" | tr '\n' ' ')"
+        write_update_status "failed" "$rid" "$rat" "$started" "$finished" "$from" "$to" \
+            "upgrade failed (exit $rc): $tail_msg"
+        warn "upgrade-request: failed (exit $rc); last output: $tail_msg"
+    fi
+    cat "$logf" 2>/dev/null || true
+    rm -f "$UPDATE_REQUEST_FILE" "$logf"
+    return 0
 }
 
 # ---------------------------------------------------------------- commands
@@ -1320,6 +1573,7 @@ do_install() {
     record_version "$RESOLVED_VERSION"
     install_manager
     au_apply
+    request_apply
     log "Installed DHTSearch $RESOLVED_VERSION (arch $arch)"
     log "API: http://127.0.0.1:$(resolve_api_port)/api/healthz   Web: http://127.0.0.1:$(resolve_web_port)/"
     log "Database: $(db_display)"
@@ -1387,6 +1641,7 @@ do_upgrade() {
             au_record "auto-upgraded: $old_version -> $RESOLVED_VERSION"
         fi
         au_apply
+        request_apply
         log "Upgraded: $old_version -> $RESOLVED_VERSION"
         rotate_backups "$ts"
         return 0
@@ -1410,8 +1665,9 @@ do_uninstall() {
     if have_systemd; then
         systemctl disable --now "$API_UNIT" "$WEB_UNIT" >/dev/null 2>&1 || true
         systemctl disable --now "$UPDATE_TIMER" >/dev/null 2>&1 || true
+        systemctl disable --now "$REQUEST_TIMER" >/dev/null 2>&1 || true
     fi
-    rm -f "${UNIT_DIR}/${API_UNIT}" "${UNIT_DIR}/${WEB_UNIT}" "${UNIT_DIR}/${UPDATE_UNIT}" "${UNIT_DIR}/${UPDATE_TIMER}"
+    rm -f "${UNIT_DIR}/${API_UNIT}" "${UNIT_DIR}/${WEB_UNIT}" "${UNIT_DIR}/${UPDATE_UNIT}" "${UNIT_DIR}/${UPDATE_TIMER}" "${UNIT_DIR}/${REQUEST_UNIT}" "${UNIT_DIR}/${REQUEST_TIMER}"
     svc daemon-reload
     rm -f "$BIN_FILE"
     rm -f "$MANAGER_FILE"
@@ -2568,6 +2824,7 @@ main() {
                 *) die "usage: install.sh autostart on|off|status" ;;
             esac
             ;;
+        upgrade-request) require_root; do_upgrade_request ;;
         auto-update)
             shift
             case "${1:-status}" in

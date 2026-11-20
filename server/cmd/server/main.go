@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -76,6 +77,22 @@ const defaultFeeds = "https://share.dmhy.org/topics/rss/sort_id/6/rss.xml," +
 const defaultFeedKeywordURL = "https://share.dmhy.org/topics/rss/rss.xml?keyword=%s"
 
 // envDefault returns the env value or fallback.
+// dataDirOf derives the deployment's data directory from the SQLite
+// path: install.sh always places DB_PATH directly inside the data
+// dir (/var/lib/dhtsearch/dhtsearch.db) and keeps that line in the
+// env file even when Postgres is the live backend, so the directory
+// is the data dir for both backends. The update contract files
+// (internal/api/update.go) live there. A relative DB_PATH resolves
+// against the working directory — which the systemd unit sets to
+// the data dir as well.
+func dataDirOf(dbPath string) string {
+	abs, err := filepath.Abs(filepath.Dir(dbPath))
+	if err != nil {
+		return ""
+	}
+	return abs
+}
+
 func envDefault(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -361,6 +378,11 @@ func main() {
 	reg(settings.KeyPublicAPIEnabled, strconv.FormatBool(envBool("PUBLIC_API_ENABLED", true)))
 	reg(settings.KeyPublicAPIRequireToken, strconv.FormatBool(envBool("PUBLIC_API_REQUIRE_TOKEN", false)))
 	reg(settings.KeyPublicAPITokenRatePerMin, strconv.Itoa(envInt("PUBLIC_API_TOKEN_RATE_PER_MIN", 600)))
+	// System update: the env layer only seeds the panel's intent; the
+	// values take effect through the data-dir contract files the
+	// installer script reads, never by this process acting on them.
+	reg(settings.KeyAutoUpdateEnabled, strconv.FormatBool(envBool("AUTO_UPDATE_ENABLED", false)))
+	reg(settings.KeyAutoUpdateTime, envDefault("AUTO_UPDATE_TIME", "03:37"))
 
 	mgr, err := settings.New(base, fromEnv, st, logger)
 	if err != nil {
@@ -749,6 +771,7 @@ func main() {
 			},
 			AdminToken:    *adminToken,
 			InternalToken: *internalToken,
+			DataDir:       dataDirOf(*dbPath),
 			Settings:      mgr,
 			Trackers:      func() []string { return mgr.List(settings.KeyTrackers) },
 		}).Handler(),
