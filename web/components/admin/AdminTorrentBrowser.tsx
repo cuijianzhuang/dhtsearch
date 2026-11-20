@@ -19,9 +19,9 @@ const STATUS_OPTIONS = [
 
 /**
  * Shared body of /admin/torrents (full management) and /admin/review
- * (the unreviewed queue: status locked, bulk actions on). Both are the
- * same list underneath; the queue just presets the filter and turns on
- * selection.
+ * (the unreviewed queue: status locked). Both are the same list
+ * underneath; the queue just presets the filter. Selection with the
+ * floating bulk bar is available on both.
  */
 export default async function AdminTorrentBrowser({
   tab,
@@ -91,7 +91,7 @@ export default async function AdminTorrentBrowser({
       </form>
 
       <div className="mt-4">
-        <AdminTorrentList items={data.results} selectable={!!lockedStatus} />
+        <AdminTorrentList items={data.results} selectable />
       </div>
 
       <AdminPagination
