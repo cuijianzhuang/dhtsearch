@@ -1,24 +1,23 @@
 import Link from "next/link";
-import LogoutButton from "./LogoutButton";
-import SiteLogo from "@/components/SiteLogo";
-import AppearanceSwitcher from "@/components/AppearanceSwitcher";
+import AdminShellClient, { type AdminTabKey } from "./AdminShellClient";
+import { ADMIN_NAV_STORAGE_KEY } from "@/lib/theme";
 import { fetchSiteConfig } from "@/lib/site";
 
-const TABS = [
-  { key: "overview", href: "/admin", label: "概览" },
-  { key: "torrents", href: "/admin/torrents", label: "种子管理" },
-  { key: "review", href: "/admin/review", label: "未审核队列" },
-  { key: "blocked", href: "/admin/blocked", label: "黑名单" },
-  { key: "llm", href: "/admin/llm", label: "LLM 审核" },
-  { key: "reports", href: "/admin/reports", label: "举报队列" },
-  { key: "users", href: "/admin/users", label: "账号" },
-  { key: "settings", href: "/admin/settings", label: "设置" },
-  { key: "api-tokens", href: "/admin/api-tokens", label: "API 令牌" },
-] as const;
+export type { AdminTabKey };
 
-export type AdminTabKey = (typeof TABS)[number]["key"];
+// Applies the operator's stored sidebar choice (expanded/collapsed)
+// before first paint. Same pattern as the appearance boot script in
+// the root layout: a plain parser-blocking <script>, because an
+// inline next/script would only run after the client runtime loads —
+// the sidebar would paint expanded and then snap shut. The layout
+// itself is CSS keyed off <html data-admin-nav> (globals.css, lg
+// screens only); this script only restores the attribute.
+const NAV_BOOT_SCRIPT = `try{var n=localStorage.getItem("${ADMIN_NAV_STORAGE_KEY}");if(n==="collapsed"||n==="expanded"){document.documentElement.dataset.adminNav=n;}}catch(e){}`;
 
-/** Shared chrome for the protected admin pages: title, tab nav, logout. */
+/** Shared chrome for the protected admin pages: a right sidebar
+ *  (collapsible on desktop, a drawer on mobile) rendered by
+ *  AdminShellClient; this wrapper fetches the site config and emits
+ *  the sidebar boot script. */
 export default async function AdminShell({
   active,
   children,
@@ -28,49 +27,20 @@ export default async function AdminShell({
 }) {
   const site = await fetchSiteConfig();
   return (
-    <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-6">
-      <header className="flex flex-wrap items-center gap-3">
-        <Link
-          href="/admin"
-          className="inline-flex min-h-11 items-center text-xl font-bold tracking-tight"
-        >
-          <SiteLogo name={site.name} />
-          <span className="ml-3 rounded-md bg-accent-soft px-2 py-1 text-xs font-medium text-accent-ink">
-            管理端
-          </span>
-        </Link>
-        <div className="ml-auto flex items-center gap-2">
-          <AppearanceSwitcher defaultAppearance={site.themeAppearance} />
-          <LogoutButton />
-        </div>
-      </header>
-      <nav className="mt-4 flex flex-wrap gap-2" aria-label="管理端导航">
-        {TABS.map((tab) => (
-          <Link
-            key={tab.key}
-            href={tab.href}
-            aria-current={active === tab.key ? "page" : undefined}
-            className={`inline-flex min-h-11 items-center rounded-lg border px-4 text-sm transition-colors ${
-              active === tab.key
-                ? "border-accent bg-accent-soft font-medium text-accent-ink"
-                : "border-input bg-soft text-ink-2 hover:border-accent hover:text-accent-ink"
-            }`}
-          >
-            {tab.label}
-          </Link>
-        ))}
-        <Link
-          href="/"
-          className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-4 text-sm text-mute transition-colors hover:text-accent-ink"
-        >
-          返回前台
-        </Link>
-      </nav>
-      <div className="mt-6 flex flex-1 flex-col">{children}</div>
-      <footer className="mt-auto pt-10 text-center text-xs text-faint">
-        {site.name} 管理端 · 数据来自后端 /api/admin
-      </footer>
-    </main>
+    <>
+      <script
+        id="admin-nav-boot"
+        dangerouslySetInnerHTML={{ __html: NAV_BOOT_SCRIPT }}
+        suppressHydrationWarning
+      />
+      <AdminShellClient
+        active={active}
+        siteName={site.name}
+        defaultAppearance={site.themeAppearance}
+      >
+        {children}
+      </AdminShellClient>
+    </>
   );
 }
 

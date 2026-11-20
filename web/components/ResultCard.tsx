@@ -11,6 +11,11 @@ import {
 } from "@/lib/format";
 import CopyMagnetButton from "./CopyMagnetButton";
 import ReportForm from "./ReportForm";
+import { CATEGORIES } from "@/lib/search-ui";
+
+const CATEGORY_LABELS: Record<string, string> = Object.fromEntries(
+  CATEGORIES.map((c) => [c.key, c.label])
+);
 
 const MAX_FILES_SHOWN = 10;
 
@@ -106,9 +111,19 @@ export default function ResultCard({
               {result.alias}
             </p>
           )}
-          <p className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-mute">
-            <span>{formatSize(result.total_size)}</span>
-            <span>{formatCount(totalFiles)} 个文件</span>
+          {/* Meta row, ordered by what a scanner looks for first:
+              what kind it is (category chip), how big (emphasised —
+              the field download decisions turn on), how many files,
+              how fresh. The backend computes the category for every
+              result; the card used to drop it on the floor. */}
+          <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-mute">
+            <span className="rounded-md bg-soft px-1.5 py-0.5 text-[11px] font-medium text-ink-2">
+              {CATEGORY_LABELS[result.category] ?? "其他"}
+            </span>
+            <span className="font-medium tabular-nums text-ink-2">
+              {formatSize(result.total_size)}
+            </span>
+            <span className="tabular-nums">{formatCount(totalFiles)} 个文件</span>
             <span>收录于 {formatRelativeTime(result.created_at)}</span>
           </p>
         </button>
@@ -124,7 +139,19 @@ export default function ResultCard({
                   className="mb-2 line-clamp-2 border-b border-line-2 pb-2 font-mono text-[11px] wrap-anywhere text-mute"
                   title={root}
                 >
-                  📁 {root}
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="mr-1 inline h-3.5 w-3.5 align-[-2px] text-faint"
+                    aria-hidden
+                  >
+                    <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+                  </svg>
+                  {root}
                 </p>
               )}
               <ul className="space-y-2 text-xs text-mute">
