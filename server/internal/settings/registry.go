@@ -33,6 +33,7 @@ const (
 	// metadata
 	KeyMetaWorkers          = "META_WORKERS"
 	KeyMetaShards           = "META_SHARDS"
+	KeyMetaFetcher          = "META_FETCHER"
 	KeyMetaTimeout          = "META_TIMEOUT"
 	KeyMetaPrescreenEnabled = "META_PRESCREEN_ENABLED"
 	KeyMetaPrescreenTimeout = "META_PRESCREEN_TIMEOUT"
@@ -194,7 +195,9 @@ var Registry = []Item{
 	{Key: KeyMetaWorkers, Group: "metadata", Label: "元数据 worker 数", Type: TypeInt, Default: "128", Editable: true, Restart: true,
 		Min: f64(1), Max: f64(2048), Desc: "入库吞吐的主要旋钮；实测 128 最优，256 反而因争抢下降"},
 	{Key: KeyMetaShards, Group: "metadata", Label: "元数据客户端分片数", Type: TypeInt, Default: "8", Editable: true, Restart: true,
-		Min: f64(1), Max: f64(64), Desc: "抓取用的 torrent 客户端数量：种子按 infohash 首字节分片到各客户端，把单客户端全局锁的争用摊开（128 worker、8 片时每片约 16 个并发种子，而不是 128 个全挤在一把锁上）；调大摊薄锁争用，调到 1 回到单客户端"},
+		Min: f64(1), Max: f64(64), Desc: "抓取用的 torrent 客户端数量：种子按 infohash 首字节分片到各客户端，把单客户端全局锁的争用摊开（128 worker、8 片时每片约 16 个并发种子，而不是 128 个全挤在一把锁上）；调大摊薄锁争用，调到 1 回到单客户端。仅对 anacrolix 底座有意义，native 底座无客户端、忽略此项"},
+	{Key: KeyMetaFetcher, Group: "metadata", Label: "抓取底座", Type: TypeEnum, Default: "anacrolix", Editable: true, Restart: true,
+		Options: []string{"anacrolix", "native"}, Desc: "anacrolix = 基于 torrent 客户端的抓取（默认，现有行为）；native = 自研薄抓取器：只做 tracker announce 取 peer、直连 peer 走 BEP 9 取元数据，没有客户端全局锁，单个卡死 peer 只损失自己的协程。两个底座的计数口径（成功/超时/失败/早筛丢弃）一致，切换后对比 pipeline 日志即可 A/B。订阅源抓取始终走 anacrolix，不受此项影响"},
 	{Key: KeyMetaTimeout, Group: "metadata", Label: "元数据超时", Type: TypeDuration, Default: "45s", Editable: true,
 		Min: f64(1), Max: f64(600), Desc: "单个种子等元数据的最长时长，保存后立即生效；实测缩短会让成功率塌陷，不要低于 20s"},
 	{Key: KeyMetaPrescreenEnabled, Group: "metadata", Label: "元数据早筛", Type: TypeBool, Default: "true", Editable: true,

@@ -21,6 +21,7 @@ import (
 	"dhtsearch/server/internal/feeds"
 	"dhtsearch/server/internal/filter"
 	"dhtsearch/server/internal/metadata"
+	"dhtsearch/server/internal/metadata/native"
 	"dhtsearch/server/internal/moderator"
 	"dhtsearch/server/internal/scraper"
 	"dhtsearch/server/internal/settings"
@@ -218,6 +219,8 @@ func main() {
 		"DHT node identities in one process (each with its own node ID, routing table and quality tracker; identity i listens on DHT_PORT+i)")
 	metaWorkers := flag.Int("meta-workers", envInt("META_WORKERS", 128), "metadata fetch worker count")
 	metaShards := flag.Int("meta-shards", envInt("META_SHARDS", 8), "metadata torrent client shards (hashes are spread across clients to split the per-client lock contention)")
+	metaFetcher := flag.String("meta-fetcher", envDefault("META_FETCHER", "anacrolix"),
+		"metadata fetch foundation for the main pipeline: anacrolix (torrent clients) or native (thin BEP 9 fetcher); the feeds fetcher always uses anacrolix")
 	metaTimeout := flag.Duration("meta-timeout", envDuration("META_TIMEOUT", 45*time.Second), "metadata fetch timeout per torrent")
 	metaPrescreen := flag.Bool("meta-prescreen", envBool("META_PRESCREEN_ENABLED", true),
 		"prescreen fetches: abandon a hash early when no peer connects within the prescreen window")
@@ -333,6 +336,7 @@ func main() {
 	reg(settings.KeyFetchMetadata, strconv.FormatBool(*fetchMetadata))
 	reg(settings.KeyMetaWorkers, strconv.Itoa(*metaWorkers))
 	reg(settings.KeyMetaShards, strconv.Itoa(*metaShards))
+	reg(settings.KeyMetaFetcher, *metaFetcher)
 	reg(settings.KeyMetaTimeout, metaTimeout.String())
 	reg(settings.KeyMetaPrescreenEnabled, strconv.FormatBool(*metaPrescreen))
 	reg(settings.KeyMetaPrescreenTimeout, metaPrescreenTimeout.String())
@@ -482,7 +486,7 @@ func main() {
 	})
 
 	// Pipeline: infohashes -> scrape ranking -> metadata -> filter -> store.
-	var fetcher *metadata.Fetcher
+	var fetcher metadata.Backend
 	var scr *scraper.Scraper
 	var feedSvc *feeds.Service
 	var feedFetch *metadata.Fetcher
@@ -504,7 +508,25 @@ func main() {
 			Logger:      logger,
 		}
 		prescreenCfg(&mainMetaCfg)
-		fetcher, err = metadata.NewFetcher(mainMetaCfg)
+		// The main pipeline's fetch foundation is switchable
+		// (META_FETCHER); the feeds fetcher below always stays on
+		// anacrolix — its swarms are live and few, and the dedicated
+		// single client is the point of it (see its construction).
+		switch foundation := strings.ToLower(mgr.Get(settings.KeyMetaFetcher)); foundation {
+		case "native":
+			fetcher, err = native.New(mainMetaCfg)
+			if err == nil {
+				logger.Printf("metadata: fetch foundation = native (thin BEP 9 fetcher)")
+			}
+		case "anacrolix", "":
+			fetcher, err = metadata.NewFetcher(mainMetaCfg)
+			if err == nil {
+				logger.Printf("metadata: fetch foundation = anacrolix (torrent clients, %d shards)", mainMetaCfg.Shards)
+			}
+		default:
+			logger.Printf("metadata: unknown META_FETCHER %q, falling back to anacrolix", foundation)
+			fetcher, err = metadata.NewFetcher(mainMetaCfg)
+		}
 		if err != nil {
 			logger.Fatalf("metadata: %v", err)
 		}
