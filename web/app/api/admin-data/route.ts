@@ -16,6 +16,7 @@ const KINDS: Record<string, (q: URLSearchParams) => string> = {
     `/api/admin/trends?range=${encodeURIComponent(q.get("range") ?? "24h")}`,
   latest: () => "/api/admin/torrents?page=1&page_size=10",
   update: () => "/api/admin/update",
+  restart: () => "/api/admin/restart",
 };
 
 export async function GET(request: Request) {

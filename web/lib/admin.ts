@@ -549,6 +549,33 @@ export function fetchAdminUpdate(token: string): Promise<AdminUpdate> {
   return adminFetch<AdminUpdate>(token, "/api/admin/update");
 }
 
+// --- Service restart (mirror server/internal/api/restart.go) ---
+
+/**
+ * The last panel-requested service restart as the root-side agent
+ * recorded it. The panel only writes the request flag; the agent
+ * restarts dhtsearch.service (never the web service) and reports the
+ * outcome here. While a restart is in flight the API itself is briefly
+ * unreachable, so consumers must treat a failed fetch during
+ * "requested"/"running" as the restart happening, not as an error.
+ */
+export interface AdminRestartState {
+  state: "idle" | "requested" | "running" | "succeeded" | "failed";
+  pending: boolean;
+  request_id: string;
+  requested_at: string;
+  requested_by: string;
+  started_at: string;
+  finished_at: string;
+  message: string;
+  /** False on deployments whose data dir the API cannot reach. */
+  contract_ready: boolean;
+}
+
+export function fetchAdminRestart(token: string): Promise<AdminRestartState> {
+  return adminFetch<AdminRestartState>(token, "/api/admin/restart");
+}
+
 // --- Public API tokens (mirror server/internal/store/apitokens.go) ---
 
 /**

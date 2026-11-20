@@ -34,10 +34,18 @@
 #                   last panel-requested upgrade; while one runs it
 #                   also carries PROGRESS / PHASE stage markers (see
 #                   write_update_status).
+#   restart-request a service-restart request flag written by the
+#                   panel's "restart service" button (settings whose
+#                   effect needs a restart can then be applied with
+#                   no SSH session).
+#   restart-status  written by the upgrade agent: the outcome of the
+#                   last panel-requested restart (see
+#                   write_restart_status).
 # A per-minute timer (dhtsearch-upgrade-request.timer) runs the
 # agent (`dhtsearch upgrade-request`): it reconciles the auto-update
-# timer with the effective (panel-first) settings and consumes one
-# pending upgrade request, recording the result in update-status.
+# timer with the effective (panel-first) settings, consumes one
+# pending restart request, and consumes one pending upgrade request,
+# recording the results in restart-status / update-status.
 #
 # Database: SQLite by default. install can instead pick PostgreSQL —
 # --db postgres-local installs and configures a local server, --db
@@ -106,12 +114,15 @@ AUTOUPDATE_FILE="${DATA_DIR}/autoupdate"
 REQUEST_UNIT="dhtsearch-upgrade-request.service"
 REQUEST_TIMER="dhtsearch-upgrade-request.timer"
 # Panel contract files (see the header comment): the panel writes
-# update-panel / update-request, the upgrade agent writes
-# update-status, and .au-applied stamps the auto-update configuration
-# the agent last reconciled the systemd timer to.
+# update-panel / update-request / restart-request, the upgrade agent
+# writes update-status / restart-status, and .au-applied stamps the
+# auto-update configuration the agent last reconciled the systemd
+# timer to.
 UPDATE_PANEL_FILE="${DATA_DIR}/update-panel"
 UPDATE_REQUEST_FILE="${DATA_DIR}/update-request"
 UPDATE_STATUS_FILE="${DATA_DIR}/update-status"
+RESTART_REQUEST_FILE="${DATA_DIR}/restart-request"
+RESTART_STATUS_FILE="${DATA_DIR}/restart-status"
 AU_APPLIED_FILE="${DATA_DIR}/.au-applied"
 
 # Archive copies (package extraction, web tree, upgrade backups). In
@@ -1534,8 +1545,13 @@ do_check_update() {
 #      timer within about a minute. $AU_APPLIED_FILE stamps what was
 #      last applied; a matching stamp means no work (and no
 #      daemon-reload) on this tick.
-#   2. requests: consume $UPDATE_REQUEST_FILE exactly once — run the
-#      normal upgrade path and record the outcome in
+#   2. restart requests: consume $RESTART_REQUEST_FILE exactly once
+#      — restart the API service and record the outcome in
+#      $RESTART_STATUS_FILE (do_restart_request). Restarts run
+#      before upgrades: they take seconds, and an admin who asked
+#      for one is usually waiting to see a setting take effect.
+#   3. upgrade requests: consume $UPDATE_REQUEST_FILE exactly once —
+#      run the normal upgrade path and record the outcome in
 #      $UPDATE_STATUS_FILE for the panel to display. A status file
 #      already carrying the request's id means a previous tick
 #      handled it; the flag is then just dropped.
@@ -1543,7 +1559,7 @@ do_check_update() {
 write_request_units() {
     cat > "${UNIT_DIR}/${REQUEST_UNIT}" <<EOF
 [Unit]
-Description=DHTSearch upgrade agent (panel auto-update reconcile + on-demand upgrade requests)
+Description=DHTSearch upgrade agent (panel auto-update reconcile + on-demand upgrade/restart requests)
 After=network-online.target
 Wants=network-online.target
 
@@ -1642,6 +1658,92 @@ write_update_status() {
     mv "$tmp" "$UPDATE_STATUS_FILE"
 }
 
+# write_restart_status STATE REQUEST_ID REQUESTED_AT REQUESTED_BY
+# STARTED_AT FINISHED_AT MESSAGE — atomically replace the restart
+# outcome file the panel polls (the restart counterpart of
+# write_update_status, minus the version/progress fields a restart
+# does not have).
+write_restart_status() {
+    mkdir -p "$DATA_DIR"
+    local tmp="${RESTART_STATUS_FILE}.tmp.$$"
+    {
+        printf 'STATE=%s\n' "$1"
+        printf 'REQUEST_ID=%s\n' "$2"
+        printf 'REQUESTED_AT=%s\n' "$3"
+        printf 'REQUESTED_BY=%s\n' "$4"
+        printf 'STARTED_AT=%s\n' "$5"
+        printf 'FINISHED_AT=%s\n' "$6"
+        printf 'MESSAGE=%s\n' "$(printf '%s' "$7" | tr '\n' ' ')"
+    } > "$tmp"
+    mv "$tmp" "$RESTART_STATUS_FILE"
+}
+
+# wait_api_health — poll the API's health endpoint after a restart
+# (up to 60s). Only the API is checked: a panel-requested restart
+# restarts dhtsearch.service alone, never the web unit. Skipped —
+# successfully — in dry-run / no-systemd mode, like wait_health.
+wait_api_health() {
+    if [ "$DRY_RUN" = "1" ] || [ "${DHTSEARCH_SKIP_SYSTEMD:-0}" = "1" ]; then
+        log "(health wait skipped in dry-run / no-systemd mode)"
+        return 0
+    fi
+    local port deadline
+    port="$(resolve_api_port)"
+    deadline=$(( $(date +%s) + 60 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if curl -fsS "http://127.0.0.1:${port}/api/healthz" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+# do_restart_request — consume one panel restart request: restart
+# dhtsearch.service (the API/crawler process — the one restart-
+# required settings live in; the web service keeps serving the
+# admin UI, so the panel stays up to watch) and record the outcome
+# in $RESTART_STATUS_FILE. Runs under do_upgrade_request's lock, on
+# the same per-minute agent tick as upgrade requests; no new units.
+do_restart_request() {
+    [ -f "$RESTART_REQUEST_FILE" ] || return 0
+    local rid rat rby
+    rid="$(kv_value "$RESTART_REQUEST_FILE" REQUEST_ID)"
+    rat="$(kv_value "$RESTART_REQUEST_FILE" REQUESTED_AT)"
+    rby="$(kv_value "$RESTART_REQUEST_FILE" REQUESTED_BY)"
+    if [ -n "$rid" ] && [ "$(kv_value "$RESTART_STATUS_FILE" REQUEST_ID)" = "$rid" ]; then
+        # Already handled by an earlier tick (its status is the
+        # record); just drop the flag so it is not re-run.
+        rm -f "$RESTART_REQUEST_FILE"
+        return 0
+    fi
+
+    local started finished rc=0
+    started="$(date '+%Y-%m-%d %H:%M:%S')"
+    write_restart_status "running" "$rid" "$rat" "$rby" "$started" "" \
+        "restart requested from the admin panel${rby:+ by $rby}; restarting $API_UNIT"
+    log "restart-request: restarting $API_UNIT (request $rid, by ${rby:-unknown})"
+    # Give the panel's HTTP response a head start: it was written
+    # moments ago, but the browser may still be switching to its
+    # "restarting" state, and the restart drops the API for a few
+    # seconds — a poll racing the drop should read as "restarting",
+    # never as a fresh error.
+    sleep 3
+    svc restart "$API_UNIT" || rc=$?
+    finished="$(date '+%Y-%m-%d %H:%M:%S')"
+    if [ "$rc" = "0" ] && wait_api_health; then
+        write_restart_status "succeeded" "$rid" "$rat" "$rby" "$started" "$finished" \
+            "service restarted; API is answering again"
+        log "restart-request: $API_UNIT restarted and healthy (request $rid)"
+    else
+        write_restart_status "failed" "$rid" "$rat" "$rby" "$started" "$finished" \
+            "restart failed or the API did not come back; check: journalctl -u $API_UNIT -n 100"
+        warn "restart-request: $API_UNIT did not come back healthy (request $rid, restart exit $rc)"
+    fi
+    rm -f "$RESTART_REQUEST_FILE"
+    return 0
+}
+
 # update_progress PROGRESS PHASE — record a mid-upgrade stage in the
 # status file so the panel can draw a progress bar. Only acts when
 # do_upgrade runs under do_upgrade_request, the one context that owns
@@ -1672,6 +1774,10 @@ do_upgrade_request() {
     fi
 
     au_reconcile
+
+    # Restarts before upgrades (see the agent comment above): quick,
+    # and the admin who requested one is usually watching.
+    do_restart_request
 
     [ -f "$UPDATE_REQUEST_FILE" ] || return 0
     local rid rat rby
