@@ -391,12 +391,39 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Crawler.
+	// Crawler. The node-persistence hooks adapt the store's DHTNode
+	// rows to the crawler's PersistedNode shape (the same adapter
+	// pattern as scraperStatus below); the crawler itself stays
+	// store-free.
 	cr, err := crawler.Start(crawler.Config{
 		Port:     mgr.Int(settings.KeyDHTPort),
 		Enabled:  crawlOn,
 		Samplers: mgr.Int(settings.KeyDHTSamplers),
 		Logger:   logger,
+		LoadSeedNodes: func(ctx context.Context) ([]crawler.PersistedNode, error) {
+			rows, err := st.LoadDHTNodes(ctx, 512)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]crawler.PersistedNode, 0, len(rows))
+			for _, r := range rows {
+				out = append(out, crawler.PersistedNode{
+					Addr: r.Addr, SuccW: r.SuccW, FailW: r.FailW,
+					LatencyMs: r.LatencyMs, Attempts: r.Attempts, UpdatedAt: r.UpdatedAt,
+				})
+			}
+			return out, nil
+		},
+		SaveSeedNodes: func(ctx context.Context, nodes []crawler.PersistedNode) error {
+			rows := make([]store.DHTNode, 0, len(nodes))
+			for _, n := range nodes {
+				rows = append(rows, store.DHTNode{
+					Addr: n.Addr, SuccW: n.SuccW, FailW: n.FailW,
+					LatencyMs: n.LatencyMs, Attempts: n.Attempts, UpdatedAt: n.UpdatedAt,
+				})
+			}
+			return st.SaveDHTNodes(ctx, rows)
+		},
 	})
 	if err != nil {
 		logger.Fatalf("crawler: %v", err)
@@ -684,13 +711,17 @@ func main() {
 		Handler: api.New(st, func() api.CrawlerStatus {
 			cs := cr.Stats()
 			return api.CrawlerStatus{
-				Enabled:   cr.Enabled(),
-				Seen:      int64(cr.SeenCount()),
-				Nodes:     cs.Nodes,
-				Queued:    cs.Queued,
-				Sampled:   cs.Sampled,
-				SampleErr: cs.SampleErr,
-				Harvested: cs.Harvested,
+				Enabled:       cr.Enabled(),
+				Seen:          int64(cr.SeenCount()),
+				Nodes:         cs.Nodes,
+				Queued:        cs.Queued,
+				Sampled:       cs.Sampled,
+				SampleErr:     cs.SampleErr,
+				Harvested:     cs.Harvested,
+				TrackedNodes:  cs.TrackedNodes,
+				AvgNodeScore:  cs.AvgNodeScore,
+				BannedNodes:   cs.BannedNodes,
+				RestoredNodes: cs.RestoredNodes,
 			}
 		}, logger, api.Options{
 			RateRPS:       *rateRPS,

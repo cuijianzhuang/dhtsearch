@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"log"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -52,6 +53,16 @@ const (
 	// already hold.
 	refillInterval = 5 * time.Second
 	walkInterval   = 2 * time.Second
+
+	// Node-quality persistence (see nodequality.go): the best proven
+	// nodes are snapshotted periodically and once at shutdown, and a
+	// later start seeds both the quality tracker and the bootstrap set
+	// from them, so discovery does not cold-start from the five public
+	// routers alone.
+	nodePersistInterval  = 5 * time.Minute
+	nodePersistTop       = 512
+	nodePersistMinScore  = 0.5
+	nodePersistLoadLimit = 512
 )
 
 // Config controls the crawler.
@@ -65,6 +76,16 @@ type Config struct {
 	Samplers int
 	// Logger, nil for log.Default().
 	Logger *log.Logger
+	// LoadSeedNodes, when non-nil, supplies node-quality state saved
+	// by a previous run. The restored nodes seed the quality tracker
+	// and join the bootstrap set (the public routers stay as fallback:
+	// if every restored node is dead by now, bootstrap must still
+	// work). Nil disables node persistence.
+	LoadSeedNodes func(ctx context.Context) ([]PersistedNode, error)
+	// SaveSeedNodes, when non-nil, receives the current top-quality
+	// nodes every nodePersistInterval and once more at Close. Nil
+	// disables node persistence.
+	SaveSeedNodes func(ctx context.Context, nodes []PersistedNode) error
 }
 
 // Crawler is a running (or disabled) DHT crawler.
@@ -76,6 +97,11 @@ type Crawler struct {
 	cancel   context.CancelFunc
 	logger   *log.Logger
 
+	// Node quality scoring and its persistence hooks (nodequality.go).
+	quality   *nodeQuality
+	restored  int // persisted nodes loaded at Start
+	saveNodes func(ctx context.Context, nodes []PersistedNode) error
+
 	mu    sync.Mutex
 	seen  map[[20]byte]struct{}
 	ring  [][20]byte // FIFO eviction order for seen
@@ -83,7 +109,9 @@ type Crawler struct {
 
 	// Sampling state. nodeQ carries nodes waiting to be sampled; nodeNext
 	// records the earliest time each address is worth sampling again, which
-	// keeps the samplers off nodes they just read.
+	// keeps the samplers off nodes they just read. refill offers the table
+	// best-first by quality score, so after a refill the queue drains
+	// toward the nodes most likely to answer with fresh samples.
 	nodeQ    chan krpc.NodeAddr
 	nodeMu   sync.Mutex
 	nodeNext map[string]time.Time
@@ -96,13 +124,22 @@ type Crawler struct {
 }
 
 // Stats reports sampler activity. Nodes is the routing table size, which is
-// the pool the samplers draw from — if it collapses, discovery stalls.
+// the pool the samplers draw from — if it collapses, discovery stalls. The
+// node-quality fields describe the scoring layer (nodequality.go):
+// TrackedNodes is the quality tracker's pool, AvgNodeScore the mean score
+// of nodes with at least one observation, BannedNodes how many are parked
+// in a failure cooldown, and RestoredNodes how many persisted nodes were
+// loaded at startup.
 type Stats struct {
-	Nodes     int
-	Queued    int
-	Sampled   int64
-	SampleErr int64
-	Harvested int64
+	Nodes         int
+	Queued        int
+	Sampled       int64
+	SampleErr     int64
+	Harvested     int64
+	TrackedNodes  int
+	AvgNodeScore  float64
+	BannedNodes   int
+	RestoredNodes int
 }
 
 // Start launches the crawler. With Enabled=false it returns a Crawler whose
@@ -117,15 +154,35 @@ func Start(cfg Config) (*Crawler, error) {
 		samplers = defaultSamplers
 	}
 	c := &Crawler{
-		enabled:  cfg.Enabled,
-		samplers: samplers,
-		logger:   logger,
-		seen:     make(map[[20]byte]struct{}, seenCapacity),
-		nodeQ:    make(chan krpc.NodeAddr, nodeQueueSize),
-		nodeNext: make(map[string]time.Time),
+		enabled:   cfg.Enabled,
+		samplers:  samplers,
+		logger:    logger,
+		seen:      make(map[[20]byte]struct{}, seenCapacity),
+		nodeQ:     make(chan krpc.NodeAddr, nodeQueueSize),
+		nodeNext:  make(map[string]time.Time),
+		quality:   newNodeQuality(),
+		saveNodes: cfg.SaveSeedNodes,
 	}
 	if !cfg.Enabled {
 		return c, nil
+	}
+
+	// Restore persisted node quality before the server exists: the
+	// tracker resumes the restored scores, and the addresses join the
+	// bootstrap set below. A load failure is not fatal — bootstrap
+	// falls back to the public routers alone, exactly as before.
+	var seedAddrs []string
+	if cfg.LoadSeedNodes != nil {
+		lctx, lcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		saved, lerr := cfg.LoadSeedNodes(lctx)
+		lcancel()
+		if lerr != nil {
+			logger.Printf("crawler: load persisted nodes: %v (continuing without)", lerr)
+		} else if len(saved) > 0 {
+			seedAddrs = c.quality.Seed(saved)
+			c.restored = len(seedAddrs)
+			logger.Printf("crawler: restored %d persisted nodes into the bootstrap set", c.restored)
+		}
 	}
 
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: cfg.Port})
@@ -135,7 +192,17 @@ func Start(cfg Config) (*Crawler, error) {
 	sc := dht.NewDefaultServerConfig()
 	sc.Conn = conn
 	sc.StartingNodes = func() ([]dht.Addr, error) {
-		return dht.ResolveHostPorts(bootstrapNodes)
+		var out []dht.Addr
+		for _, a := range seedAddrs {
+			if ua, rerr := net.ResolveUDPAddr("udp", a); rerr == nil {
+				out = append(out, dht.NewAddr(ua))
+			}
+		}
+		pub, rerr := dht.ResolveHostPorts(bootstrapNodes)
+		if rerr != nil && len(out) == 0 {
+			return nil, rerr
+		}
+		return append(out, pub...), nil
 	}
 	sc.OnQuery = c.onQuery
 	sc.OnAnnouncePeer = func(infoHash metainfo.Hash, _ net.IP, _ int, _ bool) {
@@ -163,9 +230,51 @@ func Start(cfg Config) (*Crawler, error) {
 	for i := 0; i < c.samplers; i++ {
 		go c.sampleLoop(ctx)
 	}
+	if c.saveNodes != nil {
+		go c.persistLoop(ctx)
+	}
+	// Offer the restored nodes to the samplers right away: they are
+	// proven sample sources, and asking them immediately is what turns
+	// the persisted set into first samples within seconds instead of
+	// waiting for the routing table to fill around them.
+	for _, a := range seedAddrs {
+		if ua, rerr := net.ResolveUDPAddr("udp", a); rerr == nil && ua.Port != 0 {
+			c.enqueueNode(krpc.NodeAddr{IP: ua.IP, Port: ua.Port})
+		}
+	}
 	logger.Printf("crawler: DHT node listening on %s (%d samplers)",
 		conn.LocalAddr(), c.samplers)
 	return c, nil
+}
+
+// persistLoop snapshots the top-quality nodes for the next start.
+func (c *Crawler) persistLoop(ctx context.Context) {
+	t := time.NewTicker(nodePersistInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			c.saveQuality()
+		}
+	}
+}
+
+// saveQuality writes the current persistence snapshot through the
+// configured hook. Safe to call when persistence is disabled. The
+// enabled check matters: a crawler started disabled holds an empty
+// tracker, and saving it would wipe the previous run's snapshot.
+func (c *Crawler) saveQuality() {
+	if !c.enabled || c.saveNodes == nil {
+		return
+	}
+	nodes := c.quality.Top(nodePersistTop, nodePersistMinScore)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := c.saveNodes(ctx, nodes); err != nil {
+		c.logger.Printf("crawler: persist nodes: %v", err)
+	}
 }
 
 // Infohashes returns the channel of newly seen infohashes (hex encoded).
@@ -195,11 +304,21 @@ func (c *Crawler) Stats() Stats {
 		st.Nodes = c.server.NumNodes()
 	}
 	st.Queued = len(c.nodeQ)
+	if c.quality != nil {
+		qs := c.quality.Summary()
+		st.TrackedNodes = qs.Tracked
+		st.AvgNodeScore = qs.AvgScore
+		st.BannedNodes = qs.Banned
+	}
+	st.RestoredNodes = c.restored
 	return st
 }
 
 // Close shuts the crawler down.
 func (c *Crawler) Close() {
+	// Final quality snapshot while the store is still open (the
+	// caller closes it after us); saveQuality no-ops without a hook.
+	c.saveQuality()
 	if c.cancel != nil {
 		c.cancel()
 	}
@@ -271,7 +390,11 @@ func (c *Crawler) refillLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		for _, n := range c.server.Nodes() {
+		nodes := c.server.Nodes()
+		sort.Slice(nodes, func(i, j int) bool {
+			return c.quality.Score(nodes[i].Addr.String()) > c.quality.Score(nodes[j].Addr.String())
+		})
+		for _, n := range nodes {
 			c.enqueueNode(n.Addr)
 		}
 	}
@@ -295,10 +418,18 @@ func (c *Crawler) walkLoop(ctx context.Context) {
 			continue
 		}
 		node := nodes[randIntn(len(nodes))]
+		start := time.Now()
 		res := c.server.FindNode(
 			dht.NewAddr(node.Addr.UDP()), int160.FromByteArray(randomID()),
 			dht.QueryRateLimiting{},
 		)
+		// find_node is the walk's own query/response exchange with this
+		// node: fold the outcome into its quality score.
+		if res.Err == nil && res.Reply.R != nil {
+			c.quality.Record(node.Addr.String(), true, time.Since(start))
+		} else {
+			c.quality.Record(node.Addr.String(), false, 0)
+		}
 		c.absorbNodes(res)
 
 		// Piggyback a get_peers for something recently seen: it keeps this
@@ -335,6 +466,7 @@ func (c *Crawler) sampleNode(ctx context.Context, na krpc.NodeAddr) {
 	// part of the ID space the node reports on, and its reply carries the
 	// nodes closest to that target. Randomising it per query is what turns
 	// repeated sampling into a walk instead of a re-read.
+	start := time.Now()
 	res := c.server.Query(qctx, dht.NewAddr(na.UDP()), "sample_infohashes", dht.QueryInput{
 		MsgArgs:      krpc.MsgArgs{ID: c.server.ID(), Target: randomID()},
 		RateLimiting: dht.QueryRateLimiting{},
@@ -342,9 +474,11 @@ func (c *Crawler) sampleNode(ctx context.Context, na krpc.NodeAddr) {
 	c.absorbNodes(res)
 
 	if res.Err != nil || res.Reply.R == nil || res.Reply.R.Samples == nil {
+		c.quality.Record(na.String(), false, 0)
 		c.bump(&c.sampleErr)
 		return
 	}
+	c.quality.Record(na.String(), true, time.Since(start))
 	samples := *res.Reply.R.Samples
 	c.bump(&c.sampled)
 	c.addStat(&c.harvested, int64(len(samples)))
@@ -354,14 +488,17 @@ func (c *Crawler) sampleNode(ctx context.Context, na krpc.NodeAddr) {
 	c.scheduleResample(na, res.Reply.R.Interval)
 }
 
-// scheduleResample honours the node's advertised refresh interval, clamped so
-// a hostile or broken value cannot park a node forever or turn it into a hot
-// loop.
+// scheduleResample honours the node's advertised refresh interval, scaled
+// by its quality score — proven nodes are re-read sooner (factor 0.5 at
+// score 1), poor ones later (factor 1.5 at score 0) — then clamped so a
+// hostile or broken value cannot park a node forever or turn it into a
+// hot loop.
 func (c *Crawler) scheduleResample(na krpc.NodeAddr, interval *int64) {
 	d := defaultResample
 	if interval != nil && *interval > 0 {
 		d = time.Duration(*interval) * time.Second
 	}
+	d = time.Duration(float64(d) * (1.5 - c.quality.Score(na.String())))
 	d = min(max(d, minResample), maxResample)
 	c.nodeMu.Lock()
 	c.nodeNext[na.String()] = time.Now().Add(d)
@@ -390,6 +527,13 @@ func (c *Crawler) enqueueNode(na krpc.NodeAddr) {
 		return
 	}
 	key := na.String()
+	// Register the node in the quality tracker and respect a failure
+	// cooldown: a persistently dead node stops consuming sampler slots
+	// until its ban expires (see nodeQuality.Banned).
+	c.quality.Touch(key)
+	if c.quality.Banned(key) {
+		return
+	}
 	now := time.Now()
 
 	c.nodeMu.Lock()

@@ -117,6 +117,15 @@ type CrawlerStatus struct {
 	Sampled   int64 `json:"sampled"`
 	SampleErr int64 `json:"sample_errors"`
 	Harvested int64 `json:"harvested"`
+	// Node-quality scoring (internal/crawler/nodequality.go):
+	// TrackedNodes is the scorer's pool, AvgNodeScore the mean score
+	// of observed nodes, BannedNodes how many are in a failure
+	// cooldown, RestoredNodes how many persisted nodes seeded this
+	// run's bootstrap.
+	TrackedNodes  int     `json:"tracked_nodes"`
+	AvgNodeScore  float64 `json:"avg_node_score"`
+	BannedNodes   int     `json:"banned_nodes"`
+	RestoredNodes int     `json:"restored_nodes"`
 }
 
 // MetaStatus describes the metadata fetch pipeline's live state, as

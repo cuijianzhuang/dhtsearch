@@ -110,10 +110,10 @@ func (d dialect) isDuplicateColumn(err error) bool {
 // moderation, so the crawler cannot re-add (and re-pay to re-classify)
 // a torrent that was already rejected.
 func (d dialect) schemaStatements() []string {
-	intType, blobType := "INTEGER", "BLOB"
+	intType, blobType, realType := "INTEGER", "BLOB", "REAL"
 	idType := "INTEGER PRIMARY KEY AUTOINCREMENT"
 	if d.isPostgres() {
-		intType, blobType = "BIGINT", "BYTEA"
+		intType, blobType, realType = "BIGINT", "BYTEA", "DOUBLE PRECISION"
 		idType = "BIGSERIAL PRIMARY KEY"
 	}
 	return []string{
@@ -155,6 +155,22 @@ func (d dialect) schemaStatements() []string {
 		`CREATE TABLE IF NOT EXISTS trending_cache (
 			key   TEXT PRIMARY KEY,
 			value TEXT NOT NULL
+		)`,
+		// The crawler's persisted node-quality snapshot (see
+		// dhtnodes.go): the best proven DHT nodes from the previous
+		// run, restored at startup as bootstrap seeds so discovery
+		// does not cold-start from the public routers alone. The
+		// whole table is one replace-all snapshot, rewritten by
+		// SaveDHTNodes; it is runtime state, not user data, so the
+		// cross-backend Migrate deliberately does not copy it (the
+		// same treatment as trending_cache).
+		`CREATE TABLE IF NOT EXISTS dht_nodes (
+			addr       TEXT PRIMARY KEY,
+			succ_w     ` + realType + ` NOT NULL,
+			fail_w     ` + realType + ` NOT NULL,
+			latency_ms ` + realType + ` NOT NULL DEFAULT 0,
+			attempts   ` + intType + ` NOT NULL DEFAULT 0,
+			updated_at ` + intType + ` NOT NULL
 		)`,
 		// Public API tokens (see internal/api's token gate). Only the
 		// SHA-256 hash of a token is stored — the plaintext is shown to

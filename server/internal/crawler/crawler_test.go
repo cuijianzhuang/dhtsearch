@@ -13,6 +13,7 @@ func testCrawler() *Crawler {
 		seen:     make(map[[20]byte]struct{}),
 		nodeQ:    make(chan krpc.NodeAddr, 8),
 		nodeNext: make(map[string]time.Time),
+		quality:  newNodeQuality(),
 	}
 }
 
