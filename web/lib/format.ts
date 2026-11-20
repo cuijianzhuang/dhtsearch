@@ -57,10 +57,32 @@ export function formatSpan(seconds: number | undefined | null): string {
   return `${Math.floor(hours / 24)} 天`;
 }
 
-// Format a count with thousands separators
-export function formatCount(n: number | undefined | null): string {
+// Format a count exactly, with thousands separators. Used where the
+// precise figure is the point: prose that reconciles counters (the
+// pipeline footnote) and the title attribute behind an abbreviated
+// big-slot number.
+export function formatExactCount(n: number | undefined | null): string {
   if (n === undefined || n === null || !Number.isFinite(n)) return "-";
   return n.toLocaleString("zh-CN");
+}
+
+// Format a count for display slots. Below a million the digits stay
+// exact (grouped) — the operator reconciles totals at that scale, so
+// precision is a feature. From a million up, the value abbreviates
+// to 万 (one decimal, trailing .0 trimmed); from a hundred million,
+// to 亿 (up to two decimals, trimmed). A seven-digit pipeline count
+// rendered in full overflows its ring column on a phone; the exact
+// figure stays one hover away via formatExactCount in a title.
+export function formatCount(n: number | undefined | null): string {
+  if (n === undefined || n === null || !Number.isFinite(n)) return "-";
+  const abs = Math.abs(n);
+  if (abs < 1_000_000) return n.toLocaleString("zh-CN");
+  if (abs < 100_000_000) {
+    const wan = (Math.round((n / 10_000) * 10) / 10).toFixed(1);
+    return `${wan.endsWith(".0") ? wan.slice(0, -2) : wan}万`;
+  }
+  const yi = (Math.round((n / 100_000_000) * 100) / 100).toFixed(2);
+  return `${yi.replace(/\.?0+$/, "")}亿`;
 }
 
 // Longest directory prefix (ending in "/") shared by every path.
