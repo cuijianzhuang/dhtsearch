@@ -182,6 +182,12 @@ type Crawler struct {
 	ring  [][20]byte // FIFO eviction order for seen
 	known [][20]byte // recent infohashes for active probing
 
+	// Peer hints gathered from DHT traffic (peerhints.go), consumed
+	// by the metadata queue bridge as items are built. Shared by all
+	// identities: a peer for a hash is a peer regardless of which of
+	// our node IDs learned it.
+	hints peerHintCache
+
 	// Counters, read via Stats. Shared by all identities: they count
 	// harvest-pipeline events, not per-identity activity.
 	statMu    sync.Mutex
@@ -340,8 +346,21 @@ func (c *Crawler) startIdentity(ctx context.Context, idx, basePort int, saved []
 		return append(out, pub...), nil
 	}
 	sc.OnQuery = c.onQuery
-	sc.OnAnnouncePeer = func(infoHash metainfo.Hash, _ net.IP, _ int, _ bool) {
-		c.push([20]byte(infoHash))
+	sc.OnAnnouncePeer = func(infoHash metainfo.Hash, ip net.IP, port int, portOk bool) {
+		ih := [20]byte(infoHash)
+		// The announcer is a peer for this hash by definition, and
+		// its address arrives with the query — record it as a fetch
+		// hint BEFORE pushing the hash, so the hint is already in
+		// the cache when the queue bridge picks the hash up. portOk
+		// is false when neither an announced port nor an implied
+		// source port could be derived; a hint without a port is
+		// worthless, so those announces contribute the hash only.
+		if portOk && port > 0 && port <= 65535 {
+			if ap, ok := addrPortFromIP(ip, uint16(port)); ok {
+				c.recordPeerHint(ih, ap)
+			}
+		}
+		c.push(ih)
 	}
 	s, err := dht.NewServer(sc)
 	if err != nil {
@@ -660,9 +679,19 @@ func (id *identity) walkLoop(ctx context.Context) {
 		// Piggyback a get_peers for something recently seen: it keeps this
 		// node in other peers' routing tables, which is what makes inbound
 		// get_peers traffic (the passive half of discovery) arrive at all.
+		// The reply's values are peers for that hash: harvest them as
+		// fetch hints (peerhints.go) instead of discarding the result,
+		// which is what happened to it before.
 		if ih, ok := id.c.randomKnown(); ok {
-			id.server.GetPeers(ctx, dht.NewAddr(node.Addr.UDP()),
+			res := id.server.GetPeers(ctx, dht.NewAddr(node.Addr.UDP()),
 				int160.FromByteArray(ih), false, dht.QueryRateLimiting{})
+			if res.Reply.R != nil {
+				for _, va := range res.Reply.R.Values {
+					if ap, ok := addrPortFromNodeAddr(va); ok {
+						id.c.recordPeerHint(ih, ap)
+					}
+				}
+			}
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -125,6 +126,8 @@ type Fetcher struct {
 	timedOut         int64
 	failed           int64
 	prescreenDropped int64
+	hintItems        int64 // fetches that carried at least one DHT peer hint
+	hintFetched      int64 // of those, successes with a hint peer connected at completion
 }
 
 // DefaultPrescreenTimeout is the prescreen window used when none is
@@ -284,7 +287,7 @@ func (f *Fetcher) RunQueue(ctx context.Context, q *Queue, onRecord func(Record))
 				if !ok {
 					return
 				}
-				if rec, ok := f.fetch(ctx, it.Hash); ok {
+				if rec, ok := f.fetchPeers(ctx, it.Hash, it.Peers); ok {
 					onRecord(rec)
 				}
 			}
@@ -295,6 +298,17 @@ func (f *Fetcher) RunQueue(ctx context.Context, q *Queue, onRecord func(Record))
 // fetch adds the magnet, waits for GotInfo with a timeout and always drops
 // the torrent afterwards.
 func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
+	return f.fetchPeers(ctx, hexHash, nil)
+}
+
+// fetchPeers is fetch with DHT peer hints (Item.Peers): addresses the
+// crawler already knows are in this swarm, added to the torrent
+// right after the magnet so they race the tracker-supplied peers
+// inside the same timeout and prescreen budget. A connected hint
+// peer satisfies prescreen exactly like any other peer — that is
+// the point of the warm start: a hash whose swarm no tracker lists
+// can now connect inside the prescreen window instead of dying in it.
+func (f *Fetcher) fetchPeers(ctx context.Context, hexHash string, peers []netip.AddrPort) (Record, bool) {
 	rec := Record{InfoHash: hexHash}
 	// AddMagnet panics (rather than returning an error) on a zero or
 	// malformed infohash, and a panic in a worker takes the process with it.
@@ -336,6 +350,15 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 	}
 	defer t.Drop()
 
+	if len(peers) > 0 {
+		f.count(&f.hintItems)
+		pis := make([]torrent.PeerInfo, 0, len(peers))
+		for _, ap := range peers {
+			pis = append(pis, torrent.PeerInfo{Addr: ap, Source: torrent.PeerSourceDhtGetPeers})
+		}
+		t.AddPeers(pis)
+	}
+
 	timeout := f.cfg.Timeout
 	if f.cfg.TimeoutFunc != nil {
 		if d := f.cfg.TimeoutFunc(); d > 0 {
@@ -363,6 +386,9 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 		return rec, false
 	}
 	rec = RecordFromInfo(info, hexHash, f.cfg.MaxFiles)
+	if len(peers) > 0 && hintPeerConnected(t, peers) {
+		f.count(&f.hintFetched)
+	}
 	f.count(&f.fetched)
 	f.report(hexHash, OutcomeFetched)
 	return rec, true
@@ -373,6 +399,57 @@ func (f *Fetcher) report(hash string, outcome FetchOutcome) {
 	if f.cfg.ResultFunc != nil {
 		f.cfg.ResultFunc(hash, outcome)
 	}
+}
+
+// hintPeerConnected reports whether any of the torrent's currently
+// connected peers sits at one of the hint addresses. It is the
+// attribution behind the hintFetched counter, and it is deliberately
+// narrow: it proves a hinted address was connected when the metadata
+// completed — not that the hint peer delivered the decisive piece
+// (a tracker or PEX peer at the same address, or a hint peer that
+// connected while another peer served the info, both count). The
+// counter therefore measures "the hint path connected on a success",
+// a lower bound on the hints' usefulness, not a causal claim.
+//
+// One PeerConns call at completion, only for hinted fetches: not a
+// polling loop, and hinted fetches are the small subset the crawler
+// had announce/get_peers traffic for.
+func hintPeerConnected(t *torrent.Torrent, hints []netip.AddrPort) bool {
+	set := make(map[netip.AddrPort]struct{}, len(hints))
+	for _, ap := range hints {
+		set[netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())] = struct{}{}
+	}
+	for _, pc := range t.PeerConns() {
+		if ap, ok := peerConnAddrPort(pc); ok {
+			if _, hit := set[ap]; hit {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// peerConnAddrPort extracts a connection's remote address in
+// netip.AddrPort form, mirroring the torrent library's own
+// conversion: AddrPort-typed addresses directly, AddrPort()
+// providers next, the string form last.
+func peerConnAddrPort(pc *torrent.PeerConn) (netip.AddrPort, bool) {
+	pra := pc.RemoteAddr
+	if pra == nil {
+		return netip.AddrPort{}, false
+	}
+	if ap, ok := pra.(netip.AddrPort); ok {
+		return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()), true
+	}
+	if p, ok := pra.(interface{ AddrPort() netip.AddrPort }); ok {
+		ap := p.AddrPort()
+		return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()), true
+	}
+	ap, err := netip.ParseAddrPort(pra.String())
+	if err != nil {
+		return netip.AddrPort{}, false
+	}
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()), true
 }
 
 // prescreenWindow resolves the prescreen phase length for one fetch
@@ -583,6 +660,17 @@ func (f *Fetcher) PrescreenDropped() int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.prescreenDropped
+}
+
+// PeerHintStats returns the peer-hint counters: items is how many
+// fetches carried at least one DHT peer hint (Item.Peers), fetched
+// how many of those succeeded with a hint peer connected at
+// completion (see hintPeerConnected for exactly what that does and
+// does not prove). Kept separate from Stats like PrescreenDropped.
+func (f *Fetcher) PeerHintStats() (items, fetched int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hintItems, f.hintFetched
 }
 
 // Close stops the workers and the torrent clients.

@@ -174,6 +174,22 @@ func feedsStatus(fs *feeds.Service, f *metadata.Fetcher) func() feeds.Stats {
 	}
 }
 
+// queueItem builds a metadata queue item for a discovered hash,
+// attaching any DHT peer hints the crawler holds for it. Taking the
+// hints consumes them: they are spent on the one item built here,
+// which is the fetch they can warm-start (see crawler's peer-hint
+// cache and metadata.Item.Peers). Items for hashes the crawler has
+// no peer traffic for simply carry no hints.
+func queueItem(cr *crawler.Crawler, hash string, seeders int32, src metadata.Source) metadata.Item {
+	return metadata.Item{
+		Hash:    hash,
+		Seeders: seeders,
+		Source:  src,
+		Peers:   cr.TakePeerHints(hash),
+		At:      time.Now(),
+	}
+}
+
 // feedAlias is the feed title for a fetched torrent, "" for DHT-only ones.
 func feedAlias(fs *feeds.Service, infoHash string) string {
 	if fs == nil {
@@ -688,18 +704,21 @@ func main() {
 			if scraped != nil {
 				go func() {
 					for it := range scraped {
-						item := metadata.Item{Hash: it.Hash, Seeders: it.Seeders, Source: metadata.SourceScrape, At: time.Now()}
-						if admGate.Admit(item) {
-							q.Push(item)
+						// Admission runs on a hintless probe first:
+						// taking hints consumes them, and a refused
+						// hash must not burn its hints.
+						probe := metadata.Item{Hash: it.Hash, Seeders: it.Seeders, Source: metadata.SourceScrape, At: time.Now()}
+						if admGate.Admit(probe) {
+							q.Push(queueItem(cr, it.Hash, it.Seeders, metadata.SourceScrape))
 						}
 					}
 				}()
 			} else {
 				go func() {
 					for h := range feed {
-						item := metadata.Item{Hash: h, Seeders: -1, Source: metadata.SourceDHT, At: time.Now()}
-						if admGate.Admit(item) {
-							q.Push(item)
+						probe := metadata.Item{Hash: h, Seeders: -1, Source: metadata.SourceDHT, At: time.Now()}
+						if admGate.Admit(probe) {
+							q.Push(queueItem(cr, h, -1, metadata.SourceDHT))
 						}
 					}
 				}()
@@ -835,6 +854,15 @@ func main() {
 					st.IncrStatContext(wctx, "meta_failed", failed-prevFailed(&failed))
 					pd := fetcher.PrescreenDropped()
 					st.IncrStatContext(wctx, "prescreen_dropped", pd-prevPrescreen(&pd))
+					// Peer-hint counters are an incumbent-backend
+					// capability: the native backend does not
+					// consume Item.Peers yet, so under it the
+					// counters simply stay at zero.
+					if hp, ok := fetcher.(interface{ PeerHintStats() (int64, int64) }); ok {
+						hi, hf := hp.PeerHintStats()
+						st.IncrStatContext(wctx, "peer_hint_items", hi-prevHintItems(&hi))
+						st.IncrStatContext(wctx, "peer_hint_fetched", hf-prevHintFetched(&hf))
+					}
 				}
 				if admGate != nil {
 					skStored, skBackoff := admGate.Skipped()
@@ -997,12 +1025,14 @@ func main() {
 }
 
 var (
-	lastSeen       int64
-	lastTimedOut   int64
-	lastFailed     int64
-	lastPrescreen  int64
-	lastAdmStored  int64
-	lastAdmBackoff int64
+	lastSeen        int64
+	lastTimedOut    int64
+	lastFailed      int64
+	lastPrescreen   int64
+	lastAdmStored   int64
+	lastAdmBackoff  int64
+	lastHintItems   int64
+	lastHintFetched int64
 )
 
 // prevSeen returns the previously reported seen count and records the new
@@ -1043,6 +1073,20 @@ func prevAdmStored(cur *int64) int64 {
 func prevAdmBackoff(cur *int64) int64 {
 	prev := lastAdmBackoff
 	lastAdmBackoff = *cur
+	return prev
+}
+
+// prevHintItems and prevHintFetched do the same for the peer-hint
+// counters.
+func prevHintItems(cur *int64) int64 {
+	prev := lastHintItems
+	lastHintItems = *cur
+	return prev
+}
+
+func prevHintFetched(cur *int64) int64 {
+	prev := lastHintFetched
+	lastHintFetched = *cur
 	return prev
 }
 
