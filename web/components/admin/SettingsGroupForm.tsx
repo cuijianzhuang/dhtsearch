@@ -117,6 +117,10 @@ export default function SettingsGroupForm({
 }) {
   const router = useRouter();
   const items = group.items;
+  // A group with no editable items (服务与数据库 is all read-only)
+  // can never become dirty: the sticky save bar would sit there
+  // permanently disabled, occluding content it can never save.
+  const hasEditable = items.some((it) => it.editable);
   const itemByKey = useMemo(() => {
     const m = new Map<string, AdminSettingItem>();
     for (const it of items) m.set(it.key, it);
@@ -530,7 +534,7 @@ export default function SettingsGroupForm({
                       type="button"
                       onClick={() => resetOverride(item)}
                       disabled={saving}
-                      className="text-[11px] text-mute underline decoration-dotted hover:text-accent-ink disabled:opacity-50"
+                      className="inline-flex min-h-11 items-center px-1 text-[11px] text-mute underline decoration-dotted hover:text-accent-ink disabled:opacity-50"
                     >
                       恢复默认
                     </button>
@@ -556,21 +560,24 @@ export default function SettingsGroupForm({
         </div>
       </section>
 
-      <div className="sticky bottom-4 flex items-center justify-end gap-3 rounded-xl border border-line bg-surface px-4 py-3 shadow-bar">
-        <span className="text-sm text-mute">
-          {dirtyCount > 0 ? `${dirtyCount} 项未保存` : "没有未保存的改动"}
-        </span>
-        <button
-          type="button"
-          onClick={save}
-          disabled={dirtyCount === 0 || saving}
-          className="inline-flex min-h-11 items-center rounded-lg bg-accent px-5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {saving ? "保存中…" : "保存设置"}
-        </button>
-      </div>
-      {/* Offset clears this page's own sticky save bar. */}
-      <BackToTop bottomClass="bottom-24" />
+      {hasEditable && (
+        <div className="sticky bottom-4 flex items-center justify-end gap-3 rounded-xl border border-line bg-surface px-4 py-3 shadow-bar">
+          <span className="text-sm text-mute">
+            {dirtyCount > 0 ? `${dirtyCount} 项未保存` : "没有未保存的改动"}
+          </span>
+          <button
+            type="button"
+            onClick={save}
+            disabled={dirtyCount === 0 || saving}
+            className="inline-flex min-h-11 items-center rounded-lg bg-accent px-5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {saving ? "保存中…" : "保存设置"}
+          </button>
+        </div>
+      )}
+      {/* With a save bar, the offset clears it; without one, the
+          default offset (mobile bottom nav) applies. */}
+      {hasEditable ? <BackToTop bottomClass="bottom-24" /> : <BackToTop />}
     </div>
   );
 }
