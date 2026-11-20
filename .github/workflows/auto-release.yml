@@ -4,9 +4,10 @@ name: Auto Release
 #
 #   * Only business-code changes release. The whitelist lives in
 #     scripts/release-scope.sh (server Go code + module pins, web app /
-#     components / lib / public + web build inputs). Docs, scripts/ and
-#     .github/ changes alone never release; business code mixed with
-#     docs still does.
+#     components / lib / public + web build inputs, and scripts/install.sh
+#     — the shipped management script users run daily). Docs, other
+#     scripts/ files and .github/ changes alone never release; business
+#     code mixed with docs still does.
 #   * The version is the greatest vX.Y.Z tag with patch + 1, computed by
 #     scripts/next-version.sh (first ever automatic release: v0.1.0).
 #   * A push whose HEAD is already tagged, or whose commit messages
