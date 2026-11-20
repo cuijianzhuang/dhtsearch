@@ -226,6 +226,20 @@ export interface AdminCrawler {
   restored_nodes: number;
 }
 
+/** One discovery source's cumulative fetch outcomes in the
+ *  overview fetch section's by_source breakdown: how many fetches
+ *  the source's discoveries accounted for and how they ended.
+ *  success_rate is fetched/attempts, derived server-side. */
+export interface AdminFetchSource {
+  source: string;
+  attempts: number;
+  fetched: number;
+  timed_out: number;
+  failed: number;
+  prescreen_dropped: number;
+  success_rate: number;
+}
+
 export interface AdminOverview {
   torrents: number;
   /** The library's current row count under the pipeline's name:
@@ -247,6 +261,10 @@ export interface AdminOverview {
     failed: number;
     prescreen_dropped: number;
     queue_depth?: number;
+    /** Per-source fetch attribution (dht / scrape / feed).
+     *  Optional so a page built against an older server simply
+     *  hides the breakdown panel. */
+    by_source?: AdminFetchSource[];
   };
   moderation: {
     /** Whether the LLM pass can run (switch on AND API key set). */

@@ -32,10 +32,10 @@ func TestResultFuncOutcomes(t *testing.T) {
 	}
 	defer f.Close()
 
-	if _, ok := f.fetch(context.Background(), "not-a-hash"); ok {
+	if _, ok := f.fetch(context.Background(), "not-a-hash", SourceDHT); ok {
 		t.Fatal("malformed hash fetched")
 	}
-	if _, ok := f.fetch(context.Background(), "97a29535b9e2f0e46a1b09a4b0c0e4f0a1b2c3d4"); ok {
+	if _, ok := f.fetch(context.Background(), "97a29535b9e2f0e46a1b09a4b0c0e4f0a1b2c3d4", SourceDHT); ok {
 		t.Fatal("peerless hash fetched")
 	}
 

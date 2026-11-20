@@ -84,8 +84,8 @@ func TestFetchOK(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	in := make(chan string, 1)
-	in <- testHash
+	in := make(chan metadata.Item, 1)
+	in <- metadata.Item{Hash: testHash}
 	records := make(chan metadata.Record, 1)
 	f.Run(ctx, in, func(r metadata.Record) { records <- r })
 
@@ -117,8 +117,8 @@ func TestFetchPrescreenDrop(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	in := make(chan string, 1)
-	in <- testHash
+	in := make(chan metadata.Item, 1)
+	in <- metadata.Item{Hash: testHash}
 	start := time.Now()
 	f.Run(ctx, in, func(r metadata.Record) { t.Errorf("unexpected record %+v", r) })
 	waitFor(t, "prescreen drop", func() bool { return f.PrescreenDropped() == 1 })
@@ -144,8 +144,8 @@ func TestFetchTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	in := make(chan string, 1)
-	in <- testHash
+	in := make(chan metadata.Item, 1)
+	in <- metadata.Item{Hash: testHash}
 	f.Run(ctx, in, func(r metadata.Record) { t.Errorf("unexpected record %+v", r) })
 	waitFor(t, "timeout", func() bool {
 		_, timedOut, _ := f.Stats()
@@ -165,13 +165,13 @@ func TestSidecarDiesMidJobAndRestarts(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	in := make(chan string, 2)
+	in := make(chan metadata.Item, 2)
 	records := make(chan metadata.Record, 1)
 	f.Run(ctx, in, func(r metadata.Record) { records <- r })
 
 	// First job: the sidecar exits mid-flight; the job must be
 	// classified as failed (not hang, not time out).
-	in <- testHash
+	in <- metadata.Item{Hash: testHash}
 	waitFor(t, "failed classification", func() bool {
 		_, _, failed := f.Stats()
 		return failed == 1
@@ -179,7 +179,7 @@ func TestSidecarDiesMidJobAndRestarts(t *testing.T) {
 
 	// The supervisor restarts the sidecar; the second incarnation
 	// behaves, so the next job succeeds.
-	in <- testHash
+	in <- metadata.Item{Hash: testHash}
 	select {
 	case r := <-records:
 		if r.Name != "Fake Torrent" {
@@ -302,9 +302,9 @@ func TestSidecarPermanentlyDeadSurfacesUnavailable(t *testing.T) {
 	// the fetch must classify as failed, not hang.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	in := make(chan string, 1)
+	in := make(chan metadata.Item, 1)
 	f.Run(ctx, in, func(r metadata.Record) { t.Errorf("unexpected record %+v", r) })
-	in <- testHash
+	in <- metadata.Item{Hash: testHash}
 	waitFor(t, "failed classification", func() bool {
 		_, _, failed := f.Stats()
 		return failed == 1
@@ -326,8 +326,8 @@ func TestInvalidHashCountsFailed(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	in := make(chan string, 1)
-	in <- "not-a-hash"
+	in := make(chan metadata.Item, 1)
+	in <- metadata.Item{Hash: "not-a-hash"}
 	f.Run(ctx, in, func(r metadata.Record) { t.Errorf("unexpected record %+v", r) })
 	waitFor(t, "failed count", func() bool {
 		_, _, failed := f.Stats()

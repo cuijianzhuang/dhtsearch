@@ -116,7 +116,7 @@ func TestFetchOverUTP(t *testing.T) {
 	}
 	f.utpSock = sockA
 
-	rec, ok := f.fetch(context.Background(), hash.HexString())
+	rec, ok := f.fetch(context.Background(), hash.HexString(), metadata.SourceDHT)
 	if !ok {
 		t.Fatal("fetch over uTP failed")
 	}

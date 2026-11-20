@@ -89,6 +89,10 @@ type Fetcher struct {
 	timedOut         int64
 	failed           int64
 	prescreenDropped int64
+
+	// Per-source attribution of the same outcomes counted above,
+	// split by the fetched items' discovery Source.
+	srcStats metadata.SourceTracker
 }
 
 // New starts the sidecar and waits for its readiness handshake. It
@@ -189,7 +193,7 @@ func magnetTrackerParams(trackers []string) string {
 }
 
 // Run mirrors metadata.Fetcher.Run.
-func (f *Fetcher) Run(ctx context.Context, in <-chan string, onRecord func(metadata.Record)) {
+func (f *Fetcher) Run(ctx context.Context, in <-chan metadata.Item, onRecord func(metadata.Record)) {
 	ctx, f.cancel = context.WithCancel(ctx)
 	for i := 0; i < f.cfg.Workers; i++ {
 		f.wg.Add(1)
@@ -199,11 +203,11 @@ func (f *Fetcher) Run(ctx context.Context, in <-chan string, onRecord func(metad
 				select {
 				case <-ctx.Done():
 					return
-				case hexHash, ok := <-in:
+				case it, ok := <-in:
 					if !ok {
 						return
 					}
-					if rec, ok := f.fetch(ctx, hexHash, nil); ok {
+					if rec, ok := f.fetch(ctx, it.Hash, nil, it.Source); ok {
 						onRecord(rec)
 					}
 				}
@@ -224,7 +228,7 @@ func (f *Fetcher) RunQueue(ctx context.Context, q *metadata.Queue, onRecord func
 				if !ok {
 					return
 				}
-				if rec, ok := f.fetch(ctx, it.Hash, it.Peers); ok {
+				if rec, ok := f.fetch(ctx, it.Hash, it.Peers, it.Source); ok {
 					onRecord(rec)
 				}
 			}
@@ -235,12 +239,15 @@ func (f *Fetcher) RunQueue(ctx context.Context, q *metadata.Queue, onRecord func
 // fetch runs one job through the sidecar and classifies the outcome
 // into the shared stats, mirroring metadata.Fetcher.fetch. peers are
 // the item's DHT peer hints (metadata.Item.Peers), forwarded to the
-// sidecar as initial peers for this hash.
-func (f *Fetcher) fetch(ctx context.Context, hexHash string, peers []netip.AddrPort) (metadata.Record, bool) {
+// sidecar as initial peers for this hash; src is the item's
+// discovery source, which the attempt and its outcome are
+// attributed to (see metadata.SourceTracker), identically to the
+// other foundations.
+func (f *Fetcher) fetch(ctx context.Context, hexHash string, peers []netip.AddrPort, src metadata.Source) (metadata.Record, bool) {
+	f.srcStats.Attempt(src)
 	rec := metadata.Record{InfoHash: hexHash}
 	if !validInfohash(hexHash) {
-		f.count(&f.failed)
-		f.report(hexHash, metadata.OutcomeFailed)
+		f.finish(src, hexHash, metadata.OutcomeFailed)
 		return rec, false
 	}
 	timeout := f.cfg.Timeout
@@ -263,8 +270,7 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string, peers []netip.AddrP
 			return rec, false // aborted, like the incumbent's waitAborted
 		}
 		f.logger.Printf("libtorrent fetch %s: %v", hexHash, err)
-		f.count(&f.failed)
-		f.report(hexHash, metadata.OutcomeFailed)
+		f.finish(src, hexHash, metadata.OutcomeFailed)
 		return rec, false
 	}
 
@@ -285,21 +291,36 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string, peers []netip.AddrP
 		for _, wf := range files {
 			rec.Files = append(rec.Files, filter.File{Path: wf.Path, Size: wf.Size})
 		}
-		f.count(&f.fetched)
-		f.report(hexHash, metadata.OutcomeFetched)
+		f.finish(src, hexHash, metadata.OutcomeFetched)
 		return rec, true
 	case waitPrescreened:
-		f.count(&f.prescreenDropped)
-		f.report(hexHash, metadata.OutcomePrescreened)
+		f.finish(src, hexHash, metadata.OutcomePrescreened)
 	case waitTimedOut:
-		f.count(&f.timedOut)
-		f.report(hexHash, metadata.OutcomeTimedOut)
+		f.finish(src, hexHash, metadata.OutcomeTimedOut)
 	case waitFailed:
-		f.count(&f.failed)
-		f.report(hexHash, metadata.OutcomeFailed)
+		f.finish(src, hexHash, metadata.OutcomeFailed)
 	case waitAborted:
 	}
 	return rec, false
+}
+
+// finish records a fetch's terminal outcome in the fetcher's global
+// counters, in the per-source attribution, and in the ResultFunc
+// report — the three always move together, mirroring the
+// incumbent's finish.
+func (f *Fetcher) finish(src metadata.Source, hash string, outcome metadata.FetchOutcome) {
+	switch outcome {
+	case metadata.OutcomeFetched:
+		f.count(&f.fetched)
+	case metadata.OutcomeTimedOut:
+		f.count(&f.timedOut)
+	case metadata.OutcomeFailed:
+		f.count(&f.failed)
+	case metadata.OutcomePrescreened:
+		f.count(&f.prescreenDropped)
+	}
+	f.srcStats.Outcome(src, outcome)
+	f.report(hash, outcome)
 }
 
 // report delivers a fetch outcome to Config.ResultFunc, when set,
@@ -471,6 +492,13 @@ func (f *Fetcher) PrescreenDropped() int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.prescreenDropped
+}
+
+// SourceStats returns the per-source fetch counters, identically
+// attributed to the other foundations'. Part of the
+// metadata.Backend contract.
+func (f *Fetcher) SourceStats() []metadata.FetchSourceStats {
+	return f.srcStats.Stats()
 }
 
 // UnavailableReason reports why the sidecar currently cannot serve

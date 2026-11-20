@@ -51,7 +51,7 @@ func TestFetchPeersHintLoopback(t *testing.T) {
 	ctx := context.Background()
 
 	// With the hint: connects inside prescreen and fetches.
-	rec, ok := f.fetchPeers(ctx, hintedHash, []netip.AddrPort{hint})
+	rec, ok := f.fetchPeers(ctx, hintedHash, []netip.AddrPort{hint}, SourceDHT)
 	if !ok {
 		t.Fatal("fetch with a live hint peer failed")
 	}
@@ -65,7 +65,7 @@ func TestFetchPeersHintLoopback(t *testing.T) {
 
 	// Without any hint the same pipeline has no peer source at all:
 	// prescreen must drop it, and the hint counters must not move.
-	if _, ok := f.fetchPeers(ctx, plainHash, nil); ok {
+	if _, ok := f.fetchPeers(ctx, plainHash, nil, SourceDHT); ok {
 		t.Fatal("fetch without hint succeeded with no trackers and no DHT")
 	}
 	if got := f.PrescreenDropped(); got != 1 {
@@ -79,7 +79,7 @@ func TestFetchPeersHintLoopback(t *testing.T) {
 	// With a dead hint: the item counts as hinted, the fetch still
 	// dies in prescreen, and the success counter must not move.
 	dead := netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 1)
-	if _, ok := f.fetchPeers(ctx, plainHash, []netip.AddrPort{dead}); ok {
+	if _, ok := f.fetchPeers(ctx, plainHash, []netip.AddrPort{dead}, SourceDHT); ok {
 		t.Fatal("fetch with a dead hint peer succeeded")
 	}
 	items, fetched = f.PeerHintStats()
