@@ -128,16 +128,21 @@ var ThemeColors = []string{"teal", "blue", "violet", "green", "orange", "red"}
 // env/flag defaults in cmd/server so a settings-free deployment
 // behaves exactly as before.
 var Registry = []Item{
-	// --- service: startup-only, shown read-only ---
-	{Key: KeyHTTPAddr, Group: "service", Label: "HTTP 监听地址", Type: TypeString, Default: ":8080",
+	// --- service: startup-only, shown read-only. Restart=true even
+	// though Editable=false: the snapshot's restart flag states when a
+	// change takes effect, and every value here is captured exactly
+	// once at process start (listener bind, store open, token read,
+	// env-file load), so editing the env file only bites on restart —
+	// the Desc lines have always said so; the flag now agrees. ---
+	{Key: KeyHTTPAddr, Group: "service", Label: "HTTP 监听地址", Type: TypeString, Default: ":8080", Restart: true,
 		Desc: "在 /etc/dhtsearch/dhtsearch.env 里修改，重启生效"},
-	{Key: KeyDBPath, Group: "service", Label: "SQLite 数据库路径", Type: TypeString, Default: "./dhtsearch.db",
+	{Key: KeyDBPath, Group: "service", Label: "SQLite 数据库路径", Type: TypeString, Default: "./dhtsearch.db", Restart: true,
 		Desc: "配置了 DATABASE_URL 时忽略。在 env 文件里修改，重启生效"},
-	{Key: KeyDatabaseURL, Group: "service", Label: "Postgres 连接串", Type: TypeSecret, Sensitive: true, Default: "",
+	{Key: KeyDatabaseURL, Group: "service", Label: "Postgres 连接串", Type: TypeSecret, Sensitive: true, Default: "", Restart: true,
 		Desc: "设置后使用 Postgres 代替 SQLite。在 env 文件里修改，重启生效"},
-	{Key: KeyAdminToken, Group: "service", Label: "管理端令牌", Type: TypeSecret, Sensitive: true, Default: "",
+	{Key: KeyAdminToken, Group: "service", Label: "管理端令牌", Type: TypeSecret, Sensitive: true, Default: "", Restart: true,
 		Desc: "只从环境读取，从不入库。在 env 文件里修改，重启生效"},
-	{Key: KeyEnvFile, Group: "service", Label: "环境文件路径", Type: TypeString, Default: ".env"},
+	{Key: KeyEnvFile, Group: "service", Label: "环境文件路径", Type: TypeString, Default: ".env", Restart: true},
 
 	// --- system update: intent only. The API never runs an upgrade;
 	// saving here syncs the two values to the panel state file in the
