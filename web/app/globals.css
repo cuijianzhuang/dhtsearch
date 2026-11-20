@@ -461,10 +461,10 @@
    wrap, or the frontier retreating) jumps with the transition
    disabled (.spider-jump) instead of sliding backwards across the
    track. The mesh pulses opacity at segment 1's tier rate and sits
-   dim and still at a zero delta. The legs wiggle only while the
-   spider travels. .flow-paused freezes mesh and legs together with
+   dim and still at a zero delta. The legs walk only while the
+   spider travels. .flow-paused freezes mesh and gait together with
    the dots when data goes stale; reduced motion removes the
-   transitions and the wiggle while positions — which are data —
+   transitions and the gait while positions — which are data —
    still update once per poll.
 
    The spider always faces the direction of data flow: its SVG is
@@ -481,44 +481,214 @@
    silhouette readable. On the diagnosed fetch stall (.spider-alarm)
    the red intensifies: brighter, larger marking and eyes plus a
    soft red ring. At rest it sits slightly transparent (.spider-idle). */
-@keyframes spider-legs-a {
-  from {
-    transform: rotate(-5deg);
+/* The walking gait: an alternating tetrapod, articulated per leg.
+   Each leg is two nested groups (see SpiderLeg in PipelineFlow):
+   the hip group rotates about the leg's hip joint, the knee group
+   inside it rotates about the knee, so the flex composes with the
+   sweep. One 0.6s cycle per leg: the foot strikes at its forward
+   extreme (0%), the stance phase sweeps it steadily back as the
+   planted leg pushes (0–55%, near-linear), then the swing phase
+   lifts it forward again (55–100%, eased, the knee folding to
+   −7° mid-swing and extending before the next strike). Group A
+   (L1 R2 L3 R4) and group B (R1 L2 R3 L4) run half a cycle apart
+   (B carries a −0.3s delay), so four feet are always planted.
+   Left legs swing forward on a positive rotation, right legs are
+   the mirror image — hence the -l/-r keyframe pairs. The torso
+   bobs twice per cycle (±0.45 units along the body axis), once
+   per group's stance push. The cadence is fixed: the glide it
+   rides is a constant 2s-per-anchor transition, so ~3.3 gait
+   cycles per anchor read as a steady scurry without per-segment
+   JS pacing.
+   The animations exist but stay paused unless the spider is
+   actually traveling (.spider-moving, set only in that state);
+   settled — waiting, resting, disabled — .spider-still removes
+   them entirely so the legs stand at their neutral drawn pose
+   instead of freezing mid-stride. Stale is the one settled state
+   without .spider-still: .flow-paused freezes the gait mid-stride
+   together with the pinned body. */
+@keyframes gait-hip-l {
+  0% {
+    transform: rotate(9deg);
+    animation-timing-function: linear;
   }
-  to {
-    transform: rotate(6deg);
+  55% {
+    transform: rotate(-9deg);
+    animation-timing-function: ease-in-out;
+  }
+  100% {
+    transform: rotate(9deg);
   }
 }
 
-@keyframes spider-legs-b {
-  from {
-    transform: rotate(6deg);
+@keyframes gait-hip-r {
+  0% {
+    transform: rotate(-9deg);
+    animation-timing-function: linear;
   }
-  to {
-    transform: rotate(-5deg);
+  55% {
+    transform: rotate(9deg);
+    animation-timing-function: ease-in-out;
+  }
+  100% {
+    transform: rotate(-9deg);
   }
 }
 
-.spider-legs {
+@keyframes gait-knee-l {
+  0% {
+    transform: rotate(0deg);
+    animation-timing-function: ease-in-out;
+  }
+  30% {
+    transform: rotate(-2deg);
+    animation-timing-function: ease-in-out;
+  }
+  55% {
+    transform: rotate(-1deg);
+    animation-timing-function: ease-in-out;
+  }
+  78% {
+    transform: rotate(-7deg);
+    animation-timing-function: ease-in-out;
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes gait-knee-r {
+  0% {
+    transform: rotate(0deg);
+    animation-timing-function: ease-in-out;
+  }
+  30% {
+    transform: rotate(2deg);
+    animation-timing-function: ease-in-out;
+  }
+  55% {
+    transform: rotate(1deg);
+    animation-timing-function: ease-in-out;
+  }
+  78% {
+    transform: rotate(7deg);
+    animation-timing-function: ease-in-out;
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes gait-bob {
+  0%,
+  100% {
+    transform: translateY(0.45px);
+  }
+  50% {
+    transform: translateY(-0.45px);
+  }
+}
+
+.spider-leg,
+.spider-knee {
   transform-box: view-box;
-  transform-origin: 50% 50%;
-  animation-duration: 0.45s;
-  animation-timing-function: ease-in-out;
+  animation-duration: 0.6s;
   animation-iteration-count: infinite;
-  animation-direction: alternate;
   animation-play-state: paused;
 }
 
-.spider-legs-a {
-  animation-name: spider-legs-a;
+.hip-l {
+  animation-name: gait-hip-l;
 }
 
-.spider-legs-b {
-  animation-name: spider-legs-b;
+.hip-r {
+  animation-name: gait-hip-r;
 }
 
-.spider-moving .spider-legs {
+.hip-l .spider-knee {
+  animation-name: gait-knee-l;
+}
+
+.hip-r .spider-knee {
+  animation-name: gait-knee-r;
+}
+
+/* Tetrapod group B runs half a cycle behind group A; the knee
+   carries the same delay as its hip so the flex stays phased
+   with the sweep it belongs to. */
+.gait-b,
+.gait-b .spider-knee {
+  animation-delay: -0.3s;
+}
+
+/* Hip and knee joints, in viewBox units (transform-box: view-box
+   makes the px origin land on those coordinates). */
+.leg-l1 {
+  transform-origin: 19.5px 15.5px;
+}
+.leg-l1 .spider-knee {
+  transform-origin: 11px 8px;
+}
+.leg-r2 {
+  transform-origin: 29.5px 21px;
+}
+.leg-r2 .spider-knee {
+  transform-origin: 39.5px 16.5px;
+}
+.leg-l3 {
+  transform-origin: 18px 26.5px;
+}
+.leg-l3 .spider-knee {
+  transform-origin: 8px 27.5px;
+}
+.leg-r4 {
+  transform-origin: 29px 32px;
+}
+.leg-r4 .spider-knee {
+  transform-origin: 36.5px 38px;
+}
+.leg-r1 {
+  transform-origin: 28.5px 15.5px;
+}
+.leg-r1 .spider-knee {
+  transform-origin: 37px 8px;
+}
+.leg-l2 {
+  transform-origin: 18.5px 21px;
+}
+.leg-l2 .spider-knee {
+  transform-origin: 8.5px 16.5px;
+}
+.leg-r3 {
+  transform-origin: 30px 26.5px;
+}
+.leg-r3 .spider-knee {
+  transform-origin: 40px 27.5px;
+}
+.leg-l4 {
+  transform-origin: 19px 32px;
+}
+.leg-l4 .spider-knee {
+  transform-origin: 11.5px 38px;
+}
+
+.spider-torso {
+  animation-name: gait-bob;
+  animation-duration: 0.3s;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-play-state: paused;
+}
+
+.spider-moving .spider-leg,
+.spider-moving .spider-knee,
+.spider-moving .spider-torso {
   animation-play-state: running;
+}
+
+.spider-still .spider-leg,
+.spider-still .spider-knee,
+.spider-still .spider-torso {
+  animation: none;
 }
 
 @keyframes mesh-pulse {
@@ -539,7 +709,9 @@
 
 .flow-paused .mesh-pulse,
 .flow-paused .web-pulse,
-.flow-paused .spider-legs {
+.flow-paused .spider-leg,
+.flow-paused .spider-knee,
+.flow-paused .spider-torso {
   animation-play-state: paused;
 }
 
@@ -766,7 +938,9 @@
     transition: none;
   }
 
-  .spider-legs {
+  .spider-leg,
+  .spider-knee,
+  .spider-torso {
     animation: none;
   }
 
