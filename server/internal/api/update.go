@@ -39,7 +39,10 @@ import (
 //	                consumes it exactly once and deletes it.
 //	update-status   script -> panel: the agent's record of the last
 //	                requested upgrade (STATE/REQUEST_ID/timestamps/
-//	                FROM_VERSION/TO_VERSION/MESSAGE).
+//	                FROM_VERSION/TO_VERSION/MESSAGE, plus PROGRESS/
+//	                PHASE stage markers while a run is in flight —
+//	                written by install.sh at real stage boundaries,
+//	                absent on status files from older scripts).
 //
 // Precedence for the effective auto-update switch, mirrored on both
 // sides: update-panel wins when present; otherwise the CLI state in
@@ -326,6 +329,14 @@ type upgradeState struct {
 	FromVersion string `json:"from_version"`
 	ToVersion   string `json:"to_version"`
 	Message     string `json:"message"`
+	// Progress/Phase mirror the PROGRESS/PHASE stage markers the
+	// installer writes into update-status at real stage boundaries
+	// (percent = stages completed, never a time estimate). Nil —
+	// serialized as null — when the status file carries none: an
+	// older script, a run that has not started, or the already-latest
+	// no-op, whose outcome the message alone describes.
+	Progress *int    `json:"progress"`
+	Phase    *string `json:"phase"`
 }
 
 func (s *Server) upgradeState() upgradeState {
@@ -346,6 +357,15 @@ func (s *Server) upgradeState() upgradeState {
 		out.FromVersion = status["FROM_VERSION"]
 		out.ToVersion = status["TO_VERSION"]
 		out.Message = status["MESSAGE"]
+		if raw := status["PROGRESS"]; raw != "" {
+			if n, err := strconv.Atoi(raw); err == nil {
+				n = max(0, min(100, n))
+				out.Progress = &n
+			}
+		}
+		if ph := status["PHASE"]; ph != "" {
+			out.Phase = &ph
+		}
 	}
 	if req, ok := parseKVFile(filepath.Join(s.opts.DataDir, updateRequestFileName)); ok {
 		out.Pending = true
@@ -359,6 +379,7 @@ func (s *Server) upgradeState() upgradeState {
 			out.RequestedBy = req["REQUESTED_BY"]
 			out.StartedAt, out.FinishedAt = "", ""
 			out.FromVersion, out.ToVersion, out.Message = "", "", ""
+			out.Progress, out.Phase = nil, nil
 		}
 	}
 	if out.State == "running" {
