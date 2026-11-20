@@ -36,3 +36,12 @@ docker run --rm -v "$PWD/sidecar/dist:/out" dhtsearch-lt-sidecar \
 
 Or natively on Debian bookworm with the packages from the
 Dockerfile installed: `./build.sh`.
+
+The Dockerfile is two-stage: a `libtorrent` stage that compiles
+only libtorrent (its sole repo input is `build.sh`, which carries
+the version pin and cmake flags) and a `build` stage that copies
+that install prefix and compiles just the sidecar. CI caches the
+stages with buildx/GHA layer caching, so the libtorrent compile
+only redoes when `build.sh` or the apt toolchain changes.
+`build.sh` accepts `SIDECAR_BUILD_MODE=all|libtorrent|sidecar`
+(default `all`) to run one half; the Dockerfile stages use it.
