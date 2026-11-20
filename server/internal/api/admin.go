@@ -204,9 +204,7 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 			"blocked":       blocked,
 		},
 	}
-	if s.opts.MetaStatus != nil {
-		resp["fetch"].(map[string]any)["queue_depth"] = s.opts.MetaStatus().QueueDepth
-	}
+	s.metaStatusInto(resp["fetch"].(map[string]any))
 	// Static-filter state: the category switches as currently
 	// configured (a category that is off no longer increments its
 	// counter, so the counts below freeze where they were turned off)

@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -227,6 +229,78 @@ func TestAdminSettingsDisabledWithoutToken(t *testing.T) {
 	json.NewDecoder(resp2.Body).Decode(&site)
 	if site["name"] != "DHTSearch" {
 		t.Fatalf("/api/site = %v", site)
+	}
+}
+
+// TestAdminSettingsLibtorrentGuard covers the write-path half of
+// the fix for the 2026-11-20 outage: selecting the libtorrent
+// foundation while its sidecar is not installed is refused per-key
+// at save time (atomically, like any validation failure), while
+// other foundations, an installed sidecar, and deleting the
+// override all go through.
+func TestAdminSettingsLibtorrentGuard(t *testing.T) {
+	base, mgr, _ := settingsFixture(t)
+	missing := filepath.Join(t.TempDir(), "no-such-sidecar")
+
+	// Sidecar missing: the batch is rejected with a META_FETCHER
+	// error naming the sidecar, and nothing in it is applied.
+	code, body := putSettings(t, base, testAdminToken, map[string]*string{
+		settings.KeySiteName:      strp("Nope"),
+		settings.KeyMetaFetcher:   strp("libtorrent"),
+		settings.KeyMetaLTSidecar: strp(missing),
+	})
+	if code != http.StatusBadRequest {
+		t.Fatalf("PUT libtorrent without sidecar = %d (%v), want 400", code, body)
+	}
+	errs, _ := body["errors"].(map[string]any)
+	msg, _ := errs[settings.KeyMetaFetcher].(string)
+	if !strings.Contains(msg, "sidecar") || !strings.Contains(msg, "not installed") {
+		t.Fatalf("errors = %v, want a META_FETCHER entry naming the missing sidecar", body)
+	}
+	if got := mgr.Get(settings.KeySiteName); got != "DHTSearch" {
+		t.Fatalf("rejected batch partially applied: SITE_NAME = %q", got)
+	}
+	if got := mgr.Get(settings.KeyMetaFetcher); got != "anacrolix" {
+		t.Fatalf("META_FETCHER = %q after rejected batch", got)
+	}
+
+	// Another foundation is never guarded, even with the same
+	// (missing) sidecar path in the batch.
+	code, body = putSettings(t, base, testAdminToken, map[string]*string{
+		settings.KeyMetaFetcher:   strp("native"),
+		settings.KeyMetaLTSidecar: strp(missing),
+	})
+	if code != http.StatusOK {
+		t.Fatalf("PUT native = %d (%v)", code, body)
+	}
+
+	// Sidecar installed (an executable file at the configured
+	// path): the selection is accepted.
+	sidecar := filepath.Join(t.TempDir(), "dhtsearch-lt-sidecar")
+	if err := os.WriteFile(sidecar, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, body = putSettings(t, base, testAdminToken, map[string]*string{
+		settings.KeyMetaLTSidecar: strp(sidecar),
+		settings.KeyMetaFetcher:   strp("libtorrent"),
+	})
+	if code != http.StatusOK {
+		t.Fatalf("PUT libtorrent with sidecar = %d (%v)", code, body)
+	}
+	if got := mgr.Get(settings.KeyMetaFetcher); got != "libtorrent" {
+		t.Fatalf("META_FETCHER = %q after accepted PUT", got)
+	}
+
+	// Deleting the override reverts to the default and is not
+	// guarded either.
+	code, body = putSettings(t, base, testAdminToken, map[string]*string{
+		settings.KeyMetaFetcher: nil,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("DELETE override = %d (%v)", code, body)
+	}
+	if got := mgr.Get(settings.KeyMetaFetcher); got != "anacrolix" {
+		t.Fatalf("META_FETCHER = %q after delete", got)
 	}
 }
 

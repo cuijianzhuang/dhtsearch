@@ -81,6 +81,52 @@ func TestAdminDisabledWithoutToken(t *testing.T) {
 	}
 }
 
+// TestFetchBackendSurfaced: the effective fetch foundation and its
+// degradation warning ride the fetch section of both /api/stats and
+// the admin overview, so a startup degradation (libtorrent selected,
+// anacrolix running) is visible to the admin instead of silent.
+func TestFetchBackendSurfaced(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	const warning = "META_FETCHER=libtorrent requested but the sidecar is unavailable; running on the anacrolix fallback"
+	srv := httptest.NewServer(New(st, nil, nil, Options{
+		AdminToken: testAdminToken,
+		MetaStatus: func() MetaStatus {
+			return MetaStatus{QueueDepth: 7, Backend: "anacrolix", BackendWarning: warning}
+		},
+	}).Handler())
+	t.Cleanup(srv.Close)
+
+	for _, path := range []string{"/api/stats", "/api/admin/overview"} {
+		code, m := adminReq(t, "GET", srv.URL+path, testAdminToken, nil)
+		if code != 200 {
+			t.Fatalf("%s: %d %v", path, code, m)
+		}
+		fetch, _ := m["fetch"].(map[string]any)
+		if fetch["backend"] != "anacrolix" || fetch["backend_warning"] != warning {
+			t.Fatalf("%s fetch = %v, want backend + warning surfaced", path, fetch)
+		}
+		if fetch["queue_depth"].(float64) != 7 {
+			t.Fatalf("%s queue_depth = %v", path, fetch["queue_depth"])
+		}
+	}
+
+	// Without a MetaStatus provider the keys stay absent (the
+	// historical shape), not empty strings.
+	base, _ := adminFixture(t, testAdminToken)
+	_, m := adminReq(t, "GET", base+"/api/stats", "", nil)
+	fetch, _ := m["fetch"].(map[string]any)
+	if _, ok := fetch["backend"]; ok {
+		t.Fatalf("backend key present without MetaStatus: %v", fetch)
+	}
+	if _, ok := fetch["queue_depth"]; ok {
+		t.Fatalf("queue_depth key present without MetaStatus: %v", fetch)
+	}
+}
+
 func TestAdminAuthRequired(t *testing.T) {
 	base, _ := adminFixture(t, testAdminToken)
 	if code, _ := adminReq(t, "GET", base+"/api/admin/overview", "", nil); code != http.StatusUnauthorized {
