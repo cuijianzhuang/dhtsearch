@@ -99,6 +99,21 @@
 // chrome — so the overview's KPI row and trend chart stay in the
 // first viewport instead of below the fold.
 //
+// The stages are CONNECTED, ring edge to ring edge: a
+// ConnectorLayer under the stage row draws a 2px rail in
+// --track-c across each full inter-ring gap (its geometry reuses
+// the spider anchors' arithmetic — equal flex columns and fixed
+// spacers put every ring centre at a known calc position) with
+// an accent chevron at the downstream end pointing into the next
+// ring. The comets ride this rail through their slots. While a
+// segment flows, pale dashes drift downstream inside the rail
+// and the chevron pulses, both at the segment's tier period;
+// the segment feeding the stalled fetch stage takes the warning
+// palette, and the disabled state dims the whole layer. The rail
+// and chevron are structure, not motion: they stay under reduced
+// motion (only the drift and pulse stop) and freeze with
+// everything else on a stale poll.
+//
 // On phones the same single row is miniaturised rather than
 // folded (an earlier two-row fold put a long elbow between the
 // rows and left the spider crossing caption text): 52px rings on
@@ -369,6 +384,15 @@ export default function PipelineFlow({
       >
         <div aria-hidden className="ambience-glow pointer-events-none absolute inset-0 z-0" />
         <MeshBackdrop tier={seg(dSeen)} />
+        <ConnectorLayer
+          segs={[
+            { tier: seg(dSeen) },
+            { tier: seg(dAttempts), warn: fetchStalled },
+            { tier: seg(dFetched) },
+            { tier: seg(dStored) },
+          ]}
+          dim={disabled}
+        />
         <div className="relative z-10 flex flex-row items-start">
           <Stage label="DHT 网络" value={nodes} sub={`排队节点 ${formatCount(queuedNodes)}`} dim={disabled} nodeTone={disabled ? "faint" : "accent"} backdropTier={seg(dSeen)} breatheTier={seg(dSeen)} />
           <Segment tier={seg(dSeen)} />
@@ -607,14 +631,81 @@ function WebBackdrop({ tier }: { tier: Tier }) {
   );
 }
 
-/** A rail with tier-driven flow comets between two stages. Renders
- *  the phone variant (a 6px-wide rail at the mini ring's height —
- *  the spider's anchor geometry in globals.css keys off that 6px;
- *  its paint is head-and-halo only, the slot has no room for a
- *  trail) and the sm+ variant (full comet: bright head, halo,
- *  tapering trail — see .flow-dot-x in globals.css); the comets
- *  exist only when the tier says the stage moved during the last
- *  poll interval. */
+/** The connector layer: one rail per segment, drawn under the
+ *  stage row from the upstream ring's edge to the downstream
+ *  ring's edge (the .seg-conn geometry in globals.css reuses the
+ *  spider anchors' arithmetic), each ending in an accent chevron
+ *  that points into the next ring. The rail is always there —
+ *  still segments included — so the five stages read as one
+ *  connected pipeline; while a segment flows, dashes drift
+ *  downstream inside the rail and the chevron pulses, both at
+ *  the tier's period. The segment feeding the stalled fetch
+ *  stage renders in the warning palette. */
+function ConnectorLayer({
+  segs,
+  dim,
+}: {
+  segs: { tier: Tier; warn?: boolean }[];
+  /** Crawler disabled: the whole layer mutes with the stages. */
+  dim: boolean;
+}) {
+  return (
+    <div
+      aria-hidden
+      className={`pointer-events-none absolute inset-0 z-[5] ${
+        dim ? "opacity-50" : ""
+      }`}
+    >
+      {segs.map((s, i) => (
+        <div
+          key={i}
+          className={`seg-conn seg-conn-${i} ${
+            s.warn ? "seg-conn-warn" : ""
+          }`}
+        >
+          <div className="seg-track">
+            {s.tier.dots > 0 && (
+              <span
+                className="seg-track-drift"
+                style={{ animationDuration: `${s.tier.seconds}s` }}
+              />
+            )}
+          </div>
+          <svg
+            viewBox="0 0 12 18"
+            className={`seg-arrow ${
+              s.tier.dots > 0 ? "seg-arrow-pulse" : ""
+            }`}
+            style={
+              s.tier.dots > 0
+                ? { animationDuration: `${s.tier.seconds}s` }
+                : undefined
+            }
+            fill="none"
+          >
+            <path
+              d="M2.5 2 L9.5 9 L2.5 16"
+              stroke="currentColor"
+              strokeWidth="3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** A slot with tier-driven flow comets between two stages,
+ *  riding the ConnectorLayer's rail. Renders the phone variant
+ *  (a 6px-wide slot at the mini ring's height — the spider's
+ *  anchor geometry in globals.css keys off that 6px; its paint
+ *  is head-and-halo only, the slot has no room for a trail) and
+ *  the sm+ variant (full comet: bright head, halo, tapering
+ *  trail — see .flow-dot-x in globals.css); the comets exist
+ *  only when the tier says the stage moved during the last poll
+ *  interval. */
 function Segment({ tier }: { tier: Tier }) {
   const dots = Array.from({ length: tier.dots }, (_, i) => i);
   const style = (i: number) => ({
@@ -627,7 +718,6 @@ function Segment({ tier }: { tier: Tier }) {
         aria-hidden
         className="relative h-[52px] w-1.5 shrink-0 overflow-hidden sm:hidden"
       >
-        <div className="absolute top-1/2 right-0 left-0 h-px -translate-y-1/2 bg-input" />
         {dots.map((i) => (
           <span key={i} className="flow-dot flow-dot-m" style={style(i)} />
         ))}
@@ -636,7 +726,6 @@ function Segment({ tier }: { tier: Tier }) {
         aria-hidden
         className="relative hidden h-[84px] w-12 shrink-0 overflow-hidden sm:block lg:h-[80px] lg:w-16"
       >
-        <div className="absolute top-1/2 right-0 left-0 h-px -translate-y-1/2 bg-input" />
         {dots.map((i) => (
           <span key={i} className="flow-dot flow-dot-x" style={style(i)} />
         ))}
