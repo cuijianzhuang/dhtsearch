@@ -53,6 +53,7 @@ func (f *Fetcher) dialPeer(ctx context.Context, addr string) (net.Conn, error) {
 type peerSession struct {
 	a    *attempt
 	conn net.Conn
+	addr string // the pool address this session was dialed for (hint attribution)
 
 	ext       *remoteExtensions
 	size      int
@@ -75,7 +76,7 @@ func (a *attempt) runSession(ctx context.Context, addr string) {
 	a.registerConn(conn)
 	defer a.unregisterConn(conn)
 	defer conn.Close()
-	s := &peerSession{a: a, conn: conn}
+	s := &peerSession{a: a, conn: conn, addr: addr}
 	s.run(ctx)
 }
 
@@ -98,7 +99,7 @@ func (s *peerSession) run(ctx context.Context) {
 	// The handshake is complete: this is the prescreen's "a peer
 	// connected" signal, the equivalent of the incumbent's
 	// ActivePeers() > 0.
-	a.sessionConnected()
+	a.sessionConnected(s.addr)
 	if !remote.supportsExtensions() {
 		return
 	}
