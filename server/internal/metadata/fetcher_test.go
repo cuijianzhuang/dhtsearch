@@ -181,7 +181,7 @@ func TestFetchMetadataFromLocalPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	tor.AddPeers([]torrent.PeerInfo{{Addr: source.ListenAddrs()[0], Trusted: true}})
-	f := &Fetcher{client: destination, cfg: Config{Timeout: 5 * time.Second, MaxFiles: 50}}
+	f := &Fetcher{clients: []*torrent.Client{destination}, cfg: Config{Timeout: 5 * time.Second, MaxFiles: 50}}
 	record, ok := f.fetch(t.Context(), hash.HexString())
 	if !ok {
 		var status bytes.Buffer

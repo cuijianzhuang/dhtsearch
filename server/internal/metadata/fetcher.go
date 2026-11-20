@@ -32,8 +32,21 @@ type Record struct {
 // Config controls the fetcher.
 type Config struct {
 	// Workers is the size of the fetch worker pool. It also bounds the
-	// number of concurrently active torrents in the client.
+	// number of concurrently active torrents across all client shards.
 	Workers int
+	// Shards is the number of independent torrent clients the fetcher
+	// spreads its torrents across. anacrolix serializes nearly every
+	// operation through one process-wide lock per client, and a
+	// metadata fetcher's Add/Drop/connect churn saturates that lock
+	// long before it saturates the network (production, 2026-11-20:
+	// 125 goroutines queued on Client.lock, ingest at ~61/10m against
+	// a ~330 baseline). Each hash is routed to one shard by its first
+	// byte, so concurrent torrents per lock fall to roughly
+	// Workers/Shards — 16 at the defaults (128 workers, 8 shards)
+	// instead of 128. <= 0 selects DefaultShards; the effective count
+	// is clamped to Workers (more clients than workers only multiplies
+	// per-client overhead).
+	Shards int
 	// Timeout is how long to wait for one torrent's info before giving up.
 	Timeout time.Duration
 	// TimeoutFunc, when non-nil, supplies the timeout per fetch,
@@ -71,7 +84,7 @@ type Config struct {
 // Fetcher consumes infohashes and reports successfully fetched metadata.
 type Fetcher struct {
 	cfg          Config
-	client       *torrent.Client
+	clients      []*torrent.Client // shards; see Config.Shards
 	logger       *log.Logger
 	magnetSuffix string // pre-encoded &tr=... params, possibly empty
 
@@ -99,8 +112,15 @@ type Fetcher struct {
 // who measure a different tail.
 const DefaultPrescreenTimeout = 10 * time.Second
 
-// NewFetcher creates a fetcher with its own torrent client. The client uses
-// disabled storage and disallows payload transfers before adding each torrent.
+// DefaultShards is the torrent-client shard count used when none is
+// configured. Eight shards take the default 128-worker pool from 128
+// concurrent torrents per client lock to ~16, at the cost of eight
+// (DHT-less, storage-less) clients' fixed overhead.
+const DefaultShards = 8
+
+// NewFetcher creates a fetcher with its own torrent clients (shards,
+// see Config.Shards). The clients use disabled storage and disallow
+// payload transfers before adding each torrent.
 func NewFetcher(cfg Config) (*Fetcher, error) {
 	if cfg.Workers <= 0 {
 		cfg.Workers = 16
@@ -114,21 +134,69 @@ func NewFetcher(cfg Config) (*Fetcher, error) {
 	if cfg.PrescreenTimeout <= 0 {
 		cfg.PrescreenTimeout = DefaultPrescreenTimeout
 	}
+	shards := cfg.Shards
+	if shards <= 0 {
+		shards = DefaultShards
+	}
+	if shards > cfg.Workers {
+		shards = cfg.Workers
+	}
 	logger := cfg.Logger
 	if logger == nil {
 		logger = log.Default()
 	}
-	tc := metadataClientConfig()
-	client, err := torrent.NewClient(tc)
-	if err != nil {
-		return nil, fmt.Errorf("torrent client: %w", err)
+	clients := make([]*torrent.Client, 0, shards)
+	for i := 0; i < shards; i++ {
+		client, err := torrent.NewClient(metadataClientConfig())
+		if err != nil {
+			for _, c := range clients {
+				c.Close()
+			}
+			return nil, fmt.Errorf("torrent client shard %d: %w", i, err)
+		}
+		clients = append(clients, client)
 	}
 	return &Fetcher{
 		cfg:          cfg,
-		client:       client,
+		clients:      clients,
 		logger:       logger,
 		magnetSuffix: magnetTrackerParams(cfg.Trackers),
 	}, nil
+}
+
+// shardIndex routes a hex infohash to a client shard by the hash's
+// first byte. It is a pure function of the hash, so the same hash
+// always lands on the same client — per-client AddTorrentSpec dedup
+// keeps its meaning, and a hash's torrents never straddle two locks.
+// Malformed input (fetch validates before routing, so this is only a
+// belt-and-braces fallback) routes to shard 0.
+func shardIndex(hexHash string, shards int) int {
+	if shards <= 1 || len(hexHash) < 2 {
+		return 0
+	}
+	hi, okHi := hexNibble(hexHash[0])
+	lo, okLo := hexNibble(hexHash[1])
+	if !okHi || !okLo {
+		return 0
+	}
+	return int(hi<<4|lo) % shards
+}
+
+func hexNibble(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
+}
+
+// clientFor returns the shard client responsible for hexHash.
+func (f *Fetcher) clientFor(hexHash string) *torrent.Client {
+	return f.clients[shardIndex(hexHash, len(f.clients))]
 }
 
 // magnetTrackerParams encodes announce URLs as magnet &tr= parameters.
@@ -216,19 +284,21 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 	spec.DisallowDataDownload = true
 	spec.DisallowDataUpload = true
 	spec.DisableInitialPieceCheck = true
-	// AddTorrentSpec takes the torrent client's process-wide lock and
+	// AddTorrentSpec takes the shard client's process-wide lock and
 	// has no context variant: if that lock is ever wedged (see the
 	// Drop call below), this call parks the worker with no way out.
-	// The one wedge observed in production was fuelled from outside
-	// the library after all: the client's per-torrent DHT announcers
-	// (now disabled in metadataClientConfig) flooded the lock with
-	// announce/connection traffic until every worker queued on it.
-	// The lock exposure of AddTorrentSpec, t.Drop and Client.Close
-	// themselves remains — no context variant exists — so the
-	// pipeline watchdog (internal/watchdog) stays as the backstop:
-	// it detects a resulting stall or crawl and exits the process
-	// for systemd to restart.
-	t, _, err := f.client.AddTorrentSpec(spec)
+	// The production wedge was congestion collapse of that single
+	// lock, not one stuck holder: per-torrent DHT announcers (now
+	// disabled in metadataClientConfig) plus the fetcher's own
+	// Add/Drop/connect churn at 128 concurrent torrents kept over a
+	// hundred goroutines queued on it. Sharding (clientFor) bounds
+	// the blast radius — one shard's lock contention stalls only its
+	// ~Workers/Shards share of the pool — but the lock exposure of
+	// AddTorrentSpec, t.Drop and Client.Close themselves remains, so
+	// the pipeline watchdog (internal/watchdog) stays as the
+	// backstop: it detects a resulting stall or crawl and exits the
+	// process for systemd to restart.
+	t, _, err := f.clientFor(hexHash).AddTorrentSpec(spec)
 	if err != nil {
 		f.count(&f.failed)
 		return rec, false
@@ -358,18 +428,19 @@ func waitForInfo(ctx context.Context, src infoSource, timeout, prescreen time.Du
 	// connection is established.
 	//
 	// ActivePeers() (Torrent.Stats) takes the torrent client's read
-	// lock, and the client lock is process-wide: one wedged holder
-	// (Torrent.Drop waits on a WaitGroup while holding the write
-	// lock) parks every later lock call indefinitely. Calling it
-	// inline from the poll case below would park this wait with it —
-	// the select cannot fire while a case body is blocked — so the
-	// fetch's deadline and ctx would stop applying. Sample it on a
-	// helper goroutine instead and consume readings over a channel:
-	// the wait keeps its own exits whatever the sampler is stuck in.
-	// A sampler stuck in the library leaks until its call returns;
-	// at most one exists per in-flight fetch. The announce traffic
-	// that wedged the lock in production is now off (see
-	// metadataClientConfig); the pipeline watchdog
+	// lock, and the client lock is process-wide within its shard:
+	// one wedged holder (Torrent.Drop waits on a WaitGroup while
+	// holding the write lock) parks every later lock call on that
+	// shard indefinitely. Calling it inline from the poll case below
+	// would park this wait with it — the select cannot fire while a
+	// case body is blocked — so the fetch's deadline and ctx would
+	// stop applying. Sample it on a helper goroutine instead and
+	// consume readings over a channel: the wait keeps its own exits
+	// whatever the sampler is stuck in. A sampler stuck in the
+	// library leaks until its call returns; at most one exists per
+	// in-flight fetch. The announce traffic that wedged the lock in
+	// production is now off (see metadataClientConfig) and the load
+	// is sharded across clients; the pipeline watchdog
 	// (internal/watchdog) remains the backstop for any other park.
 	peers := make(chan int, 1)
 	stopPoll := make(chan struct{})
@@ -484,13 +555,15 @@ func (f *Fetcher) PrescreenDropped() int64 {
 	return f.prescreenDropped
 }
 
-// Close stops the workers and the torrent client.
+// Close stops the workers and the torrent clients.
 func (f *Fetcher) Close() {
 	if f.cancel != nil {
 		f.cancel()
 	}
 	f.wg.Wait()
-	f.client.Close()
+	for _, c := range f.clients {
+		c.Close()
+	}
 }
 
 // metadataClientConfig never opens payload paths supplied by untrusted peers.
@@ -517,6 +590,19 @@ func metadataClientConfig() *torrent.ClientConfig {
 	// trade is deliberate: an unmeasured slow tail against a total
 	// pipeline wedge.
 	tc.PeriodicallyAnnounceTorrentsToDht = false
+	// No DHT servers in the fetcher clients at all. With the periodic
+	// announcer off, nothing in the client consumes them: in v1.61
+	// the per-torrent dhtAnnouncer is the only spawner of
+	// AnnounceToDht (the client's only get_peers path), and the
+	// remaining DHT-server uses are routing-table upkeep for that
+	// same dead path — AddNode/Ping when a peer handshake carries a
+	// DHT port. Peers reach a fetch through the magnet's trackers
+	// and PEX instead. The crawler's DHT is a separate anacrolix/dht
+	// server (internal/crawler) and is unaffected. Dropping the
+	// servers also keeps every shard client cheap: no extra UDP
+	// sockets, routing tables or traversal goroutines multiplied by
+	// the shard count.
+	tc.NoDHT = true
 	tc.NoDefaultPortForwarding = true
 	tc.DefaultStorage = metadataStorage{}
 	tc.Callbacks.ReadMessage = ignorePayloadAvailability
