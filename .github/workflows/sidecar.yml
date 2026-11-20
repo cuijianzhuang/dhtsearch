@@ -1,0 +1,139 @@
+# Builds the libtorrent sidecar (sidecar/) for linux/amd64 and
+# linux/arm64 and, for releases, attaches it as an OPTIONAL extra
+# asset (dhtsearch-lt-sidecar-linux-<arch>). The Go release never
+# depends on this workflow: release.yml calls it as a side job with
+# continue-on-error, and scripts/install.sh treats a missing sidecar
+# asset as "the libtorrent foundation is unavailable on this host",
+# never as an install failure.
+#
+# The build runs in the sidecar's own Debian bookworm Dockerfile, so
+# the binary's glibc floor is 2.36 and it runs on Debian 12/13 hosts.
+# Cost: roughly 10-25 minutes per architecture (libtorrent compiles
+# from source), fully parallel with — and never gating — the Go
+# release.
+name: Libtorrent sidecar
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_to_release:
+        description: "Attach the binaries to the GitHub Release named by 'version'"
+        required: false
+        type: boolean
+        default: false
+      version:
+        description: "Release tag to attach to (required when uploading)"
+        required: false
+        type: string
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "sidecar/**"
+      - ".github/workflows/sidecar.yml"
+  workflow_call:
+    inputs:
+      upload_to_release:
+        description: "Attach the binaries to the GitHub Release named by 'version'"
+        required: false
+        type: boolean
+        default: false
+      version:
+        description: "Release tag to attach to"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Sidecar (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build in the bookworm Dockerfile
+        run: |
+          docker build -t dhtsearch-lt-sidecar sidecar/
+          mkdir -p out
+          docker run --rm -v "$PWD/out:/out" dhtsearch-lt-sidecar \
+              cp /src/dist/dhtsearch-lt-sidecar /out/
+      - name: Protocol smoke (ready -> fetch timeout -> shutdown)
+        # Drives the REAL binary over the framed-JSON protocol: the
+        # session must come up, a fetch against a magnet whose
+        # trackers are unreachable here must come back as a timeout
+        # outcome at its deadline, and shutdown must exit cleanly.
+        # A full metadata exchange needs a live peer and is exercised
+        # on real hosts, not CI.
+        run: |
+          python3 - <<'EOF'
+          import json, struct, subprocess, sys
+
+          proc = subprocess.Popen(["out/dhtsearch-lt-sidecar"],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+
+          def send(msg):
+              body = json.dumps(msg).encode()
+              proc.stdin.write(struct.pack(">I", len(body)) + body)
+              proc.stdin.flush()
+
+          def recv():
+              hdr = proc.stdout.read(4)
+              assert len(hdr) == 4, "short frame header"
+              (n,) = struct.unpack(">I", hdr)
+              body = proc.stdout.read(n)
+              return json.loads(body)
+
+          ready = recv()
+          assert ready["type"] == "ready", ready
+          assert ready["libtorrent"].startswith("2."), ready
+          print("ready:", ready)
+
+          send({"type": "fetch", "id": 1,
+                "magnet": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                "deadline_ms": 1500, "max_files": 10})
+          res = recv()
+          assert res["type"] == "result" and res["id"] == 1, res
+          assert res["outcome"] == "timeout", res
+          print("fetch result:", res)
+
+          send({"type": "shutdown"})
+          rc = proc.wait(timeout=10)
+          assert rc == 0, rc
+          print("sidecar protocol smoke OK")
+          EOF
+      - name: Stage asset
+        run: |
+          mv out/dhtsearch-lt-sidecar "out/dhtsearch-lt-sidecar-linux-${{ matrix.arch }}"
+          cd out && sha256sum "dhtsearch-lt-sidecar-linux-${{ matrix.arch }}" \
+              > "dhtsearch-lt-sidecar-linux-${{ matrix.arch }}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lt-sidecar-${{ matrix.arch }}
+          path: out/*
+      - name: Attach to GitHub Release
+        if: inputs.upload_to_release || github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.version || github.ref_name }}
+        run: |
+          # The Go release job creates the Release on its own clock;
+          # poll until it exists, then attach. --clobber makes a
+          # re-run replace a stale asset instead of failing.
+          for i in $(seq 1 60); do
+            if gh release view "$TAG" > /dev/null 2>&1; then break; fi
+            echo "waiting for release $TAG to exist ($i/60)"
+            sleep 10
+          done
+          gh release upload "$TAG" --clobber \
+            "out/dhtsearch-lt-sidecar-linux-${{ matrix.arch }}" \
+            "out/dhtsearch-lt-sidecar-linux-${{ matrix.arch }}.sha256"

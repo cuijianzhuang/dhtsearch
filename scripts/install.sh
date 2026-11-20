@@ -78,6 +78,7 @@ HEALTH_TIMEOUT=120
 
 # Logical paths (also what the systemd units contain).
 L_BIN="/usr/local/bin/dhtsearch-server"
+L_LT_SIDECAR="/usr/local/bin/dhtsearch-lt-sidecar"
 L_MANAGER="/usr/local/bin/dhtsearch"
 L_WEB_DIR="/opt/dhtsearch/web"
 L_CONF_DIR="/etc/dhtsearch"
@@ -87,6 +88,7 @@ L_DATA_DIR="/var/lib/dhtsearch"
 # Filesystem paths (prefixed under DHTSEARCH_ROOT when testing).
 PREFIX="${DHTSEARCH_ROOT:-}"
 BIN_FILE="${PREFIX}${L_BIN}"
+LT_SIDECAR_FILE="${PREFIX}${L_LT_SIDECAR}"
 MANAGER_FILE="${PREFIX}${L_MANAGER}"
 WEB_DIR="${PREFIX}${L_WEB_DIR}"
 APP_DIR="${PREFIX}/opt/dhtsearch"
@@ -948,6 +950,22 @@ download_package() {
     (cd "$dest" && sha256sum -c "${name}.tar.gz.sha256") \
         || die "sha256 verification failed for ${name}.tar.gz"
     PKG_TARBALL="${dest}/${name}.tar.gz"
+    # Optional libtorrent sidecar asset — best-effort, unlike the
+    # package itself: a release whose sidecar job failed (or that
+    # predates the sidecar) simply has no asset, and installation
+    # must not care. Only META_FETCHER=libtorrent is unavailable
+    # then, which the server itself reports loudly at startup if
+    # selected. A checksum mismatch, however, discards the download.
+    local lt_name="dhtsearch-lt-sidecar-linux-${arch}"
+    if curl -fsSL -o "${dest}/${lt_name}" "${base}/${lt_name}" \
+        && curl -fsSL -o "${dest}/${lt_name}.sha256" "${base}/${lt_name}.sha256" \
+        && (cd "$dest" && sha256sum -c "${lt_name}.sha256" >/dev/null); then
+        LT_SIDECAR_SRC="${dest}/${lt_name}"
+        log "Downloaded libtorrent sidecar asset ${lt_name} (sha256 OK)"
+    else
+        rm -f "${dest}/${lt_name}" "${dest}/${lt_name}.sha256"
+        log "No usable libtorrent sidecar asset in release ${version} (optional; META_FETCHER=libtorrent stays unavailable)"
+    fi
 }
 
 # build_package_from_source <version-or-empty> <arch> <dest-dir>; sets PKG_TARBALL and RESOLVED_VERSION.
@@ -1004,6 +1022,21 @@ install_package_files() {
     fi
 
     install -m 0755 "$pkg_dir/dhtsearch-server" "$BIN_FILE"
+    # The libtorrent sidecar lives next to the server binary, where
+    # the server's discovery looks first. Prefer a copy bundled in
+    # the package (source builds with sidecar/dist present), else the
+    # separately downloaded release asset. Absent both, an existing
+    # sidecar is left untouched.
+    local lt_src=""
+    if [ -f "$pkg_dir/dhtsearch-lt-sidecar" ]; then
+        lt_src="$pkg_dir/dhtsearch-lt-sidecar"
+    elif [ -n "$LT_SIDECAR_SRC" ] && [ -f "$LT_SIDECAR_SRC" ]; then
+        lt_src="$LT_SIDECAR_SRC"
+    fi
+    if [ -n "$lt_src" ]; then
+        install -m 0755 "$lt_src" "$LT_SIDECAR_FILE"
+        log "Installed libtorrent sidecar -> $LT_SIDECAR_FILE"
+    fi
     rm -rf "$WEB_DIR"
     mkdir -p "$APP_DIR"
     "${CP_A[@]}" "$pkg_dir/web" "$WEB_DIR"
@@ -1153,6 +1186,9 @@ validate_inputs() {
 
 # obtain_package <arch> <workdir>; sets PKG_TARBALL and RESOLVED_VERSION.
 PKG_TARBALL=""
+# Set by download_package when the release carries the optional
+# libtorrent sidecar asset (verified against its .sha256).
+LT_SIDECAR_SRC=""
 RESOLVED_VERSION=""
 obtain_package() {
     local arch="$1" workdir="$2"
@@ -1776,6 +1812,7 @@ do_upgrade() {
     local bk_start web_snap=""
     bk_start="$(epoch_now)"
     "${CP_A[@]}" "$BIN_FILE" "${BACKUP_DIR}/dhtsearch-server.${ts}.bak"
+    [ -f "$LT_SIDECAR_FILE" ] && "${CP_A[@]}" "$LT_SIDECAR_FILE" "${BACKUP_DIR}/dhtsearch-lt-sidecar.${ts}.bak"
     [ -f "$ENV_FILE" ] && "${CP_A[@]}" "$ENV_FILE" "${BACKUP_DIR}/dhtsearch.env.${ts}.bak"
     if [ -d "$WEB_DIR" ]; then
         web_snap="$(snapshot_tree "$WEB_DIR" "${BACKUP_DIR}/web.${ts}.bak")"
@@ -1807,6 +1844,9 @@ do_upgrade() {
 
     warn "New version not healthy; rolling back to $old_version"
     install -m 0755 "${BACKUP_DIR}/dhtsearch-server.${ts}.bak" "$BIN_FILE"
+    if [ -f "${BACKUP_DIR}/dhtsearch-lt-sidecar.${ts}.bak" ]; then
+        install -m 0755 "${BACKUP_DIR}/dhtsearch-lt-sidecar.${ts}.bak" "$LT_SIDECAR_FILE"
+    fi
     if [ -n "$web_snap" ]; then
         restore_tree "$web_snap" "$WEB_DIR"
     fi
@@ -1828,6 +1868,7 @@ do_uninstall() {
     rm -f "${UNIT_DIR}/${API_UNIT}" "${UNIT_DIR}/${WEB_UNIT}" "${UNIT_DIR}/${UPDATE_UNIT}" "${UNIT_DIR}/${UPDATE_TIMER}" "${UNIT_DIR}/${REQUEST_UNIT}" "${UNIT_DIR}/${REQUEST_TIMER}"
     svc daemon-reload
     rm -f "$BIN_FILE"
+    rm -f "$LT_SIDECAR_FILE"
     rm -f "$MANAGER_FILE"
     rm -rf "$APP_DIR"
     log "Removed services, binary, web files and the 'dhtsearch' management entry."

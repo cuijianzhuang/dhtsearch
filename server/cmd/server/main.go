@@ -22,6 +22,7 @@ import (
 	"dhtsearch/server/internal/feeds"
 	"dhtsearch/server/internal/filter"
 	"dhtsearch/server/internal/metadata"
+	"dhtsearch/server/internal/metadata/libtorrent"
 	"dhtsearch/server/internal/metadata/native"
 	"dhtsearch/server/internal/moderator"
 	"dhtsearch/server/internal/scraper"
@@ -237,7 +238,9 @@ func main() {
 	metaWorkers := flag.Int("meta-workers", envInt("META_WORKERS", 128), "metadata fetch worker count")
 	metaShards := flag.Int("meta-shards", envInt("META_SHARDS", 8), "metadata torrent client shards (hashes are spread across clients to split the per-client lock contention)")
 	metaFetcher := flag.String("meta-fetcher", envDefault("META_FETCHER", "anacrolix"),
-		"metadata fetch foundation for the main pipeline: anacrolix (torrent clients) or native (thin BEP 9 fetcher); the feeds fetcher always uses anacrolix")
+		"metadata fetch foundation for the main pipeline: anacrolix (torrent clients), native (thin BEP 9 fetcher) or libtorrent (sidecar process); the feeds fetcher always uses anacrolix")
+	metaLTSidecar := flag.String("meta-lt-sidecar", envDefault("META_LT_SIDECAR", ""),
+		"path of the dhtsearch-lt-sidecar binary (META_FETCHER=libtorrent only); empty = next to the server binary, then PATH")
 	metaTimeout := flag.Duration("meta-timeout", envDuration("META_TIMEOUT", 45*time.Second), "metadata fetch timeout per torrent")
 	metaPrescreen := flag.Bool("meta-prescreen", envBool("META_PRESCREEN_ENABLED", true),
 		"prescreen fetches: abandon a hash early when no peer connects within the prescreen window")
@@ -354,6 +357,7 @@ func main() {
 	reg(settings.KeyMetaWorkers, strconv.Itoa(*metaWorkers))
 	reg(settings.KeyMetaShards, strconv.Itoa(*metaShards))
 	reg(settings.KeyMetaFetcher, *metaFetcher)
+	reg(settings.KeyMetaLTSidecar, *metaLTSidecar)
 	reg(settings.KeyMetaTimeout, metaTimeout.String())
 	reg(settings.KeyMetaPrescreenEnabled, strconv.FormatBool(*metaPrescreen))
 	reg(settings.KeyMetaPrescreenTimeout, metaPrescreenTimeout.String())
@@ -548,6 +552,18 @@ func main() {
 		// anacrolix — its swarms are live and few, and the dedicated
 		// single client is the point of it (see its construction).
 		switch foundation := strings.ToLower(mgr.Get(settings.KeyMetaFetcher)); foundation {
+		case "libtorrent":
+			// No fallback on this branch: the operator explicitly
+			// chose libtorrent, so a missing/unstartable sidecar
+			// fails startup via the Fatalf below rather than
+			// silently fetching on another foundation.
+			fetcher, err = libtorrent.New(libtorrent.Config{
+				Config:      mainMetaCfg,
+				SidecarPath: mgr.Get(settings.KeyMetaLTSidecar),
+			})
+			if err == nil {
+				logger.Printf("metadata: fetch foundation = libtorrent (sidecar process)")
+			}
 		case "native":
 			fetcher, err = native.New(mainMetaCfg)
 			if err == nil {

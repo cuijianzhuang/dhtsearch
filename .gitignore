@@ -1,5 +1,7 @@
 server/dhtsearch.db*
 server/server
+sidecar/.build/
+sidecar/dist/
 .DS_Store
 bin/
 data/
