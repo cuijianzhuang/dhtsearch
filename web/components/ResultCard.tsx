@@ -17,6 +17,7 @@ import {
 import CopyMagnetButton from "./CopyMagnetButton";
 import ReportForm from "./ReportForm";
 import { CATEGORIES } from "@/lib/search-ui";
+import { highlightText } from "@/lib/highlight";
 
 const CATEGORY_LABELS: Record<string, string> = Object.fromEntries(
   CATEGORIES.map((c) => [c.key, c.label])
@@ -32,6 +33,7 @@ export default function ResultCard({
   trackers,
   selected,
   onToggleSelect,
+  query = "",
 }: {
   result: SearchResult;
   /** Announce URLs stamped into this result's magnet (site-wide list
@@ -39,6 +41,8 @@ export default function ResultCard({
   trackers: string[];
   selected: boolean;
   onToggleSelect: () => void;
+  /** The search query, for keyword highlighting in the name/alias. */
+  query?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   // Similar torrents load lazily on first expand: null = not asked yet.
@@ -150,7 +154,7 @@ export default function ResultCard({
               expanded ? "" : "line-clamp-3 sm:line-clamp-2"
             }`}
           >
-            {result.name || "(未命名)"}
+            {highlightText(result.name || "(未命名)", query)}
           </h3>
           {/* The publisher's title, shown when it differs from the torrent
               name — usually the Chinese name a romaji release was found by. */}
@@ -160,7 +164,7 @@ export default function ResultCard({
                 expanded ? "" : "line-clamp-1"
               }`}
             >
-              {result.alias}
+              {highlightText(result.alias, query)}
             </p>
           )}
           {/* Meta row, ordered by what a scanner looks for first:
@@ -313,7 +317,7 @@ export default function ResultCard({
                       href={`/search?q=${encodeURIComponent(s.name)}`}
                       className="min-w-0 wrap-anywhere text-accent-ink hover:underline"
                     >
-                      {s.name || "(未命名)"}
+                      {highlightText(s.name || "(未命名)", query)}
                     </a>
                     <span className="shrink-0 tabular-nums text-mute">
                       {formatSize(s.total_size)}

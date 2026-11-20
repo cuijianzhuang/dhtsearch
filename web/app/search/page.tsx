@@ -202,7 +202,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
 
           {data.results && data.results.length > 0 ? (
             <>
-              <ResultList results={data.results} trackers={data.trackers ?? []} />
+              <ResultList results={data.results} trackers={data.trackers ?? []} query={q} />
               <Pagination
                 q={q}
                 page={data.page ?? page}

@@ -8,9 +8,12 @@ import ResultCard from "./ResultCard";
 export default function ResultList({
   results,
   trackers = [],
+  query = "",
 }: {
   results: SearchResult[];
   trackers?: string[];
+  /** The search query, forwarded to cards for keyword highlighting. */
+  query?: string;
 }) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [copied, setCopied] = useState(false);
@@ -62,6 +65,7 @@ export default function ResultList({
             trackers={trackers}
             selected={selected.has(r.info_hash)}
             onToggleSelect={() => toggle(r.info_hash)}
+            query={query}
           />
         ))}
       </div>
