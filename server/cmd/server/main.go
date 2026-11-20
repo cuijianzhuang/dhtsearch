@@ -26,6 +26,7 @@ import (
 	"dhtsearch/server/internal/settings"
 	"dhtsearch/server/internal/store"
 	"dhtsearch/server/internal/trending"
+	"dhtsearch/server/internal/watchdog"
 )
 
 // defaultTrackers are large, long-lived open trackers. They serve both
@@ -322,6 +323,7 @@ func main() {
 	reg(settings.KeyThemeColor, envDefault("THEME_COLOR", "teal"))
 	reg(settings.KeyThemeAppearance, envDefault("THEME_APPEARANCE", "system"))
 	reg(settings.KeyCrawlEnabled, strconv.FormatBool(*crawlEnabled))
+	reg(settings.KeyCrawlerWatchdogEnabled, strconv.FormatBool(envBool("CRAWLER_WATCHDOG_ENABLED", true)))
 	reg(settings.KeyDHTPort, strconv.Itoa(*dhtPort))
 	reg(settings.KeyDHTSamplers, strconv.Itoa(*samplers))
 	reg(settings.KeyFetchMetadata, strconv.FormatBool(*fetchMetadata))
@@ -568,20 +570,26 @@ func main() {
 		}
 		defer feedFetcher.Close()
 		onRecord := func(rec metadata.Record) {
+			// onRecord runs synchronously in a metadata worker's loop,
+			// so its store writes get a hard timeout: an unbounded
+			// write over a half-dead database connection would park
+			// the worker forever (see store.UpsertContext).
+			wctx, wcancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer wcancel()
 			res := filter.Check(rec.Name, rec.Files, rec.TotalSize)
 			if res.Adult {
-				st.IncrStat("adult_filtered", 1)
+				st.IncrStatContext(wctx, "adult_filtered", 1)
 				return
 			}
 			if res.Spam {
-				st.IncrStat("spam_filtered", 1)
+				st.IncrStatContext(wctx, "spam_filtered", 1)
 				return
 			}
 			if res.TooSmall {
-				st.IncrStat("size_filtered", 1)
+				st.IncrStatContext(wctx, "size_filtered", 1)
 				return
 			}
-			if err := st.Upsert(store.Torrent{
+			if err := st.UpsertContext(wctx, store.Torrent{
 				InfoHash:  rec.InfoHash,
 				Name:      rec.Name,
 				TotalSize: rec.TotalSize,
@@ -593,7 +601,7 @@ func main() {
 				logger.Printf("store upsert: %v", err)
 				return
 			}
-			st.IncrStat("fetched", 1)
+			st.IncrStatContext(wctx, "fetched", 1)
 		}
 		if mgr.Bool(settings.KeyMetaPriorityEnabled) {
 			// Workers pop from a priority queue (seeders > source >
@@ -641,16 +649,20 @@ func main() {
 		// Bare infohash collection: no metadata, no filter.
 		go func() {
 			for hash := range cr.Infohashes() {
-				if err := st.Upsert(store.Torrent{
+				wctx, wcancel := context.WithTimeout(context.Background(), 15*time.Second)
+				err := st.UpsertContext(wctx, store.Torrent{
 					InfoHash:  hash,
 					Name:      hash,
 					TotalSize: 1,
 					CreatedAt: time.Now().Unix(),
-				}); err != nil {
+				})
+				if err != nil {
+					wcancel()
 					logger.Printf("store upsert: %v", err)
 					continue
 				}
-				st.IncrStat("seen", 1)
+				st.IncrStatContext(wctx, "seen", 1)
+				wcancel()
 			}
 		}()
 	}
@@ -714,18 +726,59 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				wctx, wcancel := context.WithTimeout(context.Background(), 15*time.Second)
 				seen := int64(cr.SeenCount())
-				st.IncrStat("seen", seen-prevSeen(&seen))
+				st.IncrStatContext(wctx, "seen", seen-prevSeen(&seen))
 				if fetcher != nil {
 					_, timedOut, failed := fetcher.Stats()
-					st.IncrStat("meta_timed_out", timedOut-prevTimedOut(&timedOut))
-					st.IncrStat("meta_failed", failed-prevFailed(&failed))
+					st.IncrStatContext(wctx, "meta_timed_out", timedOut-prevTimedOut(&timedOut))
+					st.IncrStatContext(wctx, "meta_failed", failed-prevFailed(&failed))
 					pd := fetcher.PrescreenDropped()
-					st.IncrStat("prescreen_dropped", pd-prevPrescreen(&pd))
+					st.IncrStatContext(wctx, "prescreen_dropped", pd-prevPrescreen(&pd))
 				}
+				wcancel()
 			}
 		}
 	}()
+
+	// Pipeline stall watchdog + periodic status line (internal/
+	// watchdog). The probe reads the same counters the status line
+	// and the admin overview use; the ingest-progress signal is the
+	// stats table's "fetched" counter, which onRecord increments
+	// only after a record is actually stored (in bare-infohash mode
+	// the "seen" stat plays that role, one increment per upsert).
+	wd := watchdog.New(watchdog.Config{
+		Active:  crawlOn,
+		Enabled: func() bool { return mgr.Bool(settings.KeyCrawlerWatchdogEnabled) },
+		Logger:  logger,
+		Probe: func(ctx context.Context) (watchdog.Probe, error) {
+			p := watchdog.Probe{Seen: cr.Stats().Harvested}
+			if fetcher != nil {
+				_, timedOut, _ := fetcher.Stats()
+				p.TimedOut += timedOut
+				p.Prescreen += fetcher.PrescreenDropped()
+			}
+			if feedFetch != nil {
+				_, timedOut, _ := feedFetch.Stats()
+				p.TimedOut += timedOut
+				p.Prescreen += feedFetch.PrescreenDropped()
+			}
+			if metaQueue != nil {
+				p.QueueDepth = metaQueue.Len()
+			}
+			stats, err := st.Stats(ctx)
+			if err != nil {
+				return p, err
+			}
+			if fetchMeta {
+				p.Fetched = stats["fetched"]
+			} else {
+				p.Fetched = stats["seen"]
+			}
+			return p, nil
+		},
+	})
+	go wd.Run(ctx)
 
 	// HTTP API. The timeouts close slow-read and slow-write (slowloris)
 	// connections instead of letting each one pin a goroutine and a socket;
@@ -734,6 +787,11 @@ func main() {
 		Addr: *addr,
 		Handler: api.New(st, func() api.CrawlerStatus {
 			cs := cr.Stats()
+			ws := wd.Status()
+			var wSince int64
+			if !ws.Since.IsZero() {
+				wSince = ws.Since.Unix()
+			}
 			return api.CrawlerStatus{
 				Enabled:       cr.Enabled(),
 				Seen:          int64(cr.SeenCount()),
@@ -746,6 +804,8 @@ func main() {
 				AvgNodeScore:  cs.AvgNodeScore,
 				BannedNodes:   cs.BannedNodes,
 				RestoredNodes: cs.RestoredNodes,
+				Watchdog:      string(ws.State),
+				WatchdogSince: wSince,
 			}
 		}, logger, api.Options{
 			RateRPS:       *rateRPS,

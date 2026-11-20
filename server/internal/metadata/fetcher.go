@@ -216,6 +216,13 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 	spec.DisallowDataDownload = true
 	spec.DisallowDataUpload = true
 	spec.DisableInitialPieceCheck = true
+	// AddTorrentSpec takes the torrent client's process-wide lock and
+	// has no context variant: if that lock is ever wedged (see the
+	// Drop call below), this call parks the worker with no way out.
+	// There is no fix from outside the library — the containment is
+	// the pipeline watchdog (internal/watchdog), which detects the
+	// resulting ingest stall and exits the process for systemd to
+	// restart. The same applies to t.Drop and Client.Close.
 	t, _, err := f.client.AddTorrentSpec(spec)
 	if err != nil {
 		f.count(&f.failed)
@@ -344,10 +351,42 @@ func waitForInfo(ctx context.Context, src infoSource, timeout, prescreen time.Du
 	// Phase 1: prescreen. Info may still arrive here (a fast swarm
 	// skips the phase entirely); the phase passes the moment any peer
 	// connection is established.
+	//
+	// ActivePeers() (Torrent.Stats) takes the torrent client's read
+	// lock, and the client lock is process-wide: one wedged holder
+	// (Torrent.Drop waits on a WaitGroup while holding the write
+	// lock) parks every later lock call indefinitely. Calling it
+	// inline from the poll case below would park this wait with it —
+	// the select cannot fire while a case body is blocked — so the
+	// fetch's deadline and ctx would stop applying. Sample it on a
+	// helper goroutine instead and consume readings over a channel:
+	// the wait keeps its own exits whatever the sampler is stuck in.
+	// A sampler stuck in the library leaks until its call returns;
+	// at most one exists per in-flight fetch, and the pipeline
+	// watchdog (internal/watchdog) is the containment for the wedge
+	// itself.
+	peers := make(chan int, 1)
+	stopPoll := make(chan struct{})
+	defer close(stopPoll)
+	go func() {
+		poll := time.NewTicker(prescreenPollInterval)
+		defer poll.Stop()
+		for {
+			select {
+			case <-stopPoll:
+				return
+			case <-poll.C:
+			}
+			n := src.ActivePeers()
+			select {
+			case peers <- n:
+			default: // a reading is already queued; freshness doesn't matter
+			}
+		}
+	}()
+
 	pre := time.NewTimer(prescreen)
 	defer pre.Stop()
-	poll := time.NewTicker(prescreenPollInterval)
-	defer poll.Stop()
 	connected := false
 phase1:
 	for !connected {
@@ -360,19 +399,25 @@ phase1:
 			return waitAborted
 		case <-pre.C:
 			break phase1
-		case <-poll.C:
-			connected = src.ActivePeers() > 0
+		case n := <-peers:
+			connected = n > 0
 		}
 	}
 	if !connected {
 		// Boundary re-check: a peer that connected in the same instant
-		// the window closed counts as connected.
+		// the window closed counts as connected. Use the sampler's
+		// latest reading rather than a fresh library call (which
+		// could park — see above).
 		select {
 		case <-src.GotInfo():
 			return waitGotInfo
 		default:
 		}
-		connected = src.ActivePeers() > 0
+		select {
+		case n := <-peers:
+			connected = n > 0
+		default:
+		}
 	}
 	if !connected {
 		return waitPrescreened

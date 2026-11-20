@@ -110,6 +110,52 @@ func TestWaitForInfoCtxCancel(t *testing.T) {
 	}
 }
 
+// blockingInfoSource's ActivePeers never returns: it stands in for a
+// Torrent.Stats call parked on the torrent client's wedged lock (in
+// anacrolix/torrent v1.61, Torrent.Drop waits on a WaitGroup while
+// holding the client write lock, so one stuck Drop parks every later
+// Stats/Add call). waitForInfo must keep its own exits regardless —
+// before the peer sampler moved to a helper goroutine, each of these
+// waits hung forever.
+type blockingInfoSource struct {
+	infoCh chan struct{}
+}
+
+func (s *blockingInfoSource) GotInfo() <-chan struct{} { return s.infoCh }
+func (s *blockingInfoSource) ActivePeers() int         { select {} }
+
+func TestWaitForInfoBlockingActivePeers(t *testing.T) {
+	t.Run("prescreen still expires", func(t *testing.T) {
+		src := &blockingInfoSource{infoCh: make(chan struct{})}
+		start := time.Now()
+		got := waitForInfo(context.Background(), src, 5*time.Second, 300*time.Millisecond)
+		if got != waitPrescreened {
+			t.Fatalf("outcome = %v, want waitPrescreened", got)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("prescreen took %v with a parked ActivePeers, want ~300ms", elapsed)
+		}
+	})
+	t.Run("ctx cancel still aborts", func(t *testing.T) {
+		src := &blockingInfoSource{infoCh: make(chan struct{})}
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		if got := waitForInfo(ctx, src, 5*time.Second, time.Second); got != waitAborted {
+			t.Fatalf("outcome = %v, want waitAborted", got)
+		}
+	})
+	t.Run("info still lands", func(t *testing.T) {
+		src := &blockingInfoSource{infoCh: make(chan struct{})}
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			close(src.infoCh)
+		}()
+		if got := waitForInfo(context.Background(), src, 5*time.Second, time.Second); got != waitGotInfo {
+			t.Fatalf("outcome = %v, want waitGotInfo", got)
+		}
+	})
+}
+
 // loopbackClient builds a torrent client confined to 127.0.0.1 TCP,
 // the same shape the fetcher's own tests use.
 func loopbackClient(t *testing.T) *torrent.Client {
