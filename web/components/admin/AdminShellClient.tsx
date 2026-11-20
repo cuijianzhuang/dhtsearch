@@ -134,9 +134,11 @@ export default function AdminShellClient({
               className="admin-nav-text inline-flex min-h-11 items-center text-lg font-bold tracking-tight"
             >
               <SiteLogo name={siteName} />
-              <span className="ml-2 rounded-md bg-accent-soft px-2 py-1 text-xs font-medium text-accent-ink">
-                管理端
-              </span>
+              {/* No 管理端 badge here (unlike the mobile top bar): with
+                  the brand icon in the lockup, icon + wordmark + badge +
+                  the collapse button no longer fit the 15rem rail and
+                  the badge got crushed into a vertical stack. Inside
+                  the admin shell the badge is redundant anyway. */}
             </Link>
             <button
               type="button"

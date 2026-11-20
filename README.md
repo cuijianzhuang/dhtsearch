@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/dhtsearch-icon.png" width="112" alt="DHTSearch 图标">
+</p>
+
 <h1 align="center">DHTSearch</h1>
 
 <p align="center">自建索引的磁力链接搜索网站 · DHT 网络实时收录 · 自动过滤成人内容与垃圾信息</p>
