@@ -4,6 +4,7 @@ import { cookies } from "next/headers";
 import type { CSSProperties } from "react";
 import "./globals.css";
 import MobileBottomNav from "@/components/MobileBottomNav";
+import PublicFooter from "@/components/PublicFooter";
 import { fetchSiteConfig } from "@/lib/site";
 import { APPEARANCE_COOKIE, parseAppearance, themePreset } from "@/lib/theme";
 
@@ -95,6 +96,7 @@ export default async function RootLayout({
           suppressHydrationWarning
         />
         {children}
+        <PublicFooter siteName={site.name} />
         <MobileBottomNav />
         {gaId && (
           <>
