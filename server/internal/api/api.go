@@ -73,6 +73,17 @@ type Options struct {
 	// 503 and the startup log says so. The token comes from the
 	// environment only — never stored, never logged.
 	AdminToken string
+	// InternalToken is the first-party credential the bundled web
+	// frontend presents (X-Internal-Token header) on its server-side
+	// calls to the public endpoints. A matching request bypasses the
+	// PUBLIC_API_REQUIRE_TOKEN gate and is never counted against any
+	// API token's quota — it is how the site itself keeps working when
+	// token enforcement is on for external callers. Like AdminToken it
+	// comes from the environment only (INTERNAL_API_TOKEN), is never
+	// stored in the database, never appears in the token list and is
+	// never logged. Empty disables the channel: the gate then treats
+	// the frontend like any anonymous caller.
+	InternalToken string
 	// Trackers, when non-nil, returns the announce URLs magnets are
 	// stamped with (the same list the pipeline uses as peer hints) and
 	// that search responses publish for the detail view. Nil means

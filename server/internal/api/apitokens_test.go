@@ -20,6 +20,13 @@ import (
 // manager and one seeded torrent, all over an in-memory store.
 func tokenFixture(t *testing.T) (string, *settings.Manager, *store.Store) {
 	t.Helper()
+	return tokenFixtureInternal(t, "")
+}
+
+// tokenFixtureInternal is tokenFixture with an INTERNAL_API_TOKEN
+// configured on the server ("" = first-party channel disabled).
+func tokenFixtureInternal(t *testing.T, internal string) (string, *settings.Manager, *store.Store) {
+	t.Helper()
 	st, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -37,8 +44,9 @@ func tokenFixture(t *testing.T) (string, *settings.Manager, *store.Store) {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(New(st, nil, nil, Options{
-		AdminToken: testAdminToken,
-		Settings:   mgr,
+		AdminToken:    testAdminToken,
+		InternalToken: internal,
+		Settings:      mgr,
 	}).Handler())
 	t.Cleanup(srv.Close)
 	return srv.URL, mgr, st
@@ -196,6 +204,140 @@ func TestPublicGateTokenRateLimit(t *testing.T) {
 	got, _ := st.APITokenByHash(context.Background(), apiTokenHash(plain))
 	if got == nil || got.CallCount != 2 {
 		t.Fatalf("counting under rate limit: %+v, want call_count=2", got)
+	}
+}
+
+// doInternal performs a GET with the X-Internal-Token header set to
+// internal (header omitted when empty) and returns the status code.
+func doInternal(t *testing.T, base, path, internal string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, base+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if internal != "" {
+		req.Header.Set(internalTokenHeader, internal)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+const testInternalToken = "internal-first-party-secret"
+
+// TestPublicGateFirstParty is the regression test for the production
+// incident behind this feature: with PUBLIC_API_REQUIRE_TOKEN on, the
+// bundled frontend's anonymous server-side calls were answered 401
+// and the site's own search died. The internal token must exempt
+// exactly those calls — and nothing else.
+func TestPublicGateFirstParty(t *testing.T) {
+	base, _, st := tokenFixtureInternal(t, testInternalToken)
+	const plain = "dht_55555555666666667777777788888888"
+	seedToken(t, st, plain, 600)
+	setPublicAPI(t, base, settings.KeyPublicAPIRequireToken, "true")
+
+	// Anonymous and wrong-internal stay locked out.
+	if code := doSearch(t, base, "", ""); code != 401 {
+		t.Fatalf("anonymous: %d, want 401", code)
+	}
+	if code := doInternal(t, base, "/api/search?q=Big", "wrong-secret"); code != 401 {
+		t.Fatalf("wrong internal token: %d, want 401", code)
+	}
+	// The internal token is not a user token: presenting it through
+	// the Authorization channel must not authenticate.
+	if code := doSearch(t, base, testInternalToken, ""); code != 401 {
+		t.Fatalf("internal token as bearer: %d, want 401", code)
+	}
+	// Correct internal token: all three gated endpoints pass.
+	for _, path := range []string{"/api/search?q=Big", "/api/stats", "/api/trending"} {
+		if code := doInternal(t, base, path, testInternalToken); code != 200 {
+			t.Fatalf("first-party %s: %d, want 200", path, code)
+		}
+	}
+	// First-party calls are not counted against any managed token.
+	got, err := st.APITokenByHash(context.Background(), apiTokenHash(plain))
+	if err != nil || got == nil {
+		t.Fatalf("lookup: %v %+v", err, got)
+	}
+	if got.CallCount != 0 || got.LastUsedAt != 0 {
+		t.Fatalf("first-party calls leaked into token counting: %+v", got)
+	}
+	// And the internal token never appears in the token list.
+	items, err := st.ListAPITokens(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Name != "test-token" {
+		t.Fatalf("token list: %+v, want only the seeded token", items)
+	}
+	// A managed token still works and counts, as before.
+	if code := doSearch(t, base, plain, ""); code != 200 {
+		t.Fatalf("valid token: %d, want 200", code)
+	}
+	got, _ = st.APITokenByHash(context.Background(), apiTokenHash(plain))
+	if got == nil || got.CallCount != 1 {
+		t.Fatalf("counting after managed-token call: %+v, want call_count=1", got)
+	}
+}
+
+func TestPublicGateFirstPartyMasterSwitchAndRequireOff(t *testing.T) {
+	base, _, _ := tokenFixtureInternal(t, testInternalToken)
+
+	// Require off: first-party passes like anyone (no special-casing
+	// needed), anonymous too.
+	if code := doInternal(t, base, "/api/search?q=Big", testInternalToken); code != 200 {
+		t.Fatalf("first-party, require off: %d, want 200", code)
+	}
+	// Master switch off: 503 even for first-party — PUBLIC_API_ENABLED
+	// is the documented full shutdown of the public read API.
+	setPublicAPI(t, base, settings.KeyPublicAPIEnabled, "false")
+	if code := doInternal(t, base, "/api/search?q=Big", testInternalToken); code != 503 {
+		t.Fatalf("first-party, api disabled: %d, want 503", code)
+	}
+}
+
+func TestPublicGateNoInternalConfigured(t *testing.T) {
+	base, _, _ := tokenFixture(t) // no INTERNAL_API_TOKEN on the server
+	setPublicAPI(t, base, settings.KeyPublicAPIRequireToken, "true")
+	// With the channel disabled, any presented internal header is
+	// just another anonymous request (the pre-fix behaviour).
+	if code := doInternal(t, base, "/api/search?q=Big", testInternalToken); code != 401 {
+		t.Fatalf("internal header without server config: %d, want 401", code)
+	}
+	if code := doInternal(t, base, "/api/search?q=Big", ""); code != 401 {
+		t.Fatalf("empty internal header: %d, want 401", code)
+	}
+}
+
+// TestSettingsPutFirstPartyWarning pins the save-time footgun guard:
+// turning the token requirement on without an internal token warns;
+// with one configured it stays silent.
+func TestSettingsPutFirstPartyWarning(t *testing.T) {
+	base, _, _ := tokenFixture(t)
+	code, body := putSettings(t, base, testAdminToken, map[string]*string{
+		settings.KeyPublicAPIRequireToken: strptr("true"),
+	})
+	if code != 200 {
+		t.Fatalf("PUT require=true: %d %v", code, body)
+	}
+	warnings, ok := body["warnings"].([]any)
+	if !ok || len(warnings) != 1 {
+		t.Fatalf("warnings: %v, want exactly one first-party warning", body["warnings"])
+	}
+
+	base2, _, _ := tokenFixtureInternal(t, testInternalToken)
+	code, body = putSettings(t, base2, testAdminToken, map[string]*string{
+		settings.KeyPublicAPIRequireToken: strptr("true"),
+	})
+	if code != 200 {
+		t.Fatalf("PUT require=true (internal set): %d %v", code, body)
+	}
+	if _, ok := body["warnings"]; ok {
+		t.Fatalf("warnings present despite configured internal token: %v", body["warnings"])
 	}
 }
 

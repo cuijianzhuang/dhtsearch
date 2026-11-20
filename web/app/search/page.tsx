@@ -1,8 +1,11 @@
 import type { Metadata } from "next";
+import type { ReactNode } from "react";
 import Link from "next/link";
 import {
   CATEGORIES,
   fetchSearch,
+  SearchError,
+  type SearchErrorKind,
   type SearchResponse,
   type SearchSort,
 } from "@/lib/api";
@@ -63,9 +66,13 @@ export default async function SearchPage({ searchParams }: PageProps) {
 
   let data: SearchResponse | null = null;
   let error: string | null = null;
+  let errorKind: SearchErrorKind = "unavailable";
   try {
     data = await fetchSearch(q, page, pageSize, category, sort);
   } catch (e) {
+    if (e instanceof SearchError) {
+      errorKind = e.kind;
+    }
     error = e instanceof Error ? e.message : "unknown error";
   }
   const site = await fetchSiteConfig();
@@ -117,7 +124,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
       </div>
 
       {error ? (
-        <BackendError q={q} detail={error} />
+        <BackendError q={q} kind={errorKind} detail={error} />
       ) : data ? (
         <>
           <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -227,16 +234,64 @@ export default async function SearchPage({ searchParams }: PageProps) {
   );
 }
 
-function BackendError({ q, detail }: { q: string; detail: string }) {
+function BackendError({
+  q,
+  kind,
+  detail,
+}: {
+  q: string;
+  kind: SearchErrorKind;
+  detail: string;
+}) {
+  // Copy follows the actual failure (see SearchErrorKind in lib/api):
+  // blaming a stopped backend for a 401 sent real operators chasing
+  // the wrong thing when the token gate locked the site itself out.
+  const copy: Record<SearchErrorKind, { title: string; body: ReactNode }> = {
+    auth: {
+      title: "搜索被令牌验证拦下了",
+      body: (
+        <>
+          本站已开启公开 API 令牌强制（
+          <code className="rounded-md bg-soft px-2 py-1 font-mono text-xs">PUBLIC_API_REQUIRE_TOKEN</code>
+          ）。站点自身的搜索请求本应通过内部第一方通道自动放行——出现这个提示，说明内部令牌（
+          <code className="rounded-md bg-soft px-2 py-1 font-mono text-xs">INTERNAL_API_TOKEN</code>
+          ）没有在 API 与 web 两侧配齐，请管理员检查安装配置（运行 install.sh 升级可自动生成并同步）。
+        </>
+      ),
+    },
+    rate: {
+      title: "请求过于频繁",
+      body: <>搜索请求触发了限流，请稍等片刻再重试。</>,
+    },
+    disabled: {
+      title: "搜索服务已关闭",
+      body: (
+        <>
+          管理员已关闭公开 API（
+          <code className="rounded-md bg-soft px-2 py-1 font-mono text-xs">PUBLIC_API_ENABLED</code>
+          ），前台搜索随之停用，请稍后再来。
+        </>
+      ),
+    },
+    unavailable: {
+      title: "无法连接到搜索服务",
+      body: (
+        <>
+          后端服务似乎未启动或暂时不可达，请确认 Go 后端已在运行
+          （默认 <code className="rounded-md bg-soft px-2 py-1 font-mono text-xs">http://localhost:8080</code>
+          ，可通过环境变量 <code className="rounded-md bg-soft px-2 py-1 font-mono text-xs">API_BASE</code> 修改）。
+        </>
+      ),
+    },
+  };
+  const { title, body } = copy[kind];
   return (
     <div className="mt-16 text-center">
-      <p className="text-lg text-ink-2">无法连接到搜索服务</p>
-      <p className="mt-2 text-sm text-mute">
-        后端服务似乎未启动或暂时不可达，请确认 Go 后端已在运行
-        （默认 <code className="rounded-md bg-soft px-2 py-1 font-mono text-xs">http://localhost:8080</code>
-        ，可通过环境变量 <code className="rounded-md bg-soft px-2 py-1 font-mono text-xs">API_BASE</code> 修改）。
-      </p>
-      <p className="mt-1 font-mono text-xs text-faint">{detail}</p>
+      <p className="text-lg text-ink-2">{title}</p>
+      <p className="mt-2 text-sm text-mute">{body}</p>
+      {kind === "unavailable" ? (
+        <p className="mt-1 font-mono text-xs text-faint">{detail}</p>
+      ) : null}
       <Link
         href={q ? `/search?q=${encodeURIComponent(q)}` : "/search"}
         className="mt-6 inline-flex min-h-11 items-center rounded-lg border border-input bg-soft px-4 text-sm text-ink-2 hover:border-accent hover:text-accent-ink"

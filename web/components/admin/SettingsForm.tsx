@@ -124,6 +124,7 @@ export default function SettingsForm({
   const [feedback, setFeedback] = useState<{
     applied: string[];
     restart: string[];
+    warnings: string[];
   } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -166,6 +167,7 @@ export default function SettingsForm({
     const data = (await res.json().catch(() => ({}))) as {
       applied?: string[];
       restart_required?: string[];
+      warnings?: string[];
       errors?: Record<string, string>;
       error?: string;
     };
@@ -186,6 +188,7 @@ export default function SettingsForm({
         setFeedback({
           applied: (data.applied ?? []).map(labelOf),
           restart: (data.restart_required ?? []).map(labelOf),
+          warnings: data.warnings ?? [],
         });
         router.refresh();
       } else if (status === 400 && data.errors) {
@@ -393,6 +396,14 @@ export default function SettingsForm({
               没有实际变化。
             </p>
           )}
+          {feedback.warnings.map((w) => (
+            <p
+              key={w}
+              className="rounded-lg border border-line bg-soft px-4 py-3 text-sm text-warn-ink"
+            >
+              {w}
+            </p>
+          ))}
         </div>
       )}
       {notice && (

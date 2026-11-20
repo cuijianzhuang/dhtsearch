@@ -224,6 +224,8 @@ func main() {
 	seedDemo := flag.Bool("seed-demo", false, "insert demo records at startup")
 	adminToken := flag.String("admin-token", envDefault("ADMIN_TOKEN", ""),
 		"bearer token for the /api/admin/* console API (empty = admin API disabled; the token is read from the environment only and never logged)")
+	internalToken := flag.String("internal-token", envDefault("INTERNAL_API_TOKEN", ""),
+		"first-party token the bundled web frontend presents (X-Internal-Token) so PUBLIC_API_REQUIRE_TOKEN does not lock the site itself out (empty = channel disabled; environment only, never logged)")
 	minSize := flag.Int64("min-size", envInt64("MIN_TORRENT_SIZE", 100<<20),
 		"skip torrents whose total size is below this many bytes")
 
@@ -745,9 +747,10 @@ func main() {
 				}
 				return out
 			},
-			AdminToken: *adminToken,
-			Settings:   mgr,
-			Trackers:   func() []string { return mgr.List(settings.KeyTrackers) },
+			AdminToken:    *adminToken,
+			InternalToken: *internalToken,
+			Settings:      mgr,
+			Trackers:      func() []string { return mgr.List(settings.KeyTrackers) },
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -778,6 +781,11 @@ func main() {
 		}
 	} else {
 		logger.Printf("admin: enabled (console API at /api/admin/*, UI at the web app's /admin)")
+	}
+	if *internalToken != "" {
+		logger.Printf("public api: first-party channel enabled (the web frontend bypasses PUBLIC_API_REQUIRE_TOKEN; external callers are unaffected)")
+	} else if mgr.Bool(settings.KeyPublicAPIRequireToken) {
+		logger.Printf("public api: WARNING: PUBLIC_API_REQUIRE_TOKEN is on but INTERNAL_API_TOKEN is not set — the web frontend's own searches will be answered 401; run install.sh upgrade or set the same INTERNAL_API_TOKEN on both services")
 	}
 	logger.Printf("http: listening on %s (db=%s crawl=%v fetch-metadata=%v)",
 		*addr, dbDesc, crawlOn, fetchMeta)

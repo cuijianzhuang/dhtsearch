@@ -259,7 +259,7 @@ var Registry = []Item{
 	{Key: KeyPublicAPIEnabled, Group: "publicapi", Label: "启用公开 API", Type: TypeBool, Default: "true", Editable: true,
 		Desc: "关 = /api/search、/api/stats、/api/trending 全部返回 503（前台搜索也会停）；/api/healthz 与管理端不受影响"},
 	{Key: KeyPublicAPIRequireToken, Group: "publicapi", Label: "公开 API 要求令牌", Type: TypeBool, Default: "false", Editable: true,
-		Desc: "开 = 公开接口必须带 API 令牌（Authorization: Bearer 或 X-API-Key），无/错令牌 401、被禁用 403。注意：自带前台也是匿名调用这些接口，开启后前台搜索会一并被拦，适合只对外提供 API 的部署；关 = 保持无鉴权，但带有效令牌的请求会被计数"},
+		Desc: "开 = 外部调用必须带 API 令牌（Authorization: Bearer 或 X-API-Key），无/错令牌 401、被禁用 403。站点前台走内部第一方通道（INTERNAL_API_TOKEN，install.sh 在 API 与 web 两侧自动生成一致的值）不受影响；内部令牌未配置时前台也会被一并拦截，保存时会有警告。关 = 保持无鉴权，但带有效令牌的请求会被计数"},
 	{Key: KeyPublicAPITokenRatePerMin, Group: "publicapi", Label: "新令牌默认限速（次/分钟）", Type: TypeInt, Default: "600", Editable: true,
 		Min: f64(0), Max: f64(1000000), Desc: "创建令牌时的默认每分钟配额，之后可在「API 令牌」页逐个修改；0 = 不限"},
 }
