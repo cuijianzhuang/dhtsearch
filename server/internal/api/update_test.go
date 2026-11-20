@@ -223,6 +223,52 @@ func TestUpdateRequestLifecycle(t *testing.T) {
 	}
 }
 
+func TestUpdateProgressPassthrough(t *testing.T) {
+	_, base, dir := updateFixture(t)
+	writeFile(t, dir, "VERSION", "v0.1.6\n")
+
+	get := func() map[string]any {
+		_, body := doReq(t, http.MethodGet, base+"/api/admin/update", testAdminToken, nil)
+		up, _ := body["upgrade"].(map[string]any)
+		if up == nil {
+			t.Fatalf("no upgrade object in payload: %v", body)
+		}
+		return up
+	}
+
+	// A running upgrade with stage markers: both pass through.
+	writeFile(t, dir, updateStatusFileName, "STATE=running\nREQUEST_ID=r1\nPROGRESS=45\nPHASE=安装\n")
+	if up := get(); up["progress"] != float64(45) || up["phase"] != "安装" {
+		t.Fatalf("progress passthrough: %v", up)
+	}
+
+	// Out-of-range values are clamped to the bar's 0..100 domain.
+	writeFile(t, dir, updateStatusFileName, "STATE=running\nREQUEST_ID=r1\nPROGRESS=140\nPHASE=安装\n")
+	if up := get(); up["progress"] != float64(100) {
+		t.Fatalf("progress clamp: %v", up)
+	}
+
+	// A malformed marker reads as absent, not as 0 or an error.
+	writeFile(t, dir, updateStatusFileName, "STATE=running\nREQUEST_ID=r1\nPROGRESS=abc\n")
+	if up := get(); up["progress"] != nil || up["phase"] != nil {
+		t.Fatalf("malformed progress: %v", up)
+	}
+
+	// Older scripts write no markers at all: both fields are null.
+	writeFile(t, dir, updateStatusFileName, "STATE=succeeded\nREQUEST_ID=r1\nMESSAGE=upgraded v0.1.5 -> v0.1.6\n")
+	if up := get(); up["progress"] != nil || up["phase"] != nil {
+		t.Fatalf("absent progress: %v", up)
+	}
+
+	// A fresh request superseding an old status must not inherit the
+	// old run's bar.
+	writeFile(t, dir, updateStatusFileName, "STATE=succeeded\nREQUEST_ID=old\nPROGRESS=100\nPHASE=完成\n")
+	writeFile(t, dir, updateRequestFileName, "REQUEST_ID=new\nREQUESTED_AT=2026-11-20 11:00:00\nREQUESTED_BY=admin\n")
+	if up := get(); up["state"] != "requested" || up["progress"] != nil || up["phase"] != nil {
+		t.Fatalf("superseded progress: %v", up)
+	}
+}
+
 func TestUpdateReviewerForbidden(t *testing.T) {
 	fx := newAuthFixture(t, "", nil)
 	fx.addUser(t, "rev", "rev-password", store.RoleReviewer, false)

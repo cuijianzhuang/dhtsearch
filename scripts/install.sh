@@ -31,7 +31,9 @@
 #   update-request  an upgrade request flag written by the panel's
 #                   "upgrade now" button.
 #   update-status   written by the upgrade agent: the outcome of the
-#                   last panel-requested upgrade.
+#                   last panel-requested upgrade; while one runs it
+#                   also carries PROGRESS / PHASE stage markers (see
+#                   write_update_status).
 # A per-minute timer (dhtsearch-upgrade-request.timer) runs the
 # agent (`dhtsearch upgrade-request`): it reconciles the auto-update
 # timer with the effective (panel-first) settings and consumes one
@@ -1499,8 +1501,14 @@ kv_value() {
 }
 
 # write_update_status STATE REQUEST_ID REQUESTED_AT STARTED_AT
-# FINISHED_AT FROM_VERSION TO_VERSION MESSAGE — atomically replace
-# the agent's outcome file the panel polls.
+# FINISHED_AT FROM_VERSION TO_VERSION MESSAGE [PROGRESS PHASE] —
+# atomically replace the agent's outcome file the panel polls.
+# PROGRESS (0-100) and PHASE (a short stage label) are optional: they
+# are written only when non-empty, so status files from older scripts
+# (and outcomes where progress does not apply, like the already-latest
+# no-op) simply carry no such lines and the panel falls back to the
+# state text alone. The numbers mark real stage boundaries inside
+# do_upgrade — stages completed, never a time estimate.
 write_update_status() {
     mkdir -p "$DATA_DIR"
     local tmp="${UPDATE_STATUS_FILE}.tmp.$$"
@@ -1513,8 +1521,29 @@ write_update_status() {
         printf 'FROM_VERSION=%s\n' "$6"
         printf 'TO_VERSION=%s\n' "$7"
         printf 'MESSAGE=%s\n' "$(printf '%s' "$8" | tr '\n' ' ')"
+        [ -n "${9:-}" ] && printf 'PROGRESS=%s\n' "$9"
+        [ -n "${10:-}" ] && printf 'PHASE=%s\n' "${10}"
     } > "$tmp"
     mv "$tmp" "$UPDATE_STATUS_FILE"
+}
+
+# update_progress PROGRESS PHASE — record a mid-upgrade stage in the
+# status file so the panel can draw a progress bar. Only acts when
+# do_upgrade runs under do_upgrade_request, the one context that owns
+# $UPDATE_STATUS_FILE: that function sets the UPG_* globals with the
+# request's identity before invoking do_upgrade (the subshell that
+# runs it inherits them), and this helper is a no-op without them.
+# Plain CLI / menu / auto-update runs
+# therefore never clobber a stale status file. The request's MESSAGE
+# is preserved; STATE stays "running" until do_upgrade_request writes
+# the outcome.
+update_progress() {
+    [ -n "${UPG_REQUEST_ID:-}" ] || return 0
+    local msg
+    msg="$(kv_value "$UPDATE_STATUS_FILE" MESSAGE)"
+    write_update_status "running" "$UPG_REQUEST_ID" "${UPG_REQUESTED_AT:-}" \
+        "${UPG_STARTED_AT:-}" "" "${UPG_FROM_VERSION:-}" "" \
+        "${msg:-upgrade running}" "$1" "$2"
 }
 
 do_upgrade_request() {
@@ -1541,33 +1570,47 @@ do_upgrade_request() {
         return 0
     fi
 
-    local from to started finished rc=0 logf tail_msg
+    local from to started finished rc=0 logf tail_msg last_progress last_phase
     from="$(installed_version)"
     started="$(date '+%Y-%m-%d %H:%M:%S')"
     logf="$(mktemp)"
     write_update_status "running" "$rid" "$rat" "$started" "" "$from" "" \
-        "upgrade requested from the admin panel${rby:+ by $rby}; running"
+        "upgrade requested from the admin panel${rby:+ by $rby}; running" "2" "准备"
     log "upgrade-request: running panel-requested upgrade (request $rid, by ${rby:-unknown}) from $from; output captured to the journal"
+    # Progress context for do_upgrade's update_progress calls: the
+    # subshell below inherits these globals, which is how do_upgrade
+    # knows this run owns the status file (see update_progress).
+    UPG_REQUEST_ID="$rid"
+    UPG_REQUESTED_AT="$rat"
+    UPG_STARTED_AT="$started"
+    UPG_FROM_VERSION="$from"
     ( parse_opts --yes; do_upgrade ) >>"$logf" 2>&1 || rc=$?
+    UPG_REQUEST_ID=""
     finished="$(date '+%Y-%m-%d %H:%M:%S')"
     to="$(installed_version)"
     if [ "$rc" = "0" ]; then
         if grep -q "无需升级" "$logf"; then
             # The version gate found nothing to do: a completed
             # no-op, reported as success — never as a failure and
-            # never left looking like a pending request.
+            # never left looking like a pending request. No progress
+            # fields: the run never entered the upgrade stages, so
+            # the panel shows the message alone, not a bar.
             write_update_status "succeeded" "$rid" "$rat" "$started" "$finished" "$from" "$to" \
                 "已是最新版本 $to，无需升级"
             log "upgrade-request: already up to date ($to); nothing to do"
         else
             write_update_status "succeeded" "$rid" "$rat" "$started" "$finished" "$from" "$to" \
-                "upgraded $from -> $to"
+                "upgraded $from -> $to" "100" "完成"
             log "upgrade-request: succeeded ($from -> $to)"
         fi
     else
         tail_msg="$(tail -n 3 "$logf" | tr '\n' ' ')"
+        # Keep the last stage do_upgrade reached: the bar freezes
+        # where the work actually stopped, next to the error text.
+        last_progress="$(kv_value "$UPDATE_STATUS_FILE" PROGRESS)"
+        last_phase="$(kv_value "$UPDATE_STATUS_FILE" PHASE)"
         write_update_status "failed" "$rid" "$rat" "$started" "$finished" "$from" "$to" \
-            "upgrade failed (exit $rc): $tail_msg"
+            "upgrade failed (exit $rc): $tail_msg" "$last_progress" "$last_phase"
         warn "upgrade-request: failed (exit $rc); last output: $tail_msg"
     fi
     cat "$logf" 2>/dev/null || true
@@ -1723,8 +1766,10 @@ do_upgrade() {
     old_version="$(installed_version)"
 
     validate_inputs
+    update_progress 10 "下载更新"
     obtain_package "$arch" "$workdir"
     tarball="$PKG_TARBALL"
+    update_progress 30 "校验"
 
     prepare_dirs_and_user
     log "Backing up current install ($old_version) to $BACKUP_DIR ($ts)"
@@ -1737,13 +1782,17 @@ do_upgrade() {
         log "Web tree snapshot: $web_snap"
     fi
     log "Backup done: install snapshot $ts ($(elapsed_since "$bk_start")s)"
+    update_progress 50 "备份完成"
 
     install_package_files "$tarball"
     write_env_file
     write_units
     fix_permissions
+    update_progress 70 "安装"
     restart_services
+    update_progress 85 "重启服务"
     if wait_health; then
+        update_progress 100 "完成"
         record_version "$RESOLVED_VERSION"
         install_manager
         if [ "${DHTSEARCH_AUTO_UPDATE:-0}" = "1" ]; then

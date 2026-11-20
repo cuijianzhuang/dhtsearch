@@ -10,28 +10,52 @@
 // polls through /api/admin-data and displays. Polling is brisk while
 // a request is in flight and lazy otherwise, and pauses on hidden
 // tabs like the overview dashboard's does.
+//
+// While a run is in flight the card also draws a progress bar. The
+// numbers are the installer's own stage markers (PROGRESS/PHASE in
+// its status file, mirrored by the API): percent means stages
+// completed at real boundaries inside the upgrade — download,
+// checksum, backup, install, restart, health check — never a
+// time-based estimate. Both fields are null when the status file
+// carries none (older installer, run not started, or the
+// already-latest no-op); the card then shows the state text alone,
+// exactly as it did before the bar existed.
 
 import { useEffect, useRef, useState } from "react";
-import type { AdminUpdate } from "@/lib/admin";
+import type { AdminUpdate, AdminUpgradeState } from "@/lib/admin";
+
+// The progress fields ride along in the same payload; they are
+// declared here (not in lib/admin) so this component stays
+// self-contained.
+type AdminUpgradeWithProgress = AdminUpgradeState & {
+  /** 0..100, stages completed; null when the run reports none. */
+  progress: number | null;
+  /** Current stage label, e.g. "下载更新"; null with progress. */
+  phase: string | null;
+};
+
+type AdminUpdateWithProgress = Omit<AdminUpdate, "upgrade"> & {
+  upgrade: AdminUpgradeWithProgress;
+};
 
 const POLL_ACTIVE_MS = 5_000;
 const POLL_IDLE_MS = 30_000;
 
-async function fetchUpdate(): Promise<AdminUpdate> {
+async function fetchUpdate(): Promise<AdminUpdateWithProgress> {
   const res = await fetch(`/api/admin-data?kind=update`, {
     cache: "no-store",
   });
   if (!res.ok) throw new Error(`admin-data update: ${res.status}`);
-  return (await res.json()) as AdminUpdate;
+  return (await res.json()) as AdminUpdateWithProgress;
 }
 
-async function postAction(kind: string): Promise<{ status: number; body: AdminUpdate & { error?: string } }> {
+async function postAction(kind: string): Promise<{ status: number; body: AdminUpdateWithProgress & { error?: string } }> {
   const res = await fetch("/api/admin-action", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ kind }),
   });
-  const body = (await res.json().catch(() => ({}))) as AdminUpdate & {
+  const body = (await res.json().catch(() => ({}))) as AdminUpdateWithProgress & {
     error?: string;
   };
   return { status: res.status, body };
@@ -58,7 +82,9 @@ const STATE_LABELS: Record<string, string> = {
 };
 
 export default function UpdateCard({ initial }: { initial: AdminUpdate | null }) {
-  const [data, setData] = useState<AdminUpdate | null>(initial);
+  const [data, setData] = useState<AdminUpdateWithProgress | null>(
+    initial as AdminUpdateWithProgress | null,
+  );
   const [busy, setBusy] = useState<"" | "check" | "request">("");
   const [notice, setNotice] = useState<string | null>(null);
   const dataRef = useRef(data);
@@ -265,6 +291,31 @@ export default function UpdateCard({ initial }: { initial: AdminUpdate | null })
             {up.requested_by && `（${up.requested_by}）`}
             {up.finished_at && ` · 完成于 ${up.finished_at}`}
           </span>
+          {up.progress != null && (
+            <div className="mt-2">
+              <div className="flex items-baseline justify-between gap-3 text-xs">
+                <span className="text-mute">
+                  {up.phase ?? STATE_LABELS[up.state] ?? up.state}
+                </span>
+                <span className="font-medium tabular-nums">{up.progress}%</span>
+              </div>
+              <div
+                className="mt-1 h-2 overflow-hidden rounded-full bg-line"
+                role="progressbar"
+                aria-label="升级进度"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={up.progress}
+              >
+                <div
+                  className={`h-full rounded-full transition-[width] duration-500 ${
+                    up.state === "failed" ? "bg-danger" : "bg-accent"
+                  }`}
+                  style={{ width: `${up.progress}%` }}
+                />
+              </div>
+            </div>
+          )}
           {up.message && <p className="mt-1 break-words text-mute">{up.message}</p>}
         </div>
       )}
