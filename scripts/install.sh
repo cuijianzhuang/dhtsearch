@@ -149,7 +149,13 @@ DB_CHOICE_EXPLICIT=0
 LOCAL_PG_URL=""
 LOCAL_PG_PASSWORD_NEW=0
 CLEANUP_DIR=""
-cleanup_tmp() { if [ -n "$CLEANUP_DIR" ]; then rm -rf "$CLEANUP_DIR"; fi; }
+# Set by menu(): the temp file the background latest-version lookup
+# writes into (see menu_header); removed by the same EXIT cleanup.
+MENU_LATEST_FILE=""
+cleanup_tmp() {
+    if [ -n "$CLEANUP_DIR" ]; then rm -rf "$CLEANUP_DIR"; fi
+    if [ -n "$MENU_LATEST_FILE" ]; then rm -f "$MENU_LATEST_FILE"; fi
+}
 trap cleanup_tmp EXIT
 FROM_SOURCE=0
 LOCAL_FILE=""
@@ -2184,6 +2190,35 @@ menu_pause() {
     read -r _ || true
 }
 
+# menu_script_sha — sha256 of the installed management entry
+# ($MANAGER_FILE), "" when it does not exist (yet).
+menu_script_sha() {
+    if [ -f "$MANAGER_FILE" ]; then
+        sha256sum "$MANAGER_FILE" 2>/dev/null | awk '{print $1}'
+    fi
+}
+
+# menu_is_script FILE — FILE is an executable script (the check
+# Polaris's install-panel.sh does before exec'ing a replaced entry).
+menu_is_script() {
+    [ -f "$1" ] && [ -x "$1" ] && head -c 2 "$1" 2>/dev/null | grep -q '#!'
+}
+
+# menu_reexec_if_updated BEFORE_SHA — an upgrade replaces the
+# management entry (install_manager) while this process keeps
+# running the old code from memory; when the entry actually
+# changed, exec the new copy so the menu continues on current code
+# instead of stale code. No-op when the entry is unchanged or is
+# not a script.
+menu_reexec_if_updated() {
+    local after
+    after="$(menu_script_sha)"
+    if [ -n "$after" ] && [ "$after" != "$1" ] && menu_is_script "$MANAGER_FILE"; then
+        echo "管理脚本已随升级更新，正在用新版脚本重新打开菜单..."
+        exec "$MANAGER_FILE"
+    fi
+}
+
 # prompt_pg_url — ask until a postgres:// URL is entered. The URL goes
 # to stdout; prompting goes to stderr so the value can be captured.
 prompt_pg_url() {
@@ -2270,9 +2305,12 @@ menu_install() {
 }
 
 menu_upgrade() {
+    local before
+    before="$(menu_script_sha)"
     echo "当前版本：$(installed_version)"
     if ! confirm "确认升级？（先备份当前版本，健康检查失败自动回滚）"; then menu_pause; return 0; fi
     do_upgrade
+    menu_reexec_if_updated "$before"
     menu_pause
 }
 
@@ -2632,11 +2670,13 @@ menu_selfcheck() {
 }
 
 menu_check_update() {
-    local rc=0
+    local rc=0 before=""
     do_check_update || rc=$?
     if [ "$rc" -eq 2 ]; then
         if confirm "现在升级到最新版本？"; then
+            before="$(menu_script_sha)"
             do_upgrade
+            menu_reexec_if_updated "$before"
         fi
     fi
     menu_pause
@@ -2677,114 +2717,193 @@ menu_uninstall() {
         2) PURGE=1 ;;
         *) echo "已取消。"; menu_pause; return 0 ;;
     esac
+    # Destructive actions confirm with a default-no prompt; the
+    # purge path is irreversible, so it confirms twice — once for
+    # the uninstall itself, once for deleting the data.
     if [ "$PURGE" -eq 1 ]; then
-        if ! confirm "确认卸载并删除全部配置和数据？此操作不可恢复"; then menu_pause; return 0; fi
+        if ! confirm "确认卸载 DHTSearch？"; then menu_pause; return 0; fi
+        if ! confirm "确认同时删除全部配置和数据？此操作不可恢复"; then menu_pause; return 0; fi
     else
-        if ! confirm "确认卸载？（配置和数据会保留）"; then menu_pause; return 0; fi
+        if ! confirm "确认卸载 DHTSearch？（配置和数据会保留）"; then menu_pause; return 0; fi
     fi
     do_uninstall
     echo "卸载完成。"
     exit 0
 }
 
-# menu_header_line — the one-line state summary printed under the
-# menu title, e.g. "当前：v0.1.11 · 服务 运行中 · 自动更新 关", so the
-# three glance questions (what version? is it up? does it update
-# itself?) are answered before anything is picked; 状态 keeps the
-# full detail. Pieces that cannot be determined are omitted rather
-# than guessed: without systemd (dry-run, the DHTSEARCH_ROOT test
-# hooks) the service piece is left out entirely, and a machine with
-# neither a version record nor unit files has no install to
-# summarize and reports 未安装.
-menu_header_line() {
-    local ver="" line api_state web_state
-    if [ -f "$VERSION_FILE" ]; then
-        ver="$(installed_version)"
-    fi
-    if [ -n "$ver" ] && [ "$ver" != "unknown" ]; then
-        line="当前：${ver}"
-    elif [ -f "${UNIT_DIR}/${API_UNIT}" ] || [ -f "${UNIT_DIR}/${WEB_UNIT}" ]; then
-        line="当前：已安装（版本未知）"
-    else
-        echo "当前：未安装"
-        return 0
-    fi
-    if have_systemd && [ -f "${UNIT_DIR}/${API_UNIT}" ]; then
-        api_state="$(systemctl is-active "$API_UNIT" 2>/dev/null || true)"
-        web_state="$(systemctl is-active "$WEB_UNIT" 2>/dev/null || true)"
-        if [ "$api_state" = "active" ] && [ "$web_state" = "active" ]; then
-            line="${line} · 服务 运行中"
-        elif [ "$api_state" = "active" ] || [ "$web_state" = "active" ]; then
-            line="${line} · 服务 部分运行"
-        elif [ -n "$api_state" ] && [ -n "$web_state" ]; then
-            line="${line} · 服务 已停止"
+# menu_installed — the menu's notion of "there is an install to
+# manage": any durable trace of one (version record, config,
+# service binary, unit files). Items that operate on an install
+# are guarded by it, so a fresh machine gets a friendly 未安装
+# notice instead of a handler failing halfway (or, for upgrade, a
+# die() that kills the whole menu).
+menu_installed() {
+    [ -f "$VERSION_FILE" ] || [ -f "$ENV_FILE" ] || [ -f "$BIN_FILE" ] \
+        || [ -f "${UNIT_DIR}/${API_UNIT}" ] || [ -f "${UNIT_DIR}/${WEB_UNIT}" ]
+}
+
+# menu_require_installed — the guard behind every service / config
+# / data item (and uninstall): true when installed; otherwise
+# print the notice, pause, and return false so the caller skips
+# the handler. 安装 itself stays unguarded.
+menu_require_installed() {
+    if menu_installed; then return 0; fi
+    echo "尚未安装，请先选「15) 安装 / 重新安装」。"
+    menu_pause
+    return 1
+}
+
+# menu_kv LABEL VALUE — one header status line ("label：value"),
+# the Polaris kv shape.
+menu_kv() { printf '  %s：%s\n' "$1" "$2"; }
+
+# menu_row N LABEL — one menu item per line (items never share a
+# line: columns fall apart when a narrow terminal wraps them).
+menu_row() { printf '  %s) %s\n' "$1" "$2"; }
+
+# menu_section TITLE — a group header between item blocks.
+menu_section() { printf '\n%s\n' "$1"; }
+
+# menu_svc_state UNIT — the header's state for one service. With
+# systemd it is the live state; without it (dry-run, the
+# DHTSEARCH_ROOT test hooks) only what the unit file proves —
+# 已安装（状态未知）— and "" when there is no unit file either, so
+# the caller omits the line instead of guessing a state.
+menu_svc_state() {
+    if have_systemd; then
+        if systemctl is-active --quiet "$1" 2>/dev/null; then
+            echo "● 运行中"
+        else
+            echo "○ 已停止"
         fi
+    elif [ -f "${UNIT_DIR}/$1" ]; then
+        echo "已安装（状态未知）"
     fi
-    if au_enabled; then
-        line="${line} · 自动更新 开"
+}
+
+# menu_au_label — the 自动更新 header value: 关, or 开 with its
+# schedule (au_time already resolves panel vs built-in time).
+menu_au_label() {
+    if ! au_enabled; then echo "关"; return; fi
+    local when="每天"
+    [ "$(au_freq)" = "weekly" ] && when="每周一"
+    echo "开（${when} $(au_time)）"
+}
+
+# menu_sys_line — "Debian 13 · x86_64 · 负载 0.42", built from
+# local files only, cheap enough to render on every loop.
+menu_sys_line() {
+    local os load
+    os="$(awk -F'"' '/^NAME=/ { split($2, a, " "); n = a[1] } /^VERSION_ID=/ { v = $2 } END { if (n == "") print ""; else print n, v }' /etc/os-release 2>/dev/null)"
+    load="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
+    printf '%s · %s · 负载 %s' "${os:-Linux}" "$(uname -m)" "${load:-?}"
+}
+
+# menu_header — screen clear, title, then kv status lines, redrawn
+# on every loop (the Polaris model): the glance questions (what
+# version? is each service up? does it update itself?) are answered
+# before anything is picked; 状态 keeps the full detail. Pieces
+# that cannot be determined are omitted rather than guessed.
+# Once the background latest-version lookup (see menu) has landed,
+# a 发现新版本 hint points at the upgrade item.
+menu_header() {
+    clear 2>/dev/null || true
+    echo "DHTSearch 管理菜单"
+    if menu_installed; then
+        local ver svc latest=""
+        ver="$(installed_version)"
+        if [ "$ver" != "unknown" ]; then
+            menu_kv "版本" "$ver"
+        else
+            menu_kv "版本" "已安装（版本未知）"
+        fi
+        svc="$(menu_svc_state "$API_UNIT")"
+        [ -n "$svc" ] && menu_kv "API 服务" "$svc"
+        svc="$(menu_svc_state "$WEB_UNIT")"
+        [ -n "$svc" ] && menu_kv "Web 服务" "$svc"
+        menu_kv "自动更新" "$(menu_au_label)"
+        menu_kv "系统" "$(menu_sys_line)"
+        if [ -n "$MENU_LATEST_FILE" ] && [ -s "$MENU_LATEST_FILE" ]; then
+            latest="$(cat "$MENU_LATEST_FILE")"
+        fi
+        if [ -n "$latest" ] && [ "$latest" != "$ver" ]; then
+            menu_kv "更新" "发现新版本 $latest，选 7 升级到最新版"
+        fi
     else
-        line="${line} · 自动更新 关"
+        menu_kv "状态" "未安装（选 15 安装）"
+        menu_kv "系统" "$(menu_sys_line)"
     fi
-    echo "$line"
 }
 
 # The menu is grouped by task domain — day-to-day service operations
 # first, then updates, configuration and data, with install and the
 # destructive uninstall last under 系统. Numbering stays single-level
 # and stable within a release so muscle memory and docs keep working;
-# every entry calls the same handler the flat menu called.
+# every entry calls the same handler the flat menu called. The
+# interaction model follows Polaris's install-panel.sh menu: a kv
+# status header redrawn on every loop, live state inside item
+# labels, a ranged prompt, not-installed guards, and a self-exec
+# after an upgrade replaces this script (see menu_reexec_if_updated).
 menu() {
-    local choice
+    local choice au_mark as_mark
+    # Look up the newest release in the background so the menu opens
+    # at once; menu_header shows the 发现新版本 hint once the lookup
+    # lands (usually from the second render on). Dry-run and the
+    # DHTSEARCH_ROOT test hooks never start it: no network there.
+    MENU_LATEST_FILE="$(mktemp)"
+    if menu_installed && [ "$DRY_RUN" != "1" ] && [ "${DHTSEARCH_SKIP_SYSTEMD:-0}" != "1" ]; then
+        ( resolve_latest_version_quiet > "$MENU_LATEST_FILE" ) &
+    fi
     while true; do
-        echo
-        echo "DHTSearch 管理菜单"
-        menu_header_line
-        echo
-        echo "服务"
-        echo "  1) 状态"
-        echo "  2) 查看日志"
-        echo "  3) 重启服务"
-        echo "  4) 启动服务"
-        echo "  5) 停止服务"
-        echo
-        echo "更新"
-        echo "  6) 检查更新"
-        echo "  7) 升级到最新版"
-        echo "  8) 自动更新设置"
-        echo
-        echo "配置"
-        echo "  9) 修改端口"
-        echo "  10) 数据库切换"
-        echo "  11) 配置管理"
-        echo "  12) 开机自启"
-        echo
-        echo "数据"
-        echo "  13) 备份与恢复"
-        echo "  14) 自检"
-        echo
-        echo "系统"
-        echo "  15) 安装 / 重新安装"
-        echo "  16) 卸载"
-        echo "  0) 退出"
-        printf '选择： '
+        menu_header
+        au_mark="关"
+        au_enabled && au_mark="开"
+        as_mark=""
+        case "$(autostart_state)" in
+            enabled) as_mark=" [开]" ;;
+            disabled) as_mark=" [关]" ;;
+        esac
+        menu_section "服务"
+        menu_row 1 "状态"
+        menu_row 2 "查看日志"
+        menu_row 3 "重启服务"
+        menu_row 4 "启动服务"
+        menu_row 5 "停止服务"
+        menu_section "更新"
+        menu_row 6 "检查更新"
+        menu_row 7 "升级到最新版"
+        menu_row 8 "自动更新设置 [$au_mark]"
+        menu_section "配置"
+        menu_row 9 "修改端口"
+        menu_row 10 "数据库切换"
+        menu_row 11 "配置管理"
+        menu_row 12 "开机自启$as_mark"
+        menu_section "数据"
+        menu_row 13 "备份与恢复"
+        menu_row 14 "自检"
+        menu_section "系统"
+        menu_row 15 "安装 / 重新安装"
+        menu_row 16 "卸载"
+        menu_row 0 "退出"
+        printf '请选择 [0-16]： '
         if ! read -r choice; then exit 0; fi
         case "$choice" in
-            1) do_status; menu_pause ;;
-            2) menu_logs ;;
-            3) menu_restart ;;
-            4) menu_start ;;
-            5) menu_stop ;;
-            6) menu_check_update ;;
-            7) menu_upgrade ;;
-            8) menu_auto_update ;;
-            9) menu_change_port ;;
-            10) menu_switch_db ;;
-            11) menu_config ;;
-            12) menu_autostart ;;
-            13) menu_backup ;;
-            14) menu_selfcheck ;;
+            1) menu_require_installed && { do_status; menu_pause; } ;;
+            2) menu_require_installed && menu_logs ;;
+            3) menu_require_installed && menu_restart ;;
+            4) menu_require_installed && menu_start ;;
+            5) menu_require_installed && menu_stop ;;
+            6) menu_require_installed && menu_check_update ;;
+            7) menu_require_installed && menu_upgrade ;;
+            8) menu_require_installed && menu_auto_update ;;
+            9) menu_require_installed && menu_change_port ;;
+            10) menu_require_installed && menu_switch_db ;;
+            11) menu_require_installed && menu_config ;;
+            12) menu_require_installed && menu_autostart ;;
+            13) menu_require_installed && menu_backup ;;
+            14) menu_require_installed && menu_selfcheck ;;
             15) menu_install ;;
-            16) menu_uninstall ;;
+            16) menu_require_installed && menu_uninstall ;;
             0) exit 0 ;;
             *) echo "未知选择：$choice" ;;
         esac
