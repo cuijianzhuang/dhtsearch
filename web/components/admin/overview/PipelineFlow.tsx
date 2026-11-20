@@ -164,7 +164,10 @@ function statsOf(o: AdminOverview | null | undefined) {
   const s = o?.stats ?? {};
   const fetched = s.fetched ?? 0;
   const filtered =
-    (s.adult_filtered ?? 0) + (s.spam_filtered ?? 0) + (s.size_filtered ?? 0);
+    (s.adult_filtered ?? 0) +
+    (s.spam_filtered ?? 0) +
+    (s.size_filtered ?? 0) +
+    (s.blocked_filtered ?? 0);
   return {
     seen: s.seen ?? 0,
     fetched,

@@ -284,6 +284,7 @@ export interface AdminOverview {
     adult_filtered: number;
     spam_filtered: number;
     size_filtered: number;
+    blocked_filtered: number;
   };
   crawler?: AdminCrawler;
   scraper?: {
@@ -499,10 +500,22 @@ export interface AdminSettingItem {
   options?: string[];
 }
 
+/** A one-click value bundle for a settings group's form, served by
+ *  the backend with the snapshot (currently only the filter group).
+ *  Applying one fills the form fields; nothing is saved until the
+ *  operator presses 保存设置， and list settings are never included. */
+export interface AdminSettingPreset {
+  name: string;
+  label: string;
+  desc?: string;
+  values: Record<string, string>;
+}
+
 export interface AdminSettingsGroup {
   key: string;
   label: string;
   items: AdminSettingItem[];
+  presets?: AdminSettingPreset[];
 }
 
 export interface AdminSettingsResponse {

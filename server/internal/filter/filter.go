@@ -18,15 +18,19 @@ type File struct {
 
 // Result is the outcome of Check. Reasons explains every signal that hit.
 type Result struct {
-	Adult    bool     `json:"adult"`
-	Spam     bool     `json:"spam"`
-	TooSmall bool     `json:"too_small"`
-	Reasons  []string `json:"reasons,omitempty"`
+	Adult    bool `json:"adult"`
+	Spam     bool `json:"spam"`
+	TooSmall bool `json:"too_small"`
+	// Blocked is the operator's own block-word list (FILTER_BLOCK_WORDS)
+	// hitting. It is counted separately from Spam so the operator can
+	// see what their own list is doing; it rides the spam switch.
+	Blocked bool     `json:"blocked"`
+	Reasons []string `json:"reasons,omitempty"`
 }
 
 // Rejected reports whether any signal fired, i.e. the torrent must not be
 // indexed.
-func (r Result) Rejected() bool { return r.Adult || r.Spam || r.TooSmall }
+func (r Result) Rejected() bool { return r.Adult || r.Spam || r.TooSmall || r.Blocked }
 
 // minTotalSize is the smallest torrent worth indexing. Anything below
 // it is dropped as junk (fake stubs, single images, link/readme-only
@@ -78,6 +82,74 @@ func SetAllowWords(words []string) {
 		}
 	}
 	allowWords.Store(&out)
+}
+
+// adultWords is the live adult keyword matcher: the built-in
+// adultKeywords list merged with the operator's additions
+// (FILTER_ADULT_WORDS via the settings system). The merged matcher is
+// rebuilt on every update and swapped atomically, exactly like
+// blockWords, so Check never matches against a half-built list and
+// never pays a merge cost per item. The built-in list is always the
+// base — operator words only ever add to it.
+var adultWords atomic.Pointer[matcher]
+
+// SetAdultWords replaces the operator's adult keyword additions; it
+// applies to the next Check call. Matching reuses the built-in
+// keyword machinery (substring for CJK/long tokens, word boundaries
+// for short ASCII), so an operator word behaves exactly like a
+// built-in one.
+func SetAdultWords(words []string) {
+	merged := make([]string, 0, len(adultKeywords)+len(words))
+	merged = append(merged, adultKeywords...)
+	merged = append(merged, words...)
+	m := newMatcher(merged)
+	adultWords.Store(&m)
+}
+
+// userDomains is the live matcher for the operator's blocked domains
+// (FILTER_BLOCK_DOMAINS via the settings system): a regex over the
+// literal domains, rebuilt on every update and swapped atomically.
+// A nil value means no operator domains are configured. Hits count
+// as adult signals, same as the built-in adult-domain pattern.
+var userDomains atomic.Pointer[regexp.Regexp]
+
+// SetBlockDomains replaces the operator's blocked domain list; it
+// applies to the next Check call. Entries are normalised (scheme,
+// "www." prefix, path and trailing dot stripped, lowercased) so the
+// admin can paste a bare domain or a full URL. A listed domain also
+// matches its subdomains, but not unrelated domains that merely end
+// with the same letters.
+func SetBlockDomains(domains []string) {
+	var parts []string
+	seen := map[string]bool{}
+	for _, d := range domains {
+		d = normalizeDomain(d)
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		parts = append(parts, regexp.QuoteMeta(d))
+	}
+	if len(parts) == 0 {
+		userDomains.Store(nil)
+		return
+	}
+	re := regexp.MustCompile(`\b(?:www\.)?(?:` + strings.Join(parts, "|") + `)\b`)
+	userDomains.Store(re)
+}
+
+// normalizeDomain reduces an operator-supplied domain entry to the
+// bare lowercase host name the matcher looks for.
+func normalizeDomain(d string) string {
+	d = strings.ToLower(strings.TrimSpace(d))
+	if i := strings.Index(d, "://"); i >= 0 {
+		d = d[i+3:]
+	}
+	if i := strings.IndexAny(d, "/?#"); i >= 0 {
+		d = d[:i]
+	}
+	d = strings.TrimPrefix(d, "www.")
+	return strings.TrimSuffix(d, ".")
 }
 
 const (
@@ -169,8 +241,6 @@ var (
 	javCodeRe     = regexp.MustCompile(javCodePattern)
 	javStudioRe   = regexp.MustCompile(javStudioPattern)
 
-	// matcher for adultKeywords, applied to the name and every file path.
-	kwAll matcher
 	// matcher for adultNameKeywords, applied to the name only.
 	kwName matcher
 )
@@ -213,8 +283,10 @@ func (m matcher) find(text string) string {
 }
 
 func init() {
-	kwAll = newMatcher(adultKeywords)
 	kwName = newMatcher(adultNameKeywords)
+	// The live adult matcher starts as the built-in list alone;
+	// SetAdultWords rebuilds it with operator additions merged in.
+	SetAdultWords(nil)
 }
 
 // isShortASCII reports whether s is a short pure-ASCII token for which
@@ -264,7 +336,7 @@ func Check(name string, files []File, totalSize int64) Result {
 			for _, ex := range strip {
 				text = strings.ReplaceAll(text, strings.ToLower(ex), "")
 			}
-			if kw := kwAll.find(text); kw != "" {
+			if kw := adultWords.Load().find(text); kw != "" {
 				add("adult keyword %q in %s", kw, what)
 				adultHit = true
 				return
@@ -272,6 +344,16 @@ func Check(name string, files []File, totalSize int64) Result {
 			if m := adultDomainRe.FindString(text); m != "" {
 				add("adult site domain %q in %s", m, what)
 				adultHit = true
+				return
+			}
+			// The operator's own domains (FILTER_BLOCK_DOMAINS) are
+			// adult signals too, counted under adult like the
+			// built-in domain pattern above.
+			if re := userDomains.Load(); re != nil {
+				if m := re.FindString(text); m != "" {
+					add("blocked domain %q in %s", m, what)
+					adultHit = true
+				}
 			}
 		}
 		checkAdult("name", lowerName)
@@ -328,17 +410,19 @@ func Check(name string, files []File, totalSize int64) Result {
 
 		// --- Operator block words ---
 		// The admin-defined list (FILTER_BLOCK_WORDS): a hit in the name or
-		// any file path drops the torrent as spam. Checked before the size
-		// floor so the reason names the actual cause.
+		// any file path drops the torrent. Reported as its own Blocked
+		// category (counted separately from the structural spam rules
+		// above), but it rides this same spam switch. Checked before the
+		// size floor so the reason names the actual cause.
 		if bw := blockWords.Load(); bw != nil {
 			if kw := bw.find(lowerName); kw != "" {
 				add("block word %q in name", kw)
-				r.Spam = true
+				r.Blocked = true
 			} else {
 				for _, f := range files {
 					if kw := bw.find(strings.ToLower(f.Path)); kw != "" {
 						add("block word %q in file", kw)
-						r.Spam = true
+						r.Blocked = true
 						break
 					}
 				}

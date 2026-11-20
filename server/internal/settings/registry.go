@@ -55,6 +55,8 @@ const (
 	KeyFilterNonAlnumMaxRatio   = "FILTER_NON_ALNUM_MAX_RATIO"
 	KeyFilterRandomFileMaxRatio = "FILTER_RANDOM_FILE_MAX_RATIO"
 	KeyFilterBlockWords         = "FILTER_BLOCK_WORDS"
+	KeyFilterAdultWords         = "FILTER_ADULT_WORDS"
+	KeyFilterBlockDomains       = "FILTER_BLOCK_DOMAINS"
 	KeyFilterAllowWords         = "FILTER_ALLOW_WORDS"
 	// LLM moderation
 	KeyModerationEnabled    = "MODERATION_ENABLED"
@@ -247,7 +249,11 @@ var Registry = []Item{
 	{Key: KeyFilterRandomFileMaxRatio, Group: "filter", Label: "随机文件名占比上限", Type: TypeFloat, Default: "0.3", Editable: true,
 		Min: f64(0), Max: f64(1), Desc: "垃圾规则：随机字符串式文件名占比超过该值即丢弃（文件数不少于 5 个时才判定），0–1 之间"},
 	{Key: KeyFilterBlockWords, Group: "filter", Label: "自定义屏蔽词", Type: TypeList, Default: "", Editable: true,
-		MaxItems: 500, MaxLen: 100, Desc: "标题或文件名命中任一词即按垃圾内容丢弃，对新抓取立即生效；受垃圾过滤开关控制"},
+		MaxItems: 500, MaxLen: 100, Desc: "标题或文件名命中任一词即丢弃，单独计数（总览「过滤构成」里的自定义屏蔽），对新抓取立即生效；受垃圾过滤开关控制"},
+	{Key: KeyFilterAdultWords, Group: "filter", Label: "自定义成人词", Type: TypeList, Default: "", Editable: true,
+		MaxItems: 500, MaxLen: 100, Desc: "追加到内置成人词表之上：标题或文件名命中即按成人内容丢弃，匹配方式与内置词一致（短 ASCII 词按词边界、其余按子串）；受成人过滤开关控制。内置词表是底座，不可删改"},
+	{Key: KeyFilterBlockDomains, Group: "filter", Label: "自定义屏蔽域名", Type: TypeList, Default: "", Editable: true,
+		MaxItems: 500, MaxLen: 200, Desc: "追加到成人域名判定：标题或文件名出现这些域名（含子域名）即按成人内容丢弃；填裸域名如 example.com，粘贴完整 URL 也会自动归一化；受成人过滤开关控制"},
 	{Key: KeyFilterAllowWords, Group: "filter", Label: "例外短语", Type: TypeList, Default: "", Editable: true,
 		MaxItems: 500, MaxLen: 100, Desc: "先从标题和文件路径中移除这些短语再做成人判定，正经内容字面含敏感词时用；只豁免成人判定，不影响垃圾规则与自定义屏蔽词"},
 

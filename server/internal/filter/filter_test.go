@@ -281,17 +281,17 @@ func TestMainstreamProfanityAndExceptionsPass(t *testing.T) {
 func TestBlockWordsAreRuntimeAdjustable(t *testing.T) {
 	defer SetBlockWords(nil)
 	SetBlockWords([]string{"ubuntu", "推广词"})
-	if r := Check("Ubuntu 24.04 ISO", mkFiles("ubuntu.iso"), 1<<31); !r.Spam {
+	if r := Check("Ubuntu 24.04 ISO", mkFiles("ubuntu.iso"), 1<<31); !r.Blocked {
 		t.Errorf("block word in name not flagged: %+v", r)
 	}
-	if r := Check("Some Movie 2024", mkFiles("movie.推广词.mkv"), 1<<31); !r.Spam {
+	if r := Check("Some Movie 2024", mkFiles("movie.推广词.mkv"), 1<<31); !r.Blocked {
 		t.Errorf("block word in file path not flagged: %+v", r)
 	}
-	if r := Check("Some Movie 2024", mkFiles("movie.mkv"), 1<<31); r.Spam || r.Adult {
+	if r := Check("Some Movie 2024", mkFiles("movie.mkv"), 1<<31); r.Spam || r.Adult || r.Blocked {
 		t.Errorf("clean torrent flagged: %+v", r)
 	}
 	SetBlockWords(nil)
-	if r := Check("Ubuntu 24.04 ISO", mkFiles("ubuntu.iso"), 1<<31); r.Spam {
+	if r := Check("Ubuntu 24.04 ISO", mkFiles("ubuntu.iso"), 1<<31); r.Blocked {
 		t.Errorf("block word still active after clearing: %+v", r)
 	}
 }

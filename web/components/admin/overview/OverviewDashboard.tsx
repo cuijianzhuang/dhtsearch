@@ -143,7 +143,8 @@ export default function OverviewDashboard({
   const adult = s.adult_filtered ?? 0;
   const spam = s.spam_filtered ?? 0;
   const size = s.size_filtered ?? 0;
-  const filtered = adult + spam + size;
+  const blocked = s.blocked_filtered ?? 0;
+  const filtered = adult + spam + size + blocked;
   const mod = o.moderation;
 
   return (
@@ -251,6 +252,7 @@ export default function OverviewDashboard({
             segments={[
               { label: "成人过滤", value: adult, color: CHART.danger },
               { label: "垃圾过滤", value: spam, color: CHART.warn },
+              { label: "自定义屏蔽", value: blocked, color: CHART.neutral },
               { label: "体积过滤", value: size, color: CHART.priFaint },
             ]}
           />

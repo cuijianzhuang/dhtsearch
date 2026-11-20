@@ -19,7 +19,11 @@
 import { useMemo, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import type { AdminSettingItem, AdminSettingsGroup } from "@/lib/admin";
+import type {
+  AdminSettingItem,
+  AdminSettingPreset,
+  AdminSettingsGroup,
+} from "@/lib/admin";
 import { THEME_PRESETS } from "@/lib/theme";
 import BackToTop from "@/components/BackToTop";
 
@@ -236,6 +240,24 @@ export default function SettingsGroupForm({
     setFields((f) => ({ ...f, [key]: v }));
   }
 
+  // A preset fills this group's switch/threshold fields from the
+  // backend-served bundle. It never touches list fields (the
+  // operator's own word/domain lists are not part of any preset) and
+  // never saves — the operator reviews the filled form and presses
+  // 保存设置 like any other edit.
+  function applyPreset(preset: AdminSettingPreset) {
+    setFields((f) => {
+      const next = { ...f };
+      for (const [key, v] of Object.entries(preset.values)) {
+        if (itemByKey.has(key)) next[key] = v;
+      }
+      return next;
+    });
+    setErrors({});
+    setFeedback(null);
+    setNotice(`已套用「${preset.label}」模板到表单，尚未保存——确认后请点「保存设置」。`);
+  }
+
   function renderControl(item: AdminSettingItem) {
     const err = errors[item.key];
     const fieldId = `setting-${item.key}`;
@@ -346,15 +368,25 @@ export default function SettingsGroupForm({
       );
     }
     if (item.type === "list") {
+      const text = fields[item.key] ?? "";
+      const count = text
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean).length;
       return (
-        <textarea
-          id={fieldId}
-          value={fields[item.key] ?? ""}
-          onChange={(e) => setField(item.key, e.target.value)}
-          rows={Math.min(8, Math.max(3, (fields[item.key] ?? "").split("\n").length))}
-          placeholder="每行一项"
-          className="min-h-11 w-full min-w-56 rounded-lg border border-input bg-surface px-3 py-2 font-mono text-xs leading-relaxed text-ink"
-        />
+        <div className="w-full min-w-56">
+          <textarea
+            id={fieldId}
+            value={text}
+            onChange={(e) => setField(item.key, e.target.value)}
+            rows={Math.min(8, Math.max(3, text.split("\n").length))}
+            placeholder="每行一项"
+            className="min-h-11 w-full rounded-lg border border-input bg-surface px-3 py-2 font-mono text-xs leading-relaxed text-ink"
+          />
+          <p className="mt-1 text-right text-[11px] text-faint">
+            共 {count} 项
+          </p>
+        </div>
       );
     }
     const numeric =
@@ -433,6 +465,34 @@ export default function SettingsGroupForm({
         <p className="rounded-lg border border-line bg-soft px-4 py-3 text-sm text-warn-ink">
           {notice}
         </p>
+      )}
+
+      {group.key === "filter" && group.presets && group.presets.length > 0 && (
+        <section className="rounded-xl border border-line bg-surface px-4 py-3 shadow-card">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-ink">过滤模板</span>
+            <span className="flex flex-wrap gap-1">
+              {group.presets.map((p) => (
+                <button
+                  key={p.name}
+                  type="button"
+                  title={p.desc}
+                  onClick={() => applyPreset(p)}
+                  className="inline-flex min-h-11 items-center rounded-lg border border-input bg-surface px-3 text-sm text-mute transition-colors hover:border-accent hover:text-accent-ink"
+                >
+                  {p.label}
+                </button>
+              ))}
+            </span>
+          </div>
+          <p className="mt-2 text-xs leading-relaxed text-mute">
+            模板只填充本页的开关与阈值，不会改动下面的自定义词表（屏蔽词 /
+            成人词 / 域名 / 例外短语），也不会自动保存。
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-warn-ink">
+            注意：「成人模式」套用并保存后，成人内容将直接入库并可被公开搜索。
+          </p>
+        </section>
       )}
 
       <section className="rounded-xl border border-line bg-surface shadow-card">

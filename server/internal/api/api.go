@@ -765,12 +765,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]any{
-		"torrents":       total,
-		"seen":           counters["seen"],
-		"fetched":        counters["fetched"],
-		"adult_filtered": counters["adult_filtered"],
-		"spam_filtered":  counters["spam_filtered"],
-		"size_filtered":  counters["size_filtered"],
+		"torrents":         total,
+		"seen":             counters["seen"],
+		"fetched":          counters["fetched"],
+		"adult_filtered":   counters["adult_filtered"],
+		"spam_filtered":    counters["spam_filtered"],
+		"size_filtered":    counters["size_filtered"],
+		"blocked_filtered": counters["blocked_filtered"],
 		// Metadata fetch outcomes. A timeout share near 100% means the
 		// fetch pool, not discovery, is what caps indexing throughput.
 		"fetch": map[string]any{

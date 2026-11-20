@@ -231,6 +231,7 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 			"adult_filtered":    counters["adult_filtered"],
 			"spam_filtered":     counters["spam_filtered"],
 			"size_filtered":     counters["size_filtered"],
+			"blocked_filtered":  counters["blocked_filtered"],
 		}
 	}
 	if s.crawler != nil {
