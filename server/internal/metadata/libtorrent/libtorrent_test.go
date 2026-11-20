@@ -3,6 +3,7 @@ package libtorrent
 import (
 	"bytes"
 	"context"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -216,6 +217,99 @@ func TestNewSidecarNeverReady(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "did not become ready") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestUnavailableReasonGraceAndClose pins the supervisor's
+// reporting rules: no episode = no reason; an episode younger than
+// downGrace (a normal restart) = no reason; a sustained episode =
+// a reason naming the failure; after Close = no reason (shutdown
+// is not an outage).
+func TestUnavailableReasonGraceAndClose(t *testing.T) {
+	sup := newSupervisor("/nonexistent", log.New(io.Discard, "", 0))
+	if r := sup.unavailableReason(); r != "" {
+		t.Fatalf("reason before any episode = %q", r)
+	}
+	sup.downSince = time.Now().Add(-time.Minute)
+	sup.lastDownErr = "sidecar process exited"
+	r := sup.unavailableReason()
+	if !strings.Contains(r, "unavailable") || !strings.Contains(r, "sidecar process exited") {
+		t.Fatalf("sustained episode reason = %q", r)
+	}
+	sup.downSince = time.Now()
+	if r := sup.unavailableReason(); r != "" {
+		t.Fatalf("reason inside the grace window = %q", r)
+	}
+	sup.downSince = time.Now().Add(-time.Minute)
+	sup.closed = true
+	if r := sup.unavailableReason(); r != "" {
+		t.Fatalf("reason after close = %q", r)
+	}
+}
+
+// TestSidecarPermanentlyDeadSurfacesUnavailable is the mid-run
+// case: the sidecar starts fine, then dies and every respawn fails
+// (here: the binary is swapped for one that exits immediately, the
+// same shape as a deleted/corrupted binary). The supervisor keeps
+// restarting it forever — it never gives up — so the fetcher must
+// surface the outage via UnavailableReason instead of just failing
+// every fetch in silence.
+func TestSidecarPermanentlyDeadSurfacesUnavailable(t *testing.T) {
+	requireFake(t)
+	old := downGrace
+	downGrace = 100 * time.Millisecond
+	defer func() { downGrace = old }()
+
+	// A private copy of the fake sidecar, so the test can replace
+	// the binary under the running supervisor.
+	dir := t.TempDir()
+	sidecar := filepath.Join(dir, "sidecar")
+	raw, err := os.ReadFile(fakeBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecar, raw, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_SIDECAR_MODE", "die")
+	t.Setenv("FAKE_SIDECAR_STATE", filepath.Join(dir, "incarnated"))
+
+	cfg := testConfig()
+	cfg.SidecarPath = sidecar
+	f, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer f.Close()
+	if r := f.UnavailableReason(); r != "" {
+		t.Fatalf("reason while sidecar is up = %q", r)
+	}
+
+	// Replace the binary (rename over: the running process keeps
+	// its inode) with one that exits before the ready frame.
+	bad := filepath.Join(dir, "bad")
+	if err := os.WriteFile(bad, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(bad, sidecar); err != nil {
+		t.Fatal(err)
+	}
+
+	// The first fetch kills incarnation 0 (fake "die" mode); every
+	// respawn now fails instantly, so the outage must surface and
+	// the fetch must classify as failed, not hang.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	in := make(chan string, 1)
+	f.Run(ctx, in, func(r metadata.Record) { t.Errorf("unexpected record %+v", r) })
+	in <- testHash
+	waitFor(t, "failed classification", func() bool {
+		_, _, failed := f.Stats()
+		return failed == 1
+	})
+	waitFor(t, "unavailable reason", func() bool { return f.UnavailableReason() != "" })
+	if r := f.UnavailableReason(); !strings.Contains(r, "unavailable") {
+		t.Fatalf("reason = %q", r)
 	}
 }
 

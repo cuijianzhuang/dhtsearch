@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -159,6 +160,75 @@ func scraperStatus(scr *scraper.Scraper) func() api.ScraperStatus {
 			Dropped:    ss.Dropped,
 			Evicted:    ss.Evicted,
 		}
+	}
+}
+
+// backendSelection is the outcome of choosing the main pipeline's
+// fetch foundation: the backend to run, its effective name, and a
+// warning for the log and the admin surfaces when the effective
+// foundation is not the configured one.
+type backendSelection struct {
+	backend metadata.Backend
+	name    string
+	warning string
+}
+
+// selectBackend builds the main pipeline's fetch foundation from
+// the META_FETCHER setting. The libtorrent branch degrades instead
+// of failing: when the sidecar is missing or cannot start, the
+// anacrolix foundation is built instead and the returned warning
+// says so, loudly. (The original design failed startup hard here;
+// the 2026-11-20 outage reversed that — a stored libtorrent
+// selection, a release carrying no sidecar asset, and a rollback
+// target with the same code and the same DB setting, so the API
+// crash-looped and the admin needed to undo the setting stayed
+// down. A fetcher choice must never take the whole service down.)
+// The native and anacrolix branches keep their historical
+// behaviour: their construction errors are returned for main to
+// Fatalf on, since there is no further fallback behind them.
+func selectBackend(requested, sidecarPath string, cfg metadata.Config, logger *log.Logger) (backendSelection, error) {
+	switch foundation := strings.ToLower(strings.TrimSpace(requested)); foundation {
+	case "libtorrent":
+		b, err := libtorrent.New(libtorrent.Config{Config: cfg, SidecarPath: sidecarPath})
+		if err == nil {
+			logger.Printf("metadata: fetch foundation = libtorrent (sidecar process)")
+			return backendSelection{backend: b, name: "libtorrent"}, nil
+		}
+		logger.Printf("metadata: META_FETCHER=libtorrent requested but sidecar unavailable: %v — running on anacrolix fallback", err)
+		fb, ferr := metadata.NewFetcher(cfg)
+		if ferr != nil {
+			return backendSelection{}, fmt.Errorf("libtorrent unavailable (%v) and the anacrolix fallback failed too: %w", err, ferr)
+		}
+		return backendSelection{
+			backend: fb,
+			name:    "anacrolix",
+			warning: fmt.Sprintf("META_FETCHER=libtorrent requested but the sidecar is unavailable (%v); running on the anacrolix fallback — an install/upgrade fetches the sidecar automatically, then restart to use libtorrent", err),
+		}, nil
+	case "native":
+		b, err := native.New(cfg)
+		if err != nil {
+			return backendSelection{}, err
+		}
+		logger.Printf("metadata: fetch foundation = native (thin BEP 9 fetcher)")
+		return backendSelection{backend: b, name: "native"}, nil
+	case "anacrolix", "":
+		b, err := metadata.NewFetcher(cfg)
+		if err != nil {
+			return backendSelection{}, err
+		}
+		logger.Printf("metadata: fetch foundation = anacrolix (torrent clients, %d shards)", cfg.Shards)
+		return backendSelection{backend: b, name: "anacrolix"}, nil
+	default:
+		logger.Printf("metadata: unknown META_FETCHER %q, falling back to anacrolix", foundation)
+		b, err := metadata.NewFetcher(cfg)
+		if err != nil {
+			return backendSelection{}, err
+		}
+		return backendSelection{
+			backend: b,
+			name:    "anacrolix",
+			warning: fmt.Sprintf("unknown META_FETCHER %q; running on the anacrolix fallback", foundation),
+		}, nil
 	}
 }
 
@@ -510,6 +580,10 @@ func main() {
 
 	// Pipeline: infohashes -> scrape ranking -> metadata -> filter -> store.
 	var fetcher metadata.Backend
+	// The effective fetch foundation and its degradation warning,
+	// set by selectBackend below and served through the API's
+	// MetaStatus (the stats/overview fetch sections).
+	var metaBackend, metaBackendWarning string
 	var scr *scraper.Scraper
 	var feedSvc *feeds.Service
 	var feedFetch *metadata.Fetcher
@@ -551,36 +625,16 @@ func main() {
 		// (META_FETCHER); the feeds fetcher below always stays on
 		// anacrolix — its swarms are live and few, and the dedicated
 		// single client is the point of it (see its construction).
-		switch foundation := strings.ToLower(mgr.Get(settings.KeyMetaFetcher)); foundation {
-		case "libtorrent":
-			// No fallback on this branch: the operator explicitly
-			// chose libtorrent, so a missing/unstartable sidecar
-			// fails startup via the Fatalf below rather than
-			// silently fetching on another foundation.
-			fetcher, err = libtorrent.New(libtorrent.Config{
-				Config:      mainMetaCfg,
-				SidecarPath: mgr.Get(settings.KeyMetaLTSidecar),
-			})
-			if err == nil {
-				logger.Printf("metadata: fetch foundation = libtorrent (sidecar process)")
-			}
-		case "native":
-			fetcher, err = native.New(mainMetaCfg)
-			if err == nil {
-				logger.Printf("metadata: fetch foundation = native (thin BEP 9 fetcher)")
-			}
-		case "anacrolix", "":
-			fetcher, err = metadata.NewFetcher(mainMetaCfg)
-			if err == nil {
-				logger.Printf("metadata: fetch foundation = anacrolix (torrent clients, %d shards)", mainMetaCfg.Shards)
-			}
-		default:
-			logger.Printf("metadata: unknown META_FETCHER %q, falling back to anacrolix", foundation)
-			fetcher, err = metadata.NewFetcher(mainMetaCfg)
+		// A libtorrent selection whose sidecar is unavailable
+		// degrades to anacrolix inside selectBackend (with the
+		// warning carried into the admin surfaces) instead of
+		// failing startup.
+		sel, serr := selectBackend(mgr.Get(settings.KeyMetaFetcher), mgr.Get(settings.KeyMetaLTSidecar), mainMetaCfg, logger)
+		if serr != nil {
+			logger.Fatalf("metadata: %v", serr)
 		}
-		if err != nil {
-			logger.Fatalf("metadata: %v", err)
-		}
+		fetcher = sel.backend
+		metaBackend, metaBackendWarning = sel.name, sel.warning
 		defer fetcher.Close()
 		feed := cr.Infohashes()
 		var scraped <-chan scraper.Item
@@ -976,10 +1030,24 @@ func main() {
 			SearchTimeout: *searchTimeout,
 			ScraperStatus: scraperStatus(scr),
 			MetaStatus: func() api.MetaStatus {
-				if metaQueue == nil {
-					return api.MetaStatus{}
+				ms := api.MetaStatus{}
+				if metaQueue != nil {
+					ms.QueueDepth = metaQueue.Len()
 				}
-				return api.MetaStatus{QueueDepth: metaQueue.Len()}
+				if fetcher != nil {
+					ms.Backend = metaBackend
+					ms.BackendWarning = metaBackendWarning
+					// A backend that can report its own live
+					// degradation (the libtorrent sidecar dying
+					// mid-run) overrides the startup warning
+					// while it is down.
+					if u, ok := fetcher.(interface{ UnavailableReason() string }); ok {
+						if r := u.UnavailableReason(); r != "" {
+							ms.BackendWarning = r
+						}
+					}
+				}
+				return ms
 			},
 			FeedsStatus: feedsStatus(feedSvc, feedFetch),
 			Trending:    trendFn,

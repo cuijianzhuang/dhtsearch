@@ -85,9 +85,11 @@ type Fetcher struct {
 }
 
 // New starts the sidecar and waits for its readiness handshake. It
-// fails loudly when the binary is missing or cannot start: the
-// operator explicitly selected this foundation, so there is no
-// silent fallback to another one.
+// returns an error when the binary is missing or cannot start; what
+// happens then is the caller's decision (cmd/server degrades to the
+// anacrolix foundation with a loud warning rather than taking the
+// whole service down — see the PR that reversed the original
+// hard-fail design after the 2026-11-20 outage).
 func New(cfg Config) (*Fetcher, error) {
 	mc := cfg.Config
 	if mc.Workers <= 0 {
@@ -122,6 +124,16 @@ func New(cfg Config) (*Fetcher, error) {
 		magnetSuffix: magnetTrackerParams(mc.Trackers),
 		sup:          sup,
 	}, nil
+}
+
+// FindSidecar resolves the sidecar binary exactly as New does —
+// the explicit path when one is configured, else next to the running
+// server binary, then PATH — and returns its path or an error
+// explaining what is missing. The settings write path uses it to
+// refuse META_FETCHER=libtorrent while no sidecar is installed, so
+// the check and the startup discovery can never drift apart.
+func FindSidecar(explicit string) (string, error) {
+	return resolveSidecar(explicit)
 }
 
 // resolveSidecar locates the sidecar binary or explains exactly what
@@ -444,6 +456,21 @@ func (f *Fetcher) PrescreenDropped() int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.prescreenDropped
+}
+
+// UnavailableReason reports why the sidecar currently cannot serve
+// fetches — a human-readable sentence once it has been continuously
+// unready past a short grace period — or "" while it is up (or only
+// briefly restarting). The supervisor restarts a dead sidecar
+// forever, so a sidecar that dies permanently mid-run (deleted
+// binary, crash loop) otherwise fails every fetch with no signal on
+// the admin surfaces beyond the climbing failed counter; main.go
+// surfaces this as the fetch section's backend_warning, the same
+// channel that reports a startup degradation. It is an optional
+// capability of this backend, consumed via interface assertion like
+// the incumbent's PeerHintStats.
+func (f *Fetcher) UnavailableReason() string {
+	return f.sup.unavailableReason()
 }
 
 // Close stops the workers and shuts the sidecar down.

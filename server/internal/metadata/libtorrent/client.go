@@ -34,6 +34,12 @@ const readyHandshakeTimeout = 15 * time.Second
 // before giving up. A var so tests can shrink it.
 var startupWait = readyHandshakeTimeout + backoffMax
 
+// downGrace is how long the sidecar must be continuously unready
+// before unavailableReason reports it: a normal restart (backoff
+// starts at 1s) must not flap the admin warning. A var so tests can
+// shrink it.
+var downGrace = 10 * time.Second
+
 const (
 	backoffMin = 1 * time.Second
 	backoffMax = 30 * time.Second
@@ -94,6 +100,15 @@ type supervisor struct {
 	nextID   uint64
 	wg       sync.WaitGroup
 	procDone chan struct{} // closed when runLoop exits
+
+	// downSince is when the current continuously-unready episode
+	// began (zero while a generation is ready); lastDownErr is the
+	// most recent spawn/exit failure in it. Together they power
+	// Fetcher.UnavailableReason: the supervisor restarts a dead
+	// sidecar forever and never gives up, so a permanent mid-run
+	// death needs this explicit signal instead.
+	downSince   time.Time
+	lastDownErr string
 }
 
 func newSupervisor(path string, logger *log.Logger) *supervisor {
@@ -147,6 +162,30 @@ func (s *supervisor) start() error {
 	}
 }
 
+// unavailableReason describes the current unready episode once it
+// has lasted past downGrace, or returns "" — while a generation is
+// ready, during a brief restart, and after Close (shutdown is not
+// an outage). The supervisor never stops restarting, so this is the
+// only "the sidecar is gone for good" signal: without it a mid-run
+// permanent death (binary deleted, crash loop) just fails fetches
+// forever, visible only as a climbing counter.
+func (s *supervisor) unavailableReason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.downSince.IsZero() {
+		return ""
+	}
+	down := time.Since(s.downSince)
+	if down < downGrace {
+		return ""
+	}
+	reason := s.lastDownErr
+	if reason == "" {
+		reason = "sidecar not ready"
+	}
+	return fmt.Sprintf("libtorrent sidecar unavailable for %s (%s); fetches fail until it recovers — check the %s binary", down.Round(time.Second), reason, BinaryName)
+}
+
 func (s *supervisor) runLoop() {
 	defer s.wg.Done()
 	defer close(s.procDone)
@@ -162,6 +201,12 @@ func (s *supervisor) runLoop() {
 		ps, err := s.spawn()
 		if err != nil {
 			s.logger.Printf("libtorrent sidecar: spawn: %v (retry in %s)", err, backoff)
+			s.mu.Lock()
+			if s.downSince.IsZero() {
+				s.downSince = time.Now()
+			}
+			s.lastDownErr = fmt.Sprintf("spawn: %v", err)
+			s.mu.Unlock()
 			if !s.sleep(backoff) {
 				return
 			}
@@ -191,6 +236,10 @@ func (s *supervisor) runLoop() {
 			s.proc = nil
 		}
 		closed := s.closed
+		if !closed && s.downSince.IsZero() {
+			s.downSince = time.Now()
+			s.lastDownErr = "sidecar process exited"
+		}
 		s.broadcastLocked()
 		s.mu.Unlock()
 		_ = ps.cmd.Wait()
@@ -286,6 +335,8 @@ func (s *supervisor) readLoop(ps *procState, stdout io.Reader) {
 			ps.mu.Unlock()
 			s.logger.Printf("libtorrent sidecar: ready (sidecar %s, libtorrent %s)", f.Sidecar, f.Libtorrent)
 			s.mu.Lock()
+			s.downSince = time.Time{}
+			s.lastDownErr = ""
 			s.broadcastLocked()
 			s.mu.Unlock()
 		case "peers":

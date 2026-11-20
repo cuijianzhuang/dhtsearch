@@ -161,6 +161,33 @@ type CrawlerStatus struct {
 // opposed to the cumulative fetch counters in the stats table.
 type MetaStatus struct {
 	QueueDepth int `json:"queue_depth"`
+	// Backend is the EFFECTIVE metadata fetch foundation the main
+	// pipeline is running on (anacrolix, native or libtorrent) —
+	// which can differ from the configured META_FETCHER when the
+	// configured one could not start and the server degraded
+	// instead of dying (see cmd/server's backend selection).
+	Backend string `json:"backend,omitempty"`
+	// BackendWarning is non-empty when Backend is not what was
+	// configured, or when the configured foundation is degraded
+	// (e.g. the libtorrent sidecar died mid-run and has not
+	// recovered): a human-readable explanation for the admin.
+	BackendWarning string `json:"backend_warning,omitempty"`
+}
+
+// metaStatusInto folds the live MetaStatus into a fetch section map
+// (the shape both /api/stats and the admin overview publish).
+func (s *Server) metaStatusInto(fetch map[string]any) {
+	if s.opts.MetaStatus == nil {
+		return
+	}
+	ms := s.opts.MetaStatus()
+	fetch["queue_depth"] = ms.QueueDepth
+	if ms.Backend != "" {
+		fetch["backend"] = ms.Backend
+	}
+	if ms.BackendWarning != "" {
+		fetch["backend_warning"] = ms.BackendWarning
+	}
 }
 
 // ScraperStatus describes the tracker-scrape prioritizer. Seeded/Scraped is
@@ -704,9 +731,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			"blocked":       blocked,
 		},
 	}
-	if s.opts.MetaStatus != nil {
-		resp["fetch"].(map[string]any)["queue_depth"] = s.opts.MetaStatus().QueueDepth
-	}
+	s.metaStatusInto(resp["fetch"].(map[string]any))
 	if s.crawler != nil {
 		resp["crawler"] = s.crawler()
 	}

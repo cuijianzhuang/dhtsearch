@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
+	"dhtsearch/server/internal/metadata/libtorrent"
 	"dhtsearch/server/internal/settings"
 )
 
@@ -72,6 +74,24 @@ func (s *Server) handleAdminSettingsPut(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "no values")
 		return
 	}
+	// Backend guard: selecting the libtorrent foundation while its
+	// sidecar binary is not installed is refused here, per-key, in
+	// the same shape as a validation failure. The row it would write
+	// only takes effect at the next restart — where the server now
+	// degrades to anacrolix with a loud warning instead of dying
+	// (the 2026-11-20 outage: the stored selection outlived a
+	// release that shipped no sidecar, and every restart failed) —
+	// but the admin should hear about the missing piece at save
+	// time, not discover a degraded pipeline later.
+	if msg, bad := libtorrentSelectionError(s.opts.Settings, body.Values); bad {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":  "invalid settings",
+			"errors": map[string]string{settings.KeyMetaFetcher: msg},
+		})
+		return
+	}
 	applied, restart, err := s.opts.Settings.Update(body.Values)
 	if err != nil {
 		var ue *settings.UpdateError
@@ -122,4 +142,28 @@ func (s *Server) handleAdminSettingsPut(w http.ResponseWriter, r *http.Request) 
 		resp["warnings"] = warnings
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// libtorrentSelectionError reports whether a settings batch selects
+// the libtorrent fetch foundation while no sidecar binary is
+// discoverable, returning the per-key rejection message. Discovery
+// is libtorrent.FindSidecar — the exact lookup startup performs —
+// over the sidecar path the batch itself sets when it sets one,
+// else the currently effective META_LT_SIDECAR. Deleting the
+// META_FETCHER override (a nil value) and selecting any other
+// foundation are never guarded: they cannot strand a restart.
+func libtorrentSelectionError(mgr *settings.Manager, values map[string]*string) (string, bool) {
+	raw, ok := values[settings.KeyMetaFetcher]
+	if !ok || raw == nil || !strings.EqualFold(strings.TrimSpace(*raw), "libtorrent") {
+		return "", false
+	}
+	sidecarPath := mgr.Get(settings.KeyMetaLTSidecar)
+	if p, present := values[settings.KeyMetaLTSidecar]; present && p != nil {
+		sidecarPath = *p
+	}
+	if _, err := libtorrent.FindSidecar(sidecarPath); err != nil {
+		return "libtorrent sidecar (" + libtorrent.BinaryName + ") is not installed, so the libtorrent foundation cannot be selected; " +
+			"run an install/upgrade — it downloads and installs the sidecar automatically — then switch again", true
+	}
+	return "", false
 }
