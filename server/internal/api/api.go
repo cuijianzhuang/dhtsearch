@@ -93,9 +93,10 @@ type Options struct {
 	// WorkingDirectory; main derives it from DB_PATH's directory). It
 	// hosts the system-update contract files shared with the root-side
 	// installer script (VERSION, update-panel, update-request,
-	// update-status — see update.go). Empty disables the update
-	// endpoints' file side: the current version reads "unknown" and
-	// upgrade requests answer 503.
+	// update-status — see update.go; restart-request, restart-status
+	// — see restart.go). Empty disables the update endpoints' file
+	// side: the current version reads "unknown" and upgrade and
+	// restart requests answer 503.
 	DataDir string
 	// Settings, when non-nil, is the live configuration registry: it
 	// backs /api/site and /api/admin/settings, and the DoS knobs above

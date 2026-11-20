@@ -658,11 +658,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main
 | `/usr/local/bin/dhtsearch-server`、`/opt/dhtsearch/web/` | 二进制与前端产物 |
 | `/usr/local/bin/dhtsearch` | 管理脚本入口（install 时由 install.sh 自身复制），无参运行开交互菜单：顶部多行状态头（版本/服务/数据库/自动更新状态，后台查到的新版本会直接提示），条目按任务域分组——服务（状态/日志/重启/启动/停止）、更新（检查更新/升级/自动更新设置）、配置（改端口/数据库切换/配置管理/开机自启）、数据（备份与恢复/自检）、系统（安装/卸载），选项标签带 `[开/关]` 状态；与服务二进制 `dhtsearch-server` 是两个文件 |
 | `/etc/dhtsearch/dhtsearch.env` | 配置（端口、数据库：默认 SQLite 的 `DB_PATH`，或 `--db` 写入的 `DATABASE_URL`），权限 600，重复 install / upgrade 不覆盖 |
-| `/var/lib/dhtsearch/` | 数据库、`VERSION`、自动更新状态文件 `autoupdate`、面板↔脚本的更新契约文件（`update-panel` / `update-request` / `update-status`)、备份（`backups/`：upgrade 的回滚备份 + `db-*` 数据库备份） |
+| `/var/lib/dhtsearch/` | 数据库、`VERSION`、自动更新状态文件 `autoupdate`、面板↔脚本的契约文件（更新：`update-panel` / `update-request` / `update-status`；重启：`restart-request` / `restart-status`)、备份（`backups/`：upgrade 的回滚备份 + `db-*` 数据库备份） |
 
 菜单和子命令还提供一套日常运维能力：「启动 / 停止」与「重启」分开，「开机自启」开关两个服务的 enable 状态；「配置管理」可脱敏查看当前配置、设置 / 重置 `ADMIN_TOKEN`（随机生成只显示一次）、用编辑器改 env（改完提示重启）；「备份与恢复」按当前后端备份数据库（SQLite 复制文件、PostgreSQL 走 `pg_dump`）到 `backups/db-*`，恢复时先停服并给当前库留一份 `db-pre-restore-*` 快照；「自检」一次跑完服务状态、端口监听、磁盘余量、版本、数据库连通和近 24 小时 error 日志摘要；「检查更新」只查不升并把结果记下来，`status` 会显示上次检查时间和结果。
 
 自动更新默认关闭。在菜单「自动更新」或 `install.sh auto-update on daily|weekly` 开启后，会装一个 systemd 定时器 `dhtsearch-update.timer`（每天或每周一凌晨 03:37，带最多 30 分钟随机延迟，关机错过会在开机后补跑），到点执行 `dhtsearch upgrade --yes`——走的还是手动升级同一套流程（先备份、健康检查、失败自动回滚），没有第二套升级逻辑。开关状态、频率和上次检查结果存在 `/var/lib/dhtsearch/autoupdate`（脚本自己的状态文件，不进服务配置文件），`status` 里能看到；关闭或卸载时定时器会一并移除。
+
+标注「重启后生效」的设置（监听地址、数据库、抓取底座等）保存后可以在面板里直接重启服务，不用再开 SSH：「服务与数据库」子页顶部有重启卡，点「重启服务」后面板把请求写进契约文件 `restart-request`，同一个升级代理在一分钟内以 root 身份只重启 `dhtsearch.service`（Web 服务不重启，面板页面本身不中断），并把结果写回 `restart-status`；重启期间管理接口短暂不可达属正常，卡片会显示「重启中…」并在服务恢复后确认「已重启」。
 
 也可以在管理面板里管升级：「系统更新」子页顶部有升级卡（当前/最新版本、检查更新、立即升级、自动升级状态与上次结果），同页有自动升级开关与时间设置。升级执行时卡片显示真实进度条——脚本在下载 → 校验 → 备份 → 安装 → 重启各阶段把进度写进 `update-status`，面板 5 秒轮询呈现，失败时进度冻结在出事的阶段。面板进程以服务用户运行、无 root，绝不直接执行升级——它只把意图写进数据目录的契约文件（`update-panel` / `update-request`)，由 install.sh 安装的每分钟定时器 `dhtsearch-upgrade-request.timer`（升级代理）以 root 身份消费：同步自动升级定时器的开关与时间、执行面板请求的升级，并把结果写回 `update-status` 供面板展示。所有入口（菜单、CLI、自动更新、面板请求）的升级都先过版本闸：目标版本与已装相同直接报「已是最新版本」退出（不下载、不备份、不动服务），目标更旧则拒绝——没有新版时不会再白走一遍停服升级流程。升级备份用硬链接快照（`cp -al`，近乎瞬时；跨文件系统退化为 tar/全量拷贝），并自动轮转：升级快照保留最近 3 组、数据库备份保留最近 10 份。优先级：面板保存过更新设置后以面板为准（契约文件存在即生效），`install.sh auto-update` 命令会删掉该文件、把控制权收回 CLI；面板从未保存过时一直以 CLI 状态为准。注意：管理入口脚本本身随 Release 包更新——从菜单里发起的升级会用新包里的 install.sh 刷新 `/usr/local/bin/dhtsearch`，所以自动更新的定时器永远调到的是与已装版本配套的脚本。
 

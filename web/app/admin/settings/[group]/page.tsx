@@ -10,8 +10,13 @@ import {
   SettingsNavChips,
   SettingsNavRail,
 } from "@/components/admin/SettingsNav";
+import RestartCard from "@/components/admin/RestartCard";
 import UpdateCard from "@/components/admin/UpdateCard";
-import { fetchAdminSettings, fetchAdminUpdate } from "@/lib/admin";
+import {
+  fetchAdminRestart,
+  fetchAdminSettings,
+  fetchAdminUpdate,
+} from "@/lib/admin";
 import { adminPageFetch } from "@/lib/admin-page";
 import {
   SETTINGS_GROUP_DESCRIPTIONS,
@@ -57,6 +62,14 @@ export default async function AdminSettingsGroupPage({
       ? await adminPageFetch((token) => fetchAdminUpdate(token))
       : null;
 
+  // The restart card belongs to the 服务与数据库 group — the group
+  // whose settings are mostly restart-required — and degrades the
+  // same way.
+  const restartOutcome =
+    slug === "service"
+      ? await adminPageFetch((token) => fetchAdminRestart(token))
+      : null;
+
   const navGroups = groups.map((g) => ({
     key: g.key,
     label: g.label,
@@ -99,6 +112,11 @@ export default async function AdminSettingsGroupPage({
             {updateOutcome && (
               <UpdateCard
                 initial={updateOutcome.ok ? updateOutcome.data : null}
+              />
+            )}
+            {restartOutcome && (
+              <RestartCard
+                initial={restartOutcome.ok ? restartOutcome.data : null}
               />
             )}
             <SettingsGroupForm group={group} />
