@@ -62,12 +62,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build in the bookworm Dockerfile
+        id: build
+        # The sidecar is an optional asset: a build failure must not
+        # fail the calling release workflow. Later steps are gated on
+        # this step's outcome, so a failed build produces a green run
+        # with no asset (install.sh already treats a missing asset as
+        # "libtorrent foundation unavailable", never as an error).
+        continue-on-error: true
         run: |
           docker build -t dhtsearch-lt-sidecar sidecar/
           mkdir -p out
           docker run --rm -v "$PWD/out:/out" dhtsearch-lt-sidecar \
               cp /src/sidecar/dist/dhtsearch-lt-sidecar /out/
       - name: Protocol smoke (ready -> fetch timeout -> shutdown)
+        if: steps.build.outcome == 'success'
         # Drives the REAL binary over the framed-JSON protocol: the
         # session must come up, a fetch against a magnet whose
         # trackers are unreachable here must come back as a timeout
@@ -112,16 +120,18 @@ jobs:
           print("sidecar protocol smoke OK")
           EOF
       - name: Stage asset
+        if: steps.build.outcome == 'success'
         run: |
           mv out/dhtsearch-lt-sidecar "out/dhtsearch-lt-sidecar-linux-${{ matrix.arch }}"
           cd out && sha256sum "dhtsearch-lt-sidecar-linux-${{ matrix.arch }}" \
               > "dhtsearch-lt-sidecar-linux-${{ matrix.arch }}.sha256"
       - uses: actions/upload-artifact@v4
+        if: steps.build.outcome == 'success'
         with:
           name: lt-sidecar-${{ matrix.arch }}
           path: out/*
       - name: Attach to GitHub Release
-        if: inputs.upload_to_release || github.ref_type == 'tag'
+        if: steps.build.outcome == 'success' && (inputs.upload_to_release || github.ref_type == 'tag')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.version || github.ref_name }}
