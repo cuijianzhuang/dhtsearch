@@ -46,7 +46,7 @@ const (
 	KeyModerationEnabled    = "MODERATION_ENABLED"
 	KeyOpenAIAPIKey         = "OPENAI_API_KEY"
 	KeyOpenAIBaseURL        = "OPENAI_BASE_URL"
-	KeyOpenAIModel           = "OPENAI_MODEL"
+	KeyOpenAIModel          = "OPENAI_MODEL"
 	KeyModerationInterval   = "MODERATION_INTERVAL"
 	KeyModerationTimeout    = "MODERATION_TIMEOUT"
 	KeyModerationBatchSize  = "MODERATION_BATCH_SIZE"
