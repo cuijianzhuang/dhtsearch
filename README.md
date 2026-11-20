@@ -208,7 +208,8 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` / `GITHUB_ALLOWED_USERS` | 无 | GitHub 登录：OAuth App 凭据与放行用户名（也可在设置页配） |
 | `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | 无 | SSO（OIDC）登录凭据；另有 `OIDC_ALLOWED_EMAILS` / `OIDC_ALLOWED_DOMAIN` 放行名单、`OIDC_PROVIDER_NAME` 按钮名（均可在设置页配） |
 | `PUBLIC_API_ENABLED` | `true` | 公开 API 总开关，关闭时公开接口整体 503 |
-| `PUBLIC_API_REQUIRE_TOKEN` | `false` | 是否要求公开接口带 API 令牌（见下文「公开 API 令牌」） |
+| `PUBLIC_API_REQUIRE_TOKEN` | `false` | 是否要求公开接口带 API 令牌（见下文「公开 API 令牌」；自带前台经 `INTERNAL_API_TOKEN` 第一方通道豁免） |
+| `INTERNAL_API_TOKEN` | 无 | 第一方内部令牌：web 以 `X-Internal-Token` 头呈现给 API，绕过令牌强制且不计配额；install.sh 在 API 与 web 两侧自动生成一致的值，手动部署需两侧设置相同值 |
 | `PUBLIC_API_TOKEN_RATE_PER_MIN` | `600` | 新建令牌的默认每分钟配额（0 = 不限） |
 | `SITE_NAME` | `DHTSearch` | 站点名称（标题、页头、OG 默认标题） |
 | `THEME_COLOR` | `teal` | 主色预设：`teal` / `blue` / `violet` / `green` / `orange` / `red` |
@@ -351,8 +352,14 @@ npm run dev                  # 开发，访问 http://localhost:3000
   触发都是 `429`。
 - **未开启强制时**：接口保持匿名可用，但请求若带了有效令牌会被
   计数（令牌页能看调用量与最后使用时间），可先观察再切换强制。
-- **注意**：自带前台也是匿名调用这些接口的，开启强制后前台搜索
-  会一并被拦——该开关适合「只对外提供 API」的部署。
+- **第一方豁免**：自带前台也是调用这些接口的，但它走内部通道：
+  install.sh 在 API 与 web 两侧生成同一个随机 `INTERNAL_API_TOKEN`，
+  web 的服务端请求以 `X-Internal-Token` 头呈现，命中即绕过强制
+  闸门且不计入任何令牌的配额——开启强制只拦外部调用，站点自身
+  搜索不受影响。该令牌只存环境变量、不入库、不出现在令牌列表、
+  不打日志；手动部署时需在两侧设置相同值，缺失时设置页保存会
+  给出警告、前台会回到被 401 拦截的状态。`PUBLIC_API_ENABLED`
+  总开关关闭时第一方同样返回 503（这是有意的整体停用）。
 
 管理接口（全部需要 `Authorization: Bearer <会话令牌或 ADMIN_TOKEN>`，无任何登录方式时整体 503，见「管理端」）：
 

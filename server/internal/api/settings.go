@@ -90,9 +90,20 @@ func (s *Server) handleAdminSettingsPut(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "settings update failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"ok":               true,
 		"applied":          applied,
 		"restart_required": restart,
-	})
+	}
+	// Footgun guard: requiring API tokens while the deployment has no
+	// INTERNAL_API_TOKEN locks the bundled frontend out along with
+	// everyone else (its server-side calls are anonymous without the
+	// first-party channel). The save itself is legitimate — an
+	// API-only deployment may want exactly that — so warn, don't block.
+	if s.opts.InternalToken == "" && s.opts.Settings.Bool(settings.KeyPublicAPIRequireToken) {
+		resp["warnings"] = []string{
+			"「公开 API 要求令牌」已开启，但内部令牌（INTERNAL_API_TOKEN）未配置：站点前台自身也会被 401 拦截。请通过 install.sh 升级（会自动生成并同步到 API 与 web 两侧），或在两侧环境变量中设置相同的 INTERNAL_API_TOKEN。",
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

@@ -31,6 +31,18 @@ import (
 //     valid token is counted against it, so operators can watch
 //     adoption before flipping enforcement on.
 //
+// First-party exemption: the bundled web frontend calls these same
+// endpoints server-side, anonymously from the gate's point of view —
+// enforcing tokens naively would lock the site itself out (this
+// actually happened in production). The frontend therefore presents
+// the deployment's INTERNAL_API_TOKEN in the X-Internal-Token header;
+// a match marks the request first-party: it skips the require-token
+// gate and all token counting/quota, without being a token itself
+// (no database row, no list entry, no log line). PUBLIC_API_ENABLED
+// stays a master switch and answers 503 to first-party requests too:
+// it is the documented "shut the public read API down" lever, and its
+// settings description says the frontend stops with it.
+//
 // Hashing choice: tokens are 256-bit random secrets, so the store
 // keeps a plain SHA-256 of the token — brute force is infeasible at
 // that entropy, and a fast hash keeps the per-request lookup to one
@@ -138,6 +150,25 @@ func (l *tokenLimiter) allow(id int64, ratePerMin int) bool {
 	return true
 }
 
+// internalTokenHeader carries the first-party credential from the
+// web frontend. A dedicated header (not Authorization) keeps it out
+// of the user-token channel entirely: it is never looked up in the
+// token store, so it cannot collide with, or be counted as, a
+// managed API token.
+const internalTokenHeader = "X-Internal-Token"
+
+// isFirstParty reports whether the request carries the deployment's
+// internal token. The comparison is constant-time; an unconfigured
+// token (empty) never matches, including an empty presented header.
+func (s *Server) isFirstParty(r *http.Request) bool {
+	want := s.opts.InternalToken
+	if want == "" {
+		return false
+	}
+	got := r.Header.Get(internalTokenHeader)
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
 // --- the public gate ---
 
 // publicPaths are the endpoints PUBLIC_API_* governs. /api/healthz
@@ -165,6 +196,13 @@ func (s *Server) publicGate(w http.ResponseWriter, r *http.Request) bool {
 	if !mgr.Bool(settings.KeyPublicAPIEnabled) {
 		writeError(w, http.StatusServiceUnavailable, "public api disabled")
 		return false
+	}
+	if s.isFirstParty(r) {
+		// The site's own frontend: exempt from the require-token gate
+		// and from token counting/quota. Deliberately placed after the
+		// enabled check — PUBLIC_API_ENABLED off means off for
+		// everyone, first-party included.
+		return true
 	}
 	require := mgr.Bool(settings.KeyPublicAPIRequireToken)
 	presented := presentedAPIToken(r)

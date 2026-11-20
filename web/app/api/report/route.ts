@@ -8,7 +8,7 @@
 
 import { headers } from "next/headers";
 import { NextResponse } from "next/server";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, internalTokenHeaders } from "@/lib/api";
 
 export async function POST(request: Request) {
   let body: unknown;
@@ -23,6 +23,7 @@ export async function POST(request: Request) {
   if (xff) fwd["x-forwarded-for"] = xff;
   const realIP = h.get("x-real-ip");
   if (realIP) fwd["x-real-ip"] = realIP;
+  Object.assign(fwd, internalTokenHeaders());
 
   let res: Response;
   try {

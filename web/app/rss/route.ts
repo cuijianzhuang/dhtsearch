@@ -5,7 +5,7 @@
 // the backend's /rss and streams it back. A short shared cache keeps a
 // popular keyword's subscribers from each paying for a backend search.
 
-import { API_BASE } from "@/lib/api";
+import { API_BASE, internalTokenHeaders } from "@/lib/api";
 
 export async function GET(request: Request) {
   const incoming = new URL(request.url).searchParams;
@@ -19,6 +19,7 @@ export async function GET(request: Request) {
   try {
     res = await fetch(`${API_BASE}/rss?${params.toString()}`, {
       next: { revalidate: 60 },
+      headers: internalTokenHeaders(),
     });
   } catch {
     return new Response("feed unavailable", { status: 502 });

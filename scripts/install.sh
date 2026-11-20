@@ -329,6 +329,30 @@ remove_env_value() {
     sed -i -E "/^$1=/d" "$ENV_FILE"
 }
 
+# gen_secret — 64 hex chars of randomness (same recipe as do_set_token).
+gen_secret() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32
+    else
+        od -An -tx1 -N32 /dev/urandom | tr -d ' \n'
+    fi
+}
+
+# ensure_internal_token — the first-party credential shared by the API
+# and the web frontend (INTERNAL_API_TOKEN). The API reads it from the
+# config file (via EnvironmentFile); write_units stamps the same value
+# into the web unit, so the web's server-side calls stay exempt from
+# PUBLIC_API_REQUIRE_TOKEN. Generated once, then kept: an existing
+# value is never overwritten, so the two sides cannot drift apart on
+# upgrade. The value itself is never printed.
+ensure_internal_token() {
+    [ -f "$ENV_FILE" ] || return 0
+    if [ -z "$(env_value INTERNAL_API_TOKEN)" ]; then
+        set_env_value INTERNAL_API_TOKEN "$(gen_secret)"
+        log "Generated INTERNAL_API_TOKEN (web-to-API first-party channel) in $ENV_FILE; the web unit carries the same value."
+    fi
+}
+
 # ---------------------------------------------------------------- database
 
 # db_backend — "postgres" when the config carries a DATABASE_URL, else
@@ -547,11 +571,13 @@ write_env_file() {
         if [ "$DB_CHOICE_EXPLICIT" = "1" ]; then
             apply_db_choice
         fi
+        ensure_internal_token
         return
     fi
-    local ap wp db_url_line
+    local ap wp db_url_line internal_tok
     ap="$(resolve_api_port)"
     wp="$(resolve_web_port)"
+    internal_tok="$(gen_secret)"
     if [ -n "$RESOLVED_DATABASE_URL" ]; then
         db_url_line="DATABASE_URL=${RESOLVED_DATABASE_URL}"
     else
@@ -597,15 +623,32 @@ META_TIMEOUT=45s
 #OPENAI_API_KEY=
 #OPENAI_BASE_URL=https://openrouter.ai/api/v1
 #OPENAI_MODEL=nvidia/nemotron-3-super-120b-a12b:free
+
+# First-party channel between the web frontend and the API: when
+# PUBLIC_API_REQUIRE_TOKEN is on, the web presents this token so the
+# site itself is not locked out by the token gate. install.sh writes
+# the same value into the web systemd unit; if you edit it here, keep
+# the two in sync (or delete it and re-run install to regenerate).
+INTERNAL_API_TOKEN=${internal_tok}
 EOF
     chmod 600 "$ENV_FILE"
 }
 
 write_units() {
-    local node_bin ap wp
+    local node_bin ap wp internal_tok internal_line
     node_bin="$(command -v node)"
     ap="$(resolve_api_port)"
     wp="$(resolve_web_port)"
+    # The web unit carries the first-party token so the frontend can
+    # present it to the API; the API reads the same value from the
+    # config file. ensure_* generates it first for pre-existing
+    # installs that predate the channel.
+    ensure_internal_token
+    internal_tok="$(env_value INTERNAL_API_TOKEN)"
+    internal_line=""
+    if [ -n "$internal_tok" ]; then
+        internal_line="Environment=INTERNAL_API_TOKEN=${internal_tok}"
+    fi
     log "Writing systemd units to $UNIT_DIR"
     cat > "${UNIT_DIR}/${API_UNIT}" <<EOF
 [Unit]
@@ -645,6 +688,7 @@ Environment=NODE_ENV=production
 Environment=PORT=${wp}
 Environment=HOSTNAME=127.0.0.1
 Environment=API_BASE=http://127.0.0.1:${ap}
+${internal_line}
 ExecStart=${node_bin} ${L_WEB_DIR}/server.js
 # Node's standalone server answers SIGTERM by exiting with code 143
 # (128+15) instead of dying by the signal; without this, a plain
