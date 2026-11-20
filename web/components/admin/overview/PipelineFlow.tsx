@@ -53,7 +53,7 @@
 //                          stall, plain accent otherwise;
 //   all deltas 0/disabled  it rests at the first node, muted.
 // A stale poll freezes it mid-glide (its computed transform is
-// pinned in place); reduced motion drops the leg wiggle and the
+// pinned in place); reduced motion drops the leg gait and the
 // transitions and steps it once per poll — the position is data, so
 // it still updates. Movement is a transform transition stepped by
 // state at poll cadence; there is no per-frame JS in this layer.
@@ -724,7 +724,11 @@ function SpiderLayer({
   idle: boolean;
   /** Mid fade-cycle: invisible. */
   faded: boolean;
-  /** Traveling: the legs wiggle. */
+  /** Traveling: the legs run the walking gait. Settled (waiting,
+   *  resting, disabled) the gait animation is removed entirely, so
+   *  the legs stand at their neutral pose — a real spider does not
+   *  walk in place. Stale is the exception: the gait stays applied
+   *  but paused, frozen mid-stride with the pinned body. */
   moving: boolean;
   /** This step goes to a lower anchor: no backward glide. */
   jump: boolean;
@@ -763,7 +767,9 @@ function SpiderLayer({
       <span
         className={`spider-body ${alarm ? "spider-alarm" : ""} ${
           idle ? "spider-idle" : ""
-        } ${faded ? "spider-faded" : ""} ${moving ? "spider-moving" : ""}`}
+        } ${faded ? "spider-faded" : ""} ${moving ? "spider-moving" : ""} ${
+          !moving && !stale ? "spider-still" : ""
+        }`}
       >
         <SpiderSvg />
       </span>
@@ -771,13 +777,53 @@ function SpiderLayer({
   );
 }
 
+/** One leg of the gait: a hip group (rotates about the hip joint,
+ *  its transform-origin set per leg in globals.css) carrying the
+ *  upper segment, and inside it a knee group (rotates about the
+ *  knee) carrying the lower segment — so the knee flex composes
+ *  with the hip sweep the way a real leg's joints do. hip, knee
+ *  and tip are the joint and foot coordinates in viewBox units.
+ *  side picks the mirrored keyframes (left legs swing forward on
+ *  a positive rotation, right legs on a negative one); gait picks
+ *  the phase: group A (L1 R2 L3 R4) and group B (R1 L2 R3 L4) are
+ *  the two alternating tetrapod groups, half a cycle apart. */
+function SpiderLeg({
+  hip,
+  knee,
+  tip,
+  side,
+  gait,
+  legClass,
+}: {
+  hip: [number, number];
+  knee: [number, number];
+  tip: [number, number];
+  side: "l" | "r";
+  gait: "a" | "b";
+  legClass: string;
+}) {
+  return (
+    <g className={`spider-leg hip-${side} gait-${gait} ${legClass}`}>
+      <path d={`M${hip[0]} ${hip[1]} L${knee[0]} ${knee[1]}`} />
+      <g className="spider-knee">
+        <path d={`M${knee[0]} ${knee[1]} L${tip[0]} ${tip[1]}`} />
+      </g>
+    </g>
+  );
+}
+
 /** A simple top-down spider, drawn head-up (CSS rotates it into the
  *  flow direction per breakpoint): two near-black body segments and
  *  eight bent legs in the same ink, red eyes and a red abdomen
- *  marking. The legs are split into the two alternating gait groups
- *  (.spider-legs-a/-b) whose subtle rotation wiggle runs only while
- *  the spider travels. The soft ring (.spider-ring) stays invisible
- *  until the alarm state fades it in. Palette lives in globals.css. */
+ *  marking. Each leg is its own jointed element (see SpiderLeg) and
+ *  walks with an alternating-tetrapod gait — group A (L1 R2 L3 R4)
+ *  swings while group B (R1 L2 R3 L4) is planted and pushes, then
+ *  they swap — with a slight knee flex on the swing and a subtle
+ *  body bob over the torso, all keyed off .spider-moving so the
+ *  legs move only while the spider actually travels (the gait
+ *  itself lives in globals.css). The soft ring (.spider-ring)
+ *  stays invisible until the alarm state fades it in. Palette
+ *  lives in globals.css. */
 function SpiderSvg() {
   return (
     <svg
@@ -792,25 +838,23 @@ function SpiderSvg() {
         strokeLinecap="round"
         fill="none"
       >
-        <g className="spider-legs spider-legs-a">
-          <path d="M19.5 15.5 L11 8 L6 10.5" />
-          <path d="M29.5 21 L39.5 16.5 L44.5 20" />
-          <path d="M18 26.5 L8 27.5 L3 32" />
-          <path d="M29 32 L36.5 38 L40 43" />
-        </g>
-        <g className="spider-legs spider-legs-b">
-          <path d="M28.5 15.5 L37 8 L42 10.5" />
-          <path d="M18.5 21 L8.5 16.5 L3.5 20" />
-          <path d="M30 26.5 L40 27.5 L45 32" />
-          <path d="M19 32 L11.5 38 L8 43" />
-        </g>
+        <SpiderLeg hip={[19.5, 15.5]} knee={[11, 8]} tip={[6, 10.5]} side="l" gait="a" legClass="leg-l1" />
+        <SpiderLeg hip={[29.5, 21]} knee={[39.5, 16.5]} tip={[44.5, 20]} side="r" gait="a" legClass="leg-r2" />
+        <SpiderLeg hip={[18, 26.5]} knee={[8, 27.5]} tip={[3, 32]} side="l" gait="a" legClass="leg-l3" />
+        <SpiderLeg hip={[29, 32]} knee={[36.5, 38]} tip={[40, 43]} side="r" gait="a" legClass="leg-r4" />
+        <SpiderLeg hip={[28.5, 15.5]} knee={[37, 8]} tip={[42, 10.5]} side="r" gait="b" legClass="leg-r1" />
+        <SpiderLeg hip={[18.5, 21]} knee={[8.5, 16.5]} tip={[3.5, 20]} side="l" gait="b" legClass="leg-l2" />
+        <SpiderLeg hip={[30, 26.5]} knee={[40, 27.5]} tip={[45, 32]} side="r" gait="b" legClass="leg-r3" />
+        <SpiderLeg hip={[19, 32]} knee={[11.5, 38]} tip={[8, 43]} side="l" gait="b" legClass="leg-l4" />
       </g>
-      <ellipse cx="24" cy="29" rx="6.5" ry="8.5" className="spider-core" />
-      <circle cx="24" cy="19" r="4.2" className="spider-core" />
-      <ellipse cx="24" cy="31.5" rx="2.6" ry="3.8" className="spider-marking" />
-      <g className="spider-eyes">
-        <circle cx="22.2" cy="17.2" r="1.05" />
-        <circle cx="25.8" cy="17.2" r="1.05" />
+      <g className="spider-torso">
+        <ellipse cx="24" cy="29" rx="6.5" ry="8.5" className="spider-core" />
+        <circle cx="24" cy="19" r="4.2" className="spider-core" />
+        <ellipse cx="24" cy="31.5" rx="2.6" ry="3.8" className="spider-marking" />
+        <g className="spider-eyes">
+          <circle cx="22.2" cy="17.2" r="1.05" />
+          <circle cx="25.8" cy="17.2" r="1.05" />
+        </g>
       </g>
     </svg>
   );
