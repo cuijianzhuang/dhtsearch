@@ -338,27 +338,35 @@ func (q *nodeQuality) Top(n int, minScore float64) []PersistedNode {
 	return out
 }
 
-// Summary aggregates the tracker for Stats.
-func (q *nodeQuality) Summary() QualitySummary {
+// aggregate returns the raw sums Summary and the multi-identity
+// rollup in Crawler.Stats are built from: tracked entries, how many
+// have at least one observation, the sum of those nodes' scores, and
+// how many entries are currently banned.
+func (q *nodeQuality) aggregate() (tracked, scored int, scoreSum float64, banned int) {
 	now := q.now()
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	sum := QualitySummary{Tracked: len(q.entries)}
-	var total float64
-	var scored int
+	tracked = len(q.entries)
 	for _, e := range q.entries {
 		if !e.bannedUntil.IsZero() && now.Before(e.bannedUntil) {
-			sum.Banned++
+			banned++
 		}
 		if e.attempts == 0 {
 			continue
 		}
 		q.decayLocked(e, now)
-		total += e.score()
+		scoreSum += e.score()
 		scored++
 	}
+	return tracked, scored, scoreSum, banned
+}
+
+// Summary aggregates the tracker for Stats.
+func (q *nodeQuality) Summary() QualitySummary {
+	tracked, scored, scoreSum, banned := q.aggregate()
+	sum := QualitySummary{Tracked: tracked, Banned: banned}
 	if scored > 0 {
-		sum.AvgScore = total / float64(scored)
+		sum.AvgScore = scoreSum / float64(scored)
 	}
 	return sum
 }

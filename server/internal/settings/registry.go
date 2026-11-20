@@ -27,6 +27,7 @@ const (
 	KeyCrawlEnabled           = "CRAWL_ENABLED"
 	KeyDHTPort                = "DHT_PORT"
 	KeyDHTSamplers            = "DHT_SAMPLERS"
+	KeyDHTIdentities          = "DHT_IDENTITIES"
 	KeyFetchMetadata          = "FETCH_METADATA"
 	KeyCrawlerWatchdogEnabled = "CRAWLER_WATCHDOG_ENABLED"
 	// metadata
@@ -181,7 +182,9 @@ var Registry = []Item{
 	{Key: KeyDHTPort, Group: "crawler", Label: "DHT 监听端口", Type: TypeInt, Default: "0", Editable: true, Restart: true,
 		Min: f64(0), Max: f64(65535), Desc: "0 = 随机端口"},
 	{Key: KeyDHTSamplers, Group: "crawler", Label: "采样 worker 数", Type: TypeInt, Default: "8", Editable: true, Restart: true,
-		Min: f64(1), Max: f64(256), Desc: "BEP 51 并发采样数；实测 8 已远超抓取池消耗速度，调大只会抢带宽"},
+		Min: f64(1), Max: f64(256), Desc: "BEP 51 并发采样数（每个 DHT 身份各一份）；实测 8 已远超抓取池消耗速度，调大只会抢带宽"},
+	{Key: KeyDHTIdentities, Group: "crawler", Label: "DHT 身份数", Type: TypeInt, Default: "1", Editable: true, Restart: true,
+		Min: f64(1), Max: f64(16), Desc: "同一进程内运行的 DHT 节点身份数：每个身份有独立的节点 ID、路由表与节点质量跟踪。单个身份只能采到自身路由表邻域的哈希，身份多了 BEP 51 覆盖的 ID 空间才变宽。身份 i 监听 DHT_PORT+i（DHT_PORT=0 时各自随机端口），请确保 DHT_PORT..DHT_PORT+身份数-1 未被占用；采样 worker 数按身份计，总采样量 = 采样 worker 数 × 身份数。1 = 与旧行为完全一致"},
 	{Key: KeyFetchMetadata, Group: "crawler", Label: "抓取元数据", Type: TypeBool, Default: "true", Editable: true, Restart: true,
 		Desc: "关 = 只收集裸 infohash，不抓元数据、不做过滤"},
 	{Key: KeyCrawlerWatchdogEnabled, Group: "crawler", Label: "停转看门狗", Type: TypeBool, Default: "true", Editable: true,
