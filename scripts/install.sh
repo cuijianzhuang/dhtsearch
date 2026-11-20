@@ -92,10 +92,21 @@ AUTOUPDATE_FILE="${DATA_DIR}/autoupdate"
 # unaffected — fix_permissions assigns the service user afterwards.
 CP_A=(cp -a)
 TAR_EXTRACT=(tar -xzf)
+TAR_EXTRACT_PLAIN=(tar -xf)
 if [ -n "$PREFIX" ]; then
     CP_A=(cp -a --no-preserve=ownership)
     TAR_EXTRACT=(tar --no-same-owner -xzf)
+    TAR_EXTRACT_PLAIN=(tar --no-same-owner -xf)
 fi
+
+# Backup retention, enforced by rotate_backups after every upgrade and
+# every database backup: upgrade snapshot sets (server binary, env and
+# web tree sharing one timestamp) keep the newest KEEP_UPGRADE_SETS
+# sets; standalone database backups (db-*) keep the newest
+# KEEP_DB_BACKUPS files. Without this the backups dir grows by a full
+# web tree (~40 MB) per upgrade, forever.
+KEEP_UPGRADE_SETS=3
+KEEP_DB_BACKUPS=10
 
 VERSION=""
 API_PORT_OPT=""
@@ -1310,9 +1321,15 @@ do_upgrade() {
 
     prepare_dirs_and_user
     log "Backing up current install ($old_version) to $BACKUP_DIR ($ts)"
+    local bk_start web_snap=""
+    bk_start="$(epoch_now)"
     "${CP_A[@]}" "$BIN_FILE" "${BACKUP_DIR}/dhtsearch-server.${ts}.bak"
     [ -f "$ENV_FILE" ] && "${CP_A[@]}" "$ENV_FILE" "${BACKUP_DIR}/dhtsearch.env.${ts}.bak"
-    [ -d "$WEB_DIR" ] && "${CP_A[@]}" "$WEB_DIR" "${BACKUP_DIR}/web.${ts}.bak"
+    if [ -d "$WEB_DIR" ]; then
+        web_snap="$(snapshot_tree "$WEB_DIR" "${BACKUP_DIR}/web.${ts}.bak")"
+        log "Web tree snapshot: $web_snap"
+    fi
+    log "Backup done: install snapshot $ts ($(elapsed_since "$bk_start")s)"
 
     install_package_files "$tarball"
     write_env_file
@@ -1327,16 +1344,17 @@ do_upgrade() {
         fi
         au_apply
         log "Upgraded: $old_version -> $RESOLVED_VERSION"
+        rotate_backups "$ts"
         return 0
     fi
 
     warn "New version not healthy; rolling back to $old_version"
     install -m 0755 "${BACKUP_DIR}/dhtsearch-server.${ts}.bak" "$BIN_FILE"
-    if [ -d "${BACKUP_DIR}/web.${ts}.bak" ]; then
-        rm -rf "$WEB_DIR"
-        "${CP_A[@]}" "${BACKUP_DIR}/web.${ts}.bak" "$WEB_DIR"
+    if [ -n "$web_snap" ]; then
+        restore_tree "$web_snap" "$WEB_DIR"
     fi
     restart_services
+    rotate_backups "$ts"
     if wait_health; then
         die "upgrade failed and was rolled back to $old_version; backup kept in $BACKUP_DIR"
     fi
@@ -1472,6 +1490,130 @@ do_set_token() {
 
 # ------------------------------------------------------------ backup/restore
 
+# epoch_now — seconds with a fractional part (bash >= 5 EPOCHREALTIME),
+# falling back to whole seconds on older shells. Used only to time
+# backup operations for the log line, never for file names.
+epoch_now() {
+    printf '%s' "${EPOCHREALTIME:-${SECONDS}.0}"
+}
+
+# elapsed_since START — seconds between START (an epoch_now value) and
+# now, with one decimal place.
+elapsed_since() {
+    local start="$1" now whole frac
+    now="$(epoch_now)"
+    whole=$(( ${now%.*} - ${start%.*} ))
+    frac=$(( (10#${now#*.} - 10#${start#*.}) / 100000 ))
+    if [ "$frac" -lt 0 ]; then
+        whole=$(( whole - 1 ))
+        frac=$(( frac + 10 ))
+    fi
+    printf '%d.%d' "$whole" "$frac"
+}
+
+# snapshot_tree SRC DEST — snapshot the directory tree SRC as DEST and
+# print the path created (DEST, or DEST.tar in the tar fallback).
+# A plain cp -a of the web tree walks thousands of small files and was
+# the slow part of every upgrade. Release web trees are immutable once
+# installed and installs always replace the tree wholesale
+# (rm -rf + copy in install_package_files), so a hardlink copy
+# (cp -al) is safe: near-instant, and the snapshot costs no extra disk
+# while the files are shared. When hardlinks are unavailable (SRC and
+# DEST on different filesystems) fall back to a single tar archive —
+# one sequential write still beats thousands of small-file copies —
+# and finally to the plain copy.
+snapshot_tree() {
+    local src="$1" dest="$2"
+    rm -rf "$dest" "$dest.tar"
+    if cp -al "$src" "$dest" 2>/dev/null; then
+        printf '%s\n' "$dest"
+        return 0
+    fi
+    rm -rf "$dest"
+    warn "hardlink snapshot of $src unavailable (different filesystem?); falling back to a tar archive"
+    if tar -cf "$dest.tar" -C "$(dirname "$src")" "$(basename "$src")" 2>/dev/null; then
+        printf '%s\n' "$dest.tar"
+        return 0
+    fi
+    rm -f "$dest.tar"
+    warn "tar snapshot failed too; falling back to a full copy of $src"
+    "${CP_A[@]}" "$src" "$dest" || die "failed to snapshot $src -> $dest"
+    printf '%s\n' "$dest"
+}
+
+# restore_tree SNAPSHOT DEST — put back a tree captured by
+# snapshot_tree, in either its directory or its .tar form. Restoring a
+# hardlink snapshot hardlinks it back, so a rollback is as fast as the
+# snapshot was instead of another full small-file copy.
+restore_tree() {
+    local snap="$1" dest="$2"
+    rm -rf "$dest"
+    case "$snap" in
+        *.tar)
+            "${TAR_EXTRACT_PLAIN[@]}" "$snap" -C "$(dirname "$dest")"
+            ;;
+        *)
+            cp -al "$snap" "$dest" 2>/dev/null || "${CP_A[@]}" "$snap" "$dest"
+            ;;
+    esac
+}
+
+# rotate_backups [protect_ts] — prune old backups in $BACKUP_DIR:
+# upgrade snapshot sets (dhtsearch-server.<ts>.bak together with the
+# matching dhtsearch.env.<ts>.bak and web.<ts>.bak[.tar]) keep the
+# newest KEEP_UPGRADE_SETS sets; database backups (db-*, including
+# db-pre-restore-*) keep the newest KEEP_DB_BACKUPS files. The set
+# stamped protect_ts — the one the running upgrade just took or just
+# rolled back to — is never deleted. Every deletion is logged so the
+# operator can see the backups dir being kept in check. Rotation is
+# housekeeping: it must never fail the upgrade or backup that called
+# it, so it always returns 0.
+rotate_backups() {
+    local protect="${1:-}"
+    [ -d "$BACKUP_DIR" ] || return 0
+    local f b t victim i drop
+    # Upgrade snapshot sets, newest timestamp first (timestamps are
+    # fixed-width, so lexical order is chronological).
+    local sets=() sorted=()
+    for f in "$BACKUP_DIR"/dhtsearch-server.*.bak; do
+        [ -f "$f" ] || continue
+        b="$(basename "$f")"
+        t="${b#dhtsearch-server.}"
+        sets+=("${t%.bak}")
+    done
+    if [ "${#sets[@]}" -gt "$KEEP_UPGRADE_SETS" ]; then
+        while IFS= read -r t; do
+            sorted+=("$t")
+        done <<EOF
+$(printf '%s\n' "${sets[@]}" | sort -r)
+EOF
+        for (( i = KEEP_UPGRADE_SETS; i < ${#sorted[@]}; i++ )); do
+            victim="${sorted[i]}"
+            [ "$victim" = "$protect" ] && continue
+            rm -rf "${BACKUP_DIR}/web.${victim}.bak" "${BACKUP_DIR}/web.${victim}.bak.tar"
+            rm -f "${BACKUP_DIR}/dhtsearch-server.${victim}.bak" "${BACKUP_DIR}/dhtsearch.env.${victim}.bak"
+            log "Rotated out upgrade backup set $victim (keeping the newest $KEEP_UPGRADE_SETS sets)"
+        done
+    fi
+    # Database backups, oldest first (list_db_backups order); the file
+    # a backup just wrote carries the newest timestamp and sorts last,
+    # so pruning from the front never touches it.
+    local dbs=()
+    while IFS= read -r f; do
+        [ -n "$f" ] && dbs+=("$f")
+    done <<EOF
+$(list_db_backups)
+EOF
+    if [ "${#dbs[@]}" -gt "$KEEP_DB_BACKUPS" ]; then
+        drop=$(( ${#dbs[@]} - KEEP_DB_BACKUPS ))
+        for (( i = 0; i < drop; i++ )); do
+            rm -f "${dbs[i]}" "${dbs[i]}-wal" "${dbs[i]}-shm"
+            log "Rotated out database backup ${dbs[i]} (keeping the newest $KEEP_DB_BACKUPS)"
+        done
+    fi
+    return 0
+}
+
 # backup_db_to OUT — write a database backup to OUT, using whichever
 # backend the config selects. SQLite: sqlite3 .backup when the CLI is
 # available (safe against a running server), else a raw file copy of
@@ -1503,7 +1645,7 @@ do_backup() {
     require_root
     [ -f "$ENV_FILE" ] || die "config not found: $ENV_FILE (not installed?)"
     mkdir -p "$BACKUP_DIR"
-    local ts out
+    local ts out bk_start
     ts="$(date +%Y%m%d%H%M%S)"
     if [ "$(db_backend)" = "postgres" ]; then
         out="${BACKUP_DIR}/db-${ts}.sql"
@@ -1511,8 +1653,10 @@ do_backup() {
         out="${BACKUP_DIR}/db-${ts}.sqlite"
     fi
     log "Backing up database ($(db_display)) -> $out"
+    bk_start="$(epoch_now)"
     backup_db_to "$out" || die "backup failed (see above); nothing was restored or changed"
-    log "Backup done: $out ($(du -h "$out" | cut -f1))"
+    log "Backup done: $out ($(du -h "$out" | cut -f1), $(elapsed_since "$bk_start")s)"
+    rotate_backups
 }
 
 # list_db_backups — database backup files, oldest first.
