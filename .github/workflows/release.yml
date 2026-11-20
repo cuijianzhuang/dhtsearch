@@ -265,7 +265,13 @@ jobs:
   sidecar:
     name: Libtorrent sidecar (optional asset)
     uses: ./.github/workflows/sidecar.yml
-    continue-on-error: true
+    # NOTE: no continue-on-error here — GitHub does not allow it on
+    # reusable-workflow jobs and rejects the WHOLE workflow at
+    # startup if present (this once broke every release). The
+    # failure-tolerance lives inside sidecar.yml instead: its build
+    # step is continue-on-error and its later steps are gated on the
+    # build outcome, so a sidecar failure yields a green run with no
+    # asset attached rather than failing this workflow.
     with:
       upload_to_release: ${{ github.ref_type == 'tag' || inputs.publish }}
       version: ${{ inputs.version || github.ref_name }}
