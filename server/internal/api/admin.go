@@ -189,6 +189,10 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 			// queue never spent a worker on, split by reason.
 			"skipped_stored":  counters["admission_skipped_stored"],
 			"skipped_backoff": counters["admission_skipped_backoff"],
+			// Peer hints: fetches that carried DHT peer hints, and
+			// of those the successes with a hint peer connected.
+			"peer_hint_items":   counters["peer_hint_items"],
+			"peer_hint_fetched": counters["peer_hint_fetched"],
 		},
 		"moderation": map[string]any{
 			"enabled":       s.moderationEnabled(),

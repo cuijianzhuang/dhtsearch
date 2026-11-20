@@ -3,6 +3,7 @@ package metadata
 import (
 	"container/heap"
 	"context"
+	"net/netip"
 	"sync"
 	"time"
 )
@@ -36,6 +37,19 @@ type Item struct {
 	// hashes a sample just reported are the ones most likely to still
 	// have reachable peers.
 	At time.Time
+	// Peers carries DHT peer hints for this hash: addresses the
+	// crawler's DHT side already knows are in the swarm (announce_peer
+	// senders, get_peers reply values — see the crawler's peer-hint
+	// cache), attached by the queue bridge as the item is built and
+	// handed to the fetcher as a warm start alongside the magnet's
+	// tracker-supplied peers. A hint is fetch input only: it plays no
+	// part in queue priority, and a stale or dead hint costs nothing
+	// but a failed dial inside the normal fetch budget. Nil for items
+	// whose source carries no hints. Any fetcher backend (the
+	// incumbent torrent-client one, or a native BEP 9 one) consumes
+	// the same field: dial these addresses for this hash along with
+	// whatever else it has.
+	Peers []netip.AddrPort
 }
 
 // QueueStats is a snapshot of queue counters.
