@@ -66,7 +66,7 @@ jobs:
           docker build -t dhtsearch-lt-sidecar sidecar/
           mkdir -p out
           docker run --rm -v "$PWD/out:/out" dhtsearch-lt-sidecar \
-              cp /src/dist/dhtsearch-lt-sidecar /out/
+              cp /src/sidecar/dist/dhtsearch-lt-sidecar /out/
       - name: Protocol smoke (ready -> fetch timeout -> shutdown)
         # Drives the REAL binary over the framed-JSON protocol: the
         # session must come up, a fetch against a magnet whose

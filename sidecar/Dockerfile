@@ -3,7 +3,7 @@
 #
 #   docker build -t dhtsearch-lt-sidecar sidecar/
 #   docker run --rm -v "$PWD/sidecar/dist:/out" dhtsearch-lt-sidecar \
-#       cp /src/dist/dhtsearch-lt-sidecar /out/
+#       cp /src/sidecar/dist/dhtsearch-lt-sidecar /out/
 #
 # CI (.github/workflows/sidecar.yml) runs the same steps in a
 # bookworm container job instead of Docker-in-Docker.
