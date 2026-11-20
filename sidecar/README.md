@@ -31,7 +31,7 @@ Locally, with Docker:
 ```sh
 docker build -t dhtsearch-lt-sidecar sidecar/
 docker run --rm -v "$PWD/sidecar/dist:/out" dhtsearch-lt-sidecar \
-    cp /src/dist/dhtsearch-lt-sidecar /out/
+    cp /src/sidecar/dist/dhtsearch-lt-sidecar /out/
 ```
 
 Or natively on Debian bookworm with the packages from the
