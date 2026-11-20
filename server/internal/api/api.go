@@ -173,6 +173,19 @@ type MetaStatus struct {
 	// (e.g. the libtorrent sidecar died mid-run and has not
 	// recovered): a human-readable explanation for the admin.
 	BackendWarning string `json:"backend_warning,omitempty"`
+	// DHT is the effective backend's own DHT state, present only
+	// when the backend runs one as a peer supply (the libtorrent
+	// sidecar does; the other foundations' fetch clients do not).
+	DHT *BackendDHT `json:"dht,omitempty"`
+}
+
+// BackendDHT is a fetch backend's own DHT state: whether the DHT is
+// running and how many routing-table nodes it knows. A running DHT
+// pinned at zero nodes means its UDP path is blocked — the table
+// populating is the visible proof the peer supply is alive.
+type BackendDHT struct {
+	Running bool `json:"running"`
+	Nodes   int  `json:"nodes"`
 }
 
 // metaStatusInto folds the live MetaStatus into a fetch section map
@@ -188,6 +201,9 @@ func (s *Server) metaStatusInto(fetch map[string]any) {
 	}
 	if ms.BackendWarning != "" {
 		fetch["backend_warning"] = ms.BackendWarning
+	}
+	if ms.DHT != nil {
+		fetch["dht"] = ms.DHT
 	}
 }
 

@@ -3,8 +3,10 @@ package libtorrent
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"io"
 	"log"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -366,9 +368,68 @@ func TestMagnetSuffixParity(t *testing.T) {
 	}
 }
 
+// TestDHTStatusReported: the sidecar's status frames land in
+// Fetcher.DHTStatus — the admin surface's proof that the sidecar's
+// own DHT is running and its routing table populated.
+func TestDHTStatusReported(t *testing.T) {
+	requireFake(t)
+	t.Setenv("FAKE_SIDECAR_MODE", "ok")
+	f, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer f.Close()
+	waitFor(t, "DHT status", func() bool {
+		running, nodes := f.DHTStatus()
+		return running && nodes == 42
+	})
+}
+
+// TestRunQueuePeerHintsForwarded: a queue item's Peers (the #46
+// peer-hint cache contents) must cross the wire as the fetch frame's
+// peer_hints — the libtorrent half of the hint supply the incumbent
+// already consumes.
+func TestRunQueuePeerHintsForwarded(t *testing.T) {
+	requireFake(t)
+	t.Setenv("FAKE_SIDECAR_MODE", "ok")
+	hintsLog := filepath.Join(t.TempDir(), "hints.log")
+	t.Setenv("FAKE_SIDECAR_HINTS_LOG", hintsLog)
+	f, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer f.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q := metadata.NewQueue(0)
+	hints := []netip.AddrPort{
+		netip.MustParseAddrPort("203.0.113.7:6881"),
+		netip.MustParseAddrPort("[2001:db8::9]:51413"),
+	}
+	q.Push(metadata.Item{Hash: testHash, Seeders: -1, Source: metadata.SourceDHT, At: time.Now(), Peers: hints})
+	records := make(chan metadata.Record, 1)
+	f.RunQueue(ctx, q, func(r metadata.Record) { records <- r })
+	select {
+	case <-records:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no record via queue")
+	}
+	raw, err := os.ReadFile(hintsLog)
+	if err != nil {
+		t.Fatalf("read hints log: %v", err)
+	}
+	for _, h := range hints {
+		if !strings.Contains(string(raw), h.String()) {
+			t.Fatalf("hints log %q does not contain %q", raw, h.String())
+		}
+	}
+}
+
 func TestFrameCodec(t *testing.T) {
 	var buf bytes.Buffer
-	in := &frame{Type: "fetch", ID: 42, Magnet: "magnet:?xt=urn:btih:abc", Deadline: 45000, MaxFiles: 50}
+	in := &frame{Type: "fetch", ID: 42, Magnet: "magnet:?xt=urn:btih:abc", Deadline: 45000, MaxFiles: 50,
+		PeerHints: []string{"203.0.113.7:6881", "[2001:db8::9]:51413"}}
 	if err := writeFrame(&buf, in); err != nil {
 		t.Fatalf("writeFrame: %v", err)
 	}
@@ -378,6 +439,39 @@ func TestFrameCodec(t *testing.T) {
 	}
 	if out.Type != in.Type || out.ID != in.ID || out.Magnet != in.Magnet || out.Deadline != in.Deadline || out.MaxFiles != in.MaxFiles {
 		t.Fatalf("roundtrip = %+v, want %+v", out, in)
+	}
+	if len(out.PeerHints) != 2 || out.PeerHints[0] != in.PeerHints[0] || out.PeerHints[1] != in.PeerHints[1] {
+		t.Fatalf("peer hints roundtrip = %v, want %v", out.PeerHints, in.PeerHints)
+	}
+
+	// A fetch frame from an older server (no peer_hints field at
+	// all) must still decode, with no hints.
+	var legacy bytes.Buffer
+	legacy.WriteString(`{"type":"fetch","id":7,"magnet":"magnet:?xt=urn:btih:abc","deadline_ms":45000,"max_files":50}`)
+	var lb bytes.Buffer
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(legacy.Len()))
+	lb.Write(hdr[:])
+	lb.Write(legacy.Bytes())
+	out, err = readFrame(&lb)
+	if err != nil {
+		t.Fatalf("readFrame legacy: %v", err)
+	}
+	if out.ID != 7 || len(out.PeerHints) != 0 {
+		t.Fatalf("legacy frame = %+v", out)
+	}
+
+	// A status frame roundtrips its DHT fields.
+	var sb bytes.Buffer
+	if err := writeFrame(&sb, &frame{Type: "status", DHTRunning: true, DHTNodes: 321}); err != nil {
+		t.Fatalf("writeFrame status: %v", err)
+	}
+	out, err = readFrame(&sb)
+	if err != nil {
+		t.Fatalf("readFrame status: %v", err)
+	}
+	if out.Type != "status" || !out.DHTRunning || out.DHTNodes != 321 {
+		t.Fatalf("status roundtrip = %+v", out)
 	}
 
 	// A corrupt length prefix must be rejected, not allocated.

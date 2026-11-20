@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"sync"
 	"testing"
@@ -147,6 +148,195 @@ func TestRealSidecarLoopbackExchange(t *testing.T) {
 	if fetched, _, _ := f.Stats(); fetched != 1 {
 		t.Fatalf("fetched = %d, want 1", fetched)
 	}
+}
+
+// seedLoopback starts an anacrolix client seeding one torrent's
+// metadata on loopback TCP and returns the client, the torrent's
+// infohash and its info. With trackers nil the seeder announces
+// nowhere: the only way to reach it is to already know its address.
+func seedLoopback(t *testing.T, trackers []string) (*torrent.Client, metainfo.Hash, metainfo.Info) {
+	t.Helper()
+	cfg := torrent.NewDefaultClientConfig()
+	cfg.NoDHT = true
+	cfg.DisableUTP = true
+	cfg.DisableIPv6 = true
+	cfg.ListenHost = func(string) string { return "127.0.0.1" }
+	cfg.DataDir = t.TempDir()
+	seeder, err := torrent.NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { seeder.Close() })
+
+	info := metainfo.Info{
+		Name:        "lt-sidecar-loopback",
+		PieceLength: 16384,
+		Length:      12345,
+		Pieces:      make([]byte, 20),
+	}
+	raw, err := bencode.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := metainfo.HashBytes(raw)
+	spec := &torrent.TorrentSpec{
+		AddTorrentOpts: torrent.AddTorrentOpts{
+			InfoHash:           hash,
+			InfoBytes:          raw,
+			DisallowDataUpload: true,
+		},
+	}
+	if trackers != nil {
+		spec.Trackers = [][]string{trackers}
+	}
+	seedTor, _, err := seeder.AddTorrentSpec(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTor.DownloadAll()
+	return seeder, hash, info
+}
+
+func runQueueOne(t *testing.T, f *libtorrent.Fetcher, it metadata.Item) *metadata.Record {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q := metadata.NewQueue(0)
+	q.Push(it)
+	var mu sync.Mutex
+	var got *metadata.Record
+	f.RunQueue(ctx, q, func(r metadata.Record) {
+		mu.Lock()
+		rec := r
+		got = &rec
+		mu.Unlock()
+	})
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		done := got != nil
+		mu.Unlock()
+		if done {
+			return got
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil
+}
+
+// Hint-only exchange: no tracker anywhere — the seeder announces
+// nowhere and the fetcher's magnet carries no &tr=. The ONLY peer
+// supply is the queue item's peer hint (metadata.Item.Peers, the
+// #46 cache contents), forwarded to the sidecar as the fetch
+// frame's peer_hints. Proves the hint path end to end against the
+// real sidecar.
+func TestRealSidecarHintOnlyExchange(t *testing.T) {
+	sidecar := os.Getenv("DHTSEARCH_LT_SIDECAR")
+	if sidecar == "" {
+		t.Skip("DHTSEARCH_LT_SIDECAR not set; skipping real-sidecar integration test")
+	}
+	seeder, hash, info := seedLoopback(t, nil)
+
+	var hint netip.AddrPort
+	for _, a := range seeder.ListenAddrs() {
+		if ap, err := netip.ParseAddrPort(a.String()); err == nil && ap.Addr().IsLoopback() {
+			hint = ap
+			break
+		}
+	}
+	if !hint.IsValid() {
+		t.Fatalf("seeder has no loopback listen addr: %v", seeder.ListenAddrs())
+	}
+
+	f, err := libtorrent.New(libtorrent.Config{
+		Config: metadata.Config{
+			Workers:          2,
+			Timeout:          30 * time.Second,
+			PrescreenEnabled: true,
+			PrescreenTimeout: 10 * time.Second,
+			Trackers:         nil, // no trackers: the magnet is bare
+			Logger:           log.New(os.Stderr, "lt-test ", 0),
+		},
+		SidecarPath: sidecar,
+	})
+	if err != nil {
+		t.Fatalf("New with real sidecar: %v", err)
+	}
+	defer f.Close()
+
+	got := runQueueOne(t, f, metadata.Item{
+		Hash: hash.HexString(), Seeders: -1, Source: metadata.SourceDHT,
+		At: time.Now(), Peers: []netip.AddrPort{hint},
+	})
+	if got == nil {
+		fetched, timedOut, failed := f.Stats()
+		t.Fatalf("no record via hint-only fetch; stats fetched=%d timedOut=%d failed=%d prescreen=%d",
+			fetched, timedOut, failed, f.PrescreenDropped())
+	}
+	if got.Name != info.Name || got.TotalSize != info.Length || got.FileCount != 1 {
+		t.Fatalf("record = %+v, want name=%q size=%d files=1", *got, info.Name, info.Length)
+	}
+}
+
+// DHT status against the real sidecar: the session's DHT must
+// report itself running through Fetcher.DHTStatus. The routing
+// table's node count is NOT asserted: this sandbox blocks UDP
+// (even loopback sendto is EPERM), so the table cannot populate
+// here — in production the count growing is the visible proof.
+// The trackerless, hintless fetch of an unknown hash must still
+// classify normally (prescreen drop / timeout), never wedge.
+func TestRealSidecarDHTStatus(t *testing.T) {
+	sidecar := os.Getenv("DHTSEARCH_LT_SIDECAR")
+	if sidecar == "" {
+		t.Skip("DHTSEARCH_LT_SIDECAR not set; skipping real-sidecar integration test")
+	}
+	f, err := libtorrent.New(libtorrent.Config{
+		Config: metadata.Config{
+			Workers:          1,
+			Timeout:          8 * time.Second,
+			PrescreenEnabled: true,
+			PrescreenTimeout: 3 * time.Second,
+			Logger:           log.New(os.Stderr, "lt-test ", 0),
+		},
+		SidecarPath: sidecar,
+	})
+	if err != nil {
+		t.Fatalf("New with real sidecar: %v", err)
+	}
+	defer f.Close()
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		running, nodes := f.DHTStatus()
+		if running {
+			t.Logf("sidecar DHT running, nodes=%d (0 expected where UDP is blocked)", nodes)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("sidecar DHT never reported running; last status running=%v nodes=%d", running, nodes)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	in := make(chan string, 1)
+	in <- "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	f.Run(ctx, in, func(r metadata.Record) { t.Errorf("unexpected record %+v", r) })
+	waitDeadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(waitDeadline) {
+		if f.PrescreenDropped() > 0 {
+			return
+		}
+		_, timedOut, _ := f.Stats()
+		if timedOut > 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	fetched, timedOut, failed := f.Stats()
+	t.Fatalf("unknown-hash fetch never classified; fetched=%d timedOut=%d failed=%d prescreen=%d",
+		fetched, timedOut, failed, f.PrescreenDropped())
 }
 
 // toyTracker is the smallest BEP 3 HTTP tracker that can introduce

@@ -72,6 +72,11 @@ type procState struct {
 	mu    sync.Mutex
 	ready bool
 	jobs  map[uint64]*jobHandle
+
+	// Latest DHT status frame from this generation (zero until the
+	// first one arrives, shortly after ready).
+	dhtRunning bool
+	dhtNodes   int
 }
 
 // failAll delivers a terminal error to every pending job. Called once
@@ -339,6 +344,11 @@ func (s *supervisor) readLoop(ps *procState, stdout io.Reader) {
 			s.lastDownErr = ""
 			s.broadcastLocked()
 			s.mu.Unlock()
+		case "status":
+			ps.mu.Lock()
+			ps.dhtRunning = f.DHTRunning
+			ps.dhtNodes = f.DHTNodes
+			ps.mu.Unlock()
 		case "peers":
 			if j := ps.lookup(f.ID); j != nil {
 				select {
@@ -369,10 +379,32 @@ func (p *procState) lookup(id uint64) *jobHandle {
 	return p.jobs[id]
 }
 
+// dhtStatus reports the running generation's latest DHT status
+// frame: whether the sidecar session's DHT is running and how many
+// routing-table nodes it knows. (false, 0) while no generation is
+// ready or none has reported yet — a fresh generation reports within
+// a couple of seconds of ready.
+func (s *supervisor) dhtStatus() (bool, int) {
+	s.mu.Lock()
+	ps := s.proc
+	s.mu.Unlock()
+	if ps == nil {
+		return false, 0
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if !ps.ready {
+		return false, 0
+	}
+	return ps.dhtRunning, ps.dhtNodes
+}
+
 // submit registers a fetch job with the running sidecar and returns
 // its event handle. It waits briefly for a ready process (see
-// readyTimeout) and errors out if none is available.
-func (s *supervisor) submit(ctx context.Context, magnet string, deadline time.Duration, maxFiles int) (uint64, *jobHandle, error) {
+// readyTimeout) and errors out if none is available. peerHints are
+// "host:port" addresses sent with the job for the sidecar to connect
+// alongside its tracker/PEX/DHT supply (may be nil).
+func (s *supervisor) submit(ctx context.Context, magnet string, deadline time.Duration, maxFiles int, peerHints []string) (uint64, *jobHandle, error) {
 	deadlineTimer := time.NewTimer(readyTimeout)
 	defer deadlineTimer.Stop()
 	for {
@@ -399,11 +431,12 @@ func (s *supervisor) submit(ctx context.Context, magnet string, deadline time.Du
 				ps.jobs[id] = j
 				ps.mu.Unlock()
 				err := ps.write(&frame{
-					Type:     "fetch",
-					ID:       id,
-					Magnet:   magnet,
-					Deadline: deadline.Milliseconds(),
-					MaxFiles: maxFiles,
+					Type:      "fetch",
+					ID:        id,
+					Magnet:    magnet,
+					Deadline:  deadline.Milliseconds(),
+					MaxFiles:  maxFiles,
+					PeerHints: peerHints,
 				})
 				if err != nil {
 					ps.mu.Lock()

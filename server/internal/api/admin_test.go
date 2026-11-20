@@ -95,7 +95,8 @@ func TestFetchBackendSurfaced(t *testing.T) {
 	srv := httptest.NewServer(New(st, nil, nil, Options{
 		AdminToken: testAdminToken,
 		MetaStatus: func() MetaStatus {
-			return MetaStatus{QueueDepth: 7, Backend: "anacrolix", BackendWarning: warning}
+			return MetaStatus{QueueDepth: 7, Backend: "anacrolix", BackendWarning: warning,
+				DHT: &BackendDHT{Running: true, Nodes: 321}}
 		},
 	}).Handler())
 	t.Cleanup(srv.Close)
@@ -112,6 +113,10 @@ func TestFetchBackendSurfaced(t *testing.T) {
 		if fetch["queue_depth"].(float64) != 7 {
 			t.Fatalf("%s queue_depth = %v", path, fetch["queue_depth"])
 		}
+		dht, _ := fetch["dht"].(map[string]any)
+		if dht["running"] != true || dht["nodes"].(float64) != 321 {
+			t.Fatalf("%s dht = %v, want running + 321 nodes surfaced", path, fetch["dht"])
+		}
 	}
 
 	// Without a MetaStatus provider the keys stay absent (the
@@ -124,6 +129,9 @@ func TestFetchBackendSurfaced(t *testing.T) {
 	}
 	if _, ok := fetch["queue_depth"]; ok {
 		t.Fatalf("queue_depth key present without MetaStatus: %v", fetch)
+	}
+	if _, ok := fetch["dht"]; ok {
+		t.Fatalf("dht key present without MetaStatus: %v", fetch)
 	}
 }
 

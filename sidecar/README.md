@@ -13,10 +13,13 @@ selecting the foundation is an explicit operator choice and is never
 silently downgraded.
 
 Inside is one libtorrent-rasterbar 2.x session configured for
-metadata-only crawling: DHT/LSD/UPnP/NAT-PMP off, every torrent in
-`upload_mode` (no piece requests ever), removed the moment its
-metadata lands. Peer supply is the magnet's tracker list + PEX —
-identical inputs to the anacrolix fetcher.
+metadata-only crawling: every torrent in `upload_mode` (no piece
+requests ever), removed the moment its metadata lands. Peer supply
+is the magnet's tracker list + PEX, the session's own DHT
+(get_peers; LSD/UPnP/NAT-PMP stay off) and the per-fetch peer hints
+the Go side forwards from its peer-hint cache — the same supplies
+the anacrolix fetcher combines. The session listens on OS-assigned
+ports, so its DHT can never collide with the crawler's DHT ports.
 
 ## Building
 
