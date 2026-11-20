@@ -9,7 +9,7 @@ export default function SearchLoading() {
   return (
     <main
       data-search-shell
-      className="mx-auto flex w-full max-w-3xl min-h-0 flex-1 flex-col px-4 py-6"
+      className="mx-auto flex w-full max-w-3xl min-h-0 flex-1 flex-col px-4 py-6 xl:max-w-[1120px]"
     >
       <div className="flex items-center gap-4" aria-hidden>
         <div className="h-7 w-28 shrink-0 animate-pulse rounded-md bg-soft" />
