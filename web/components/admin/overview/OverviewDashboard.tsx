@@ -405,45 +405,45 @@ export default function OverviewDashboard({
             ]}
           />
         </Panel>
+      </div>
 
       {/* Latest ingested stream: last, it is a feed, not a status. */}
       <div className="mt-4 [&>*]:min-w-0">
-          <Panel
-            title="最新入库"
-            action={
-              <span className="inline-flex items-center gap-1.5 text-xs text-faint">
-                <span className="anim-live-dot h-1.5 w-1.5 rounded-full bg-accent" />
-                实时
-              </span>
-            }
-          >
-            {latest.length === 0 ? (
-              <p className="py-6 text-center text-sm text-faint">暂无数据</p>
-            ) : (
-              <ul className="-my-1 sm:grid sm:grid-cols-2 sm:gap-x-8">
-                {latest.map((it) => (
-                  <li
-                    key={it.info_hash}
-                    className={fresh.has(it.info_hash) ? "anim-rise-in" : undefined}
+        <Panel
+          title="最新入库"
+          action={
+            <span className="inline-flex items-center gap-1.5 text-xs text-faint">
+              <span className="anim-live-dot h-1.5 w-1.5 rounded-full bg-accent" />
+              实时
+            </span>
+          }
+        >
+          {latest.length === 0 ? (
+            <p className="py-6 text-center text-sm text-faint">暂无数据</p>
+          ) : (
+            <ul className="-my-1 sm:grid sm:grid-cols-2 sm:gap-x-8">
+              {latest.map((it) => (
+                <li
+                  key={it.info_hash}
+                  className={fresh.has(it.info_hash) ? "anim-rise-in" : undefined}
+                >
+                  <Link
+                    href={`/admin/torrents/${it.info_hash}`}
+                    className="block py-2"
                   >
-                    <Link
-                      href={`/admin/torrents/${it.info_hash}`}
-                      className="block py-2"
-                    >
-                      <span className="block truncate text-sm text-ink-2 transition-colors hover:text-accent-ink">
-                        {it.name || it.raw_name}
-                      </span>
-                      <span className="mt-0.5 block text-xs tabular-nums text-faint">
-                        {formatRelativeTime(it.created_at)} ·{" "}
-                        {formatSize(it.total_size)} · {it.file_count} 个文件
-                      </span>
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Panel>
-      </div>
+                    <span className="block truncate text-sm text-ink-2 transition-colors hover:text-accent-ink">
+                      {it.name || it.raw_name}
+                    </span>
+                    <span className="mt-0.5 block text-xs tabular-nums text-faint">
+                      {formatRelativeTime(it.created_at)} ·{" "}
+                      {formatSize(it.total_size)} · {it.file_count} 个文件
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Panel>
       </div>
     </div>
   );
