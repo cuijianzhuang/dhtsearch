@@ -105,6 +105,15 @@ for f in .next/BUILD_ID .next/required-server-files.json; do
     test -f "$STAGE_DIR/web/$f" || { echo "release package would be broken: web/$f missing from standalone build" >&2; exit 1; }
 done
 
+# Optional: bundle the libtorrent sidecar when a local build exists
+# (sidecar/dist, see sidecar/build.sh). Release CI ships the sidecar
+# as a separate per-arch asset instead, and install.sh fetches it
+# alongside the package; bundling here only serves source builds.
+if [ -f "$ROOT_DIR/sidecar/dist/dhtsearch-lt-sidecar" ]; then
+    cp "$ROOT_DIR/sidecar/dist/dhtsearch-lt-sidecar" "$STAGE_DIR/dhtsearch-lt-sidecar"
+    chmod 755 "$STAGE_DIR/dhtsearch-lt-sidecar"
+    echo "Bundled libtorrent sidecar from sidecar/dist"
+fi
 cp "$ROOT_DIR/env.example" "$STAGE_DIR/env.example"
 cp "$ROOT_DIR/scripts/install.sh" "$STAGE_DIR/install.sh"
 cp "$ROOT_DIR/LICENSE" "$STAGE_DIR/LICENSE"

@@ -255,3 +255,17 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
+
+  # The libtorrent sidecar is an optional extra release asset. It is
+  # deliberately NOT in the package/publish dependency chain and is
+  # allowed to fail: a release without the sidecar asset is complete
+  # for the default foundations, and install.sh copes with its
+  # absence. It runs as its own workflow so the (slow, ~10-25 min per
+  # arch) C++ build never delays the Go artifacts.
+  sidecar:
+    name: Libtorrent sidecar (optional asset)
+    uses: ./.github/workflows/sidecar.yml
+    continue-on-error: true
+    with:
+      upload_to_release: ${{ github.ref_type == 'tag' || inputs.publish }}
+      version: ${{ inputs.version || github.ref_name }}
