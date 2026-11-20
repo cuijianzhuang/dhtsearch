@@ -179,7 +179,12 @@ Commands:
   install              download a release package and install (idempotent)
   upgrade              like install, but back up the old binary/web/env
                        first and roll back automatically if the health
-                       check fails
+                       check fails. When the target version is the one
+                       already installed, upgrade is a no-op: it reports
+                       已是最新版本 and exits 0 without downloading,
+                       backing up or restarting anything. A target older
+                       than the installed version is refused (no
+                       downgrades)
   uninstall            stop services and remove binary/web/units (and
                        the auto-update timer); config and data are kept
                        unless --purge is given
@@ -883,6 +888,33 @@ normalize_version() {
     case "$v" in v*) echo "$v" ;; *) echo "v$v" ;; esac
 }
 
+# version_is_release V — V is a plain vX.Y.Z release version (the
+# only shape GitHub releases of this project ever carry). Anything
+# else ("unknown", "local", "dev-<sha>") has no meaningful ordering.
+version_is_release() {
+    [[ "$1" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+# version_cmp A B — print -1, 0 or 1 as A is older than, equal to or
+# newer than B. Fields are compared numerically (v0.1.9 < v0.1.10);
+# a leading v is ignored and missing fields count as 0.
+version_cmp() {
+    local a="${1#v}" b="${2#v}" i x y
+    for i in 1 2 3; do
+        x="${a%%.*}"; y="${b%%.*}"
+        case "$a" in *.*) a="${a#*.}" ;; *) a="" ;; esac
+        case "$b" in *.*) b="${b#*.}" ;; *) b="" ;; esac
+        x="${x%%[!0-9]*}"; y="${y%%[!0-9]*}"
+        # Strip leading zeros so the -gt/-lt below stay decimal.
+        x="${x#"${x%%[!0]*}"}"; y="${y#"${y%%[!0]*}"}"
+        [ -n "$x" ] || x=0
+        [ -n "$y" ] || y=0
+        if [ "$x" -gt "$y" ]; then echo 1; return 0; fi
+        if [ "$x" -lt "$y" ]; then echo -1; return 0; fi
+    done
+    echo 0
+}
+
 resolve_latest_version() {
     local tag
     tag="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
@@ -1520,9 +1552,18 @@ do_upgrade_request() {
     finished="$(date '+%Y-%m-%d %H:%M:%S')"
     to="$(installed_version)"
     if [ "$rc" = "0" ]; then
-        write_update_status "succeeded" "$rid" "$rat" "$started" "$finished" "$from" "$to" \
-            "upgraded $from -> $to"
-        log "upgrade-request: succeeded ($from -> $to)"
+        if grep -q "无需升级" "$logf"; then
+            # The version gate found nothing to do: a completed
+            # no-op, reported as success — never as a failure and
+            # never left looking like a pending request.
+            write_update_status "succeeded" "$rid" "$rat" "$started" "$finished" "$from" "$to" \
+                "已是最新版本 $to，无需升级"
+            log "upgrade-request: already up to date ($to); nothing to do"
+        else
+            write_update_status "succeeded" "$rid" "$rat" "$started" "$finished" "$from" "$to" \
+                "upgraded $from -> $to"
+            log "upgrade-request: succeeded ($from -> $to)"
+        fi
     else
         tail_msg="$(tail -n 3 "$logf" | tr '\n' ' ')"
         write_update_status "failed" "$rid" "$rat" "$started" "$finished" "$from" "$to" \
@@ -1592,6 +1633,60 @@ do_install() {
     log "Manage: run 'dhtsearch' for the interactive menu"
 }
 
+# upgrade_version_gate — decide, before anything is downloaded,
+# backed up or restarted, whether this upgrade has anything to do.
+# A no-change upgrade otherwise restarts both services for nothing,
+# and a stop that gets interrupted mid-upgrade has left both services
+# down before — pointless restarts are a real risk, not a nit.
+#
+# Returns 0 to proceed with the upgrade, 1 when the target is the
+# version already installed (the caller then returns success, having
+# touched nothing). Dies when the target is OLDER than the installed
+# version (upgrades never downgrade; there is deliberately no force
+# flag — reinstall via uninstall + install instead) or when the
+# latest version cannot be resolved at all.
+#
+# Target resolution mirrors obtain_package: --version wins, then the
+# version parsed out of a --file tarball's name, then the latest
+# release (via the same quiet lookup check-update uses — no second
+# network path). --from-source builds carry no comparable version,
+# and installs recorded as "unknown" / "local" / "dev-*" have no
+# ordering either; both bypass the gate with a note.
+upgrade_version_gate() {
+    local cur target cmp
+    cur="$(installed_version)"
+    if [ "$FROM_SOURCE" -eq 1 ]; then
+        echo "提示：--from-source 构建没有可比较的版本号，继续执行升级流程。"
+        return 0
+    fi
+    if [ -n "$LOCAL_FILE" ]; then
+        # Sets FILE_VERSION; dies on an unreadable package, exactly
+        # as the validate_inputs call later in do_upgrade would.
+        validate_local_file
+        target="${VERSION:-$FILE_VERSION}"
+    elif [ -n "$VERSION" ]; then
+        target="$VERSION"
+    else
+        target="$(resolve_latest_version_quiet)"
+        [ -n "$target" ] || die "无法查询最新版本（网络不可用或 GitHub API 无响应），已停止升级；请稍后重试，或用 --version 指定目标版本"
+    fi
+    [ -n "$target" ] && target="$(normalize_version "$target")"
+    if ! version_is_release "$cur" || ! version_is_release "$target"; then
+        echo "提示：当前版本 ${cur} / 目标版本 ${target:-未知} 不是标准版本号，无法比较，继续执行升级流程。"
+        return 0
+    fi
+    cmp="$(version_cmp "$target" "$cur")"
+    if [ "$cmp" = "0" ]; then
+        echo "已是最新版本 $target，无需升级。"
+        return 1
+    fi
+    if [ "$cmp" = "-1" ]; then
+        die "目标版本 $target 低于当前版本 $cur，已停止：升级不会降级（先 uninstall 再 install 可装回旧版本）"
+    fi
+    log "升级：$cur -> $target"
+    return 0
+}
+
 do_upgrade() {
     require_root
     if [ "$CHECK_OPT" = "1" ]; then
@@ -1604,6 +1699,14 @@ do_upgrade() {
     if [ -n "$DB_OPT" ]; then
         warn "--db is ignored by upgrade: the database backend is never changed here. Use the dhtsearch menu (数据库切换) to switch, which also migrates the data."
         DB_OPT=""
+    fi
+    # Version gate: same-or-older target means no download, no
+    # backup, no service restart — return success right here.
+    if ! upgrade_version_gate; then
+        if [ "${DHTSEARCH_AUTO_UPDATE:-0}" = "1" ]; then
+            au_record "up-to-date $(installed_version)"
+        fi
+        return 0
     fi
     # Never let a database resolution from an earlier action in the
     # same (menu) process leak into upgrade's config rewrite.
