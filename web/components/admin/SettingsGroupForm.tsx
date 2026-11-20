@@ -1,18 +1,22 @@
 "use client";
 
-// The admin settings form. Renders every configuration item the Go
-// backend's settings registry exposes, grouped; startup items arrive
-// read-only, runtime items are editable. Saving goes through the
-// /api/admin-action proxy (the token never reaches the browser) and
-// the backend validates the whole batch atomically — the per-key
-// errors it returns are shown under the offending fields.
+// One settings group's form, on its own page (/admin/settings/<key>).
+// Renders just this group's items from the Go backend's settings
+// registry; startup items arrive read-only, runtime items are
+// editable. Saving goes through the /api/admin-action proxy (the
+// token never reaches the browser) with ONLY this group's dirty
+// keys — the backend applies updates per key and validates the
+// batch atomically, so a per-group save is the same contract the
+// old all-groups page used when it posted its dirty subset. The
+// per-key errors the backend returns are shown under the offending
+// fields.
 //
 // Value handling mirrors the registry's canonical forms: everything
 // is a string; lists are edited one-per-line and joined with commas;
 // secrets start empty and are only sent when typed into (an empty
 // secret field means "leave unchanged", never "clear").
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { AdminSettingItem, AdminSettingsGroup } from "@/lib/admin";
@@ -79,12 +83,10 @@ function canonicalValue(item: AdminSettingItem, field: string): string {
   return field.trim();
 }
 
-function initFields(groups: AdminSettingsGroup[]) {
+function initFields(group: AdminSettingsGroup) {
   const values: Record<string, string> = {};
-  for (const g of groups) {
-    for (const it of g.items) {
-      if (it.editable && !it.sensitive) values[it.key] = displayValue(it);
-    }
+  for (const it of group.items) {
+    if (it.editable && !it.sensitive) values[it.key] = displayValue(it);
   }
   return values;
 }
@@ -104,13 +106,13 @@ function SourceBadge({ source }: { source: AdminSettingItem["source"] }) {
   );
 }
 
-export default function SettingsForm({
-  groups,
+export default function SettingsGroupForm({
+  group,
 }: {
-  groups: AdminSettingsGroup[];
+  group: AdminSettingsGroup;
 }) {
   const router = useRouter();
-  const items = useMemo(() => groups.flatMap((g) => g.items), [groups]);
+  const items = group.items;
   const itemByKey = useMemo(() => {
     const m = new Map<string, AdminSettingItem>();
     for (const it of items) m.set(it.key, it);
@@ -118,7 +120,7 @@ export default function SettingsForm({
   }, [items]);
 
   const [fields, setFields] = useState<Record<string, string>>(() =>
-    initFields(groups)
+    initFields(group)
   );
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -130,50 +132,16 @@ export default function SettingsForm({
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // Long-page relief: with a dozen groups and 65 items, the page is
-  // several viewports tall. Groups collapse (header click), and a
-  // group index — a sticky rail on desktop, a sticky chip bar on
-  // mobile — jumps to a group and highlights the one in view.
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
-  const [activeGroup, setActiveGroup] = useState(groups[0]?.key ?? "");
-
-  function toggleGroup(key: string) {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }
-
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const e of entries) {
-          if (e.isIntersecting) {
-            setActiveGroup(e.target.id.replace("settings-group-", ""));
-          }
-        }
-      },
-      { rootMargin: "-10% 0px -75% 0px" }
-    );
-    for (const g of groups) {
-      const el = document.getElementById(`settings-group-${g.key}`);
-      if (el) observer.observe(el);
-    }
-    return () => observer.disconnect();
-  }, [groups]);
-
   // After a save, router.refresh() delivers fresh props (new sources
   // and effective values); resync the fields from them while keeping
   // the feedback banner that explains what just happened. This is
   // React's "adjust state when a prop changes" pattern: the setState
   // calls run during render, before anything commits.
-  const propSig = useMemo(() => JSON.stringify(groups), [groups]);
+  const propSig = useMemo(() => JSON.stringify(group), [group]);
   const [seenSig, setSeenSig] = useState(propSig);
   if (seenSig !== propSig) {
     setSeenSig(propSig);
-    setFields(initFields(groups));
+    setFields(initFields(group));
     setSecrets({});
     setErrors({});
   }
@@ -404,16 +372,36 @@ export default function SettingsForm({
     );
   }
 
+  // The moderation group's items are edited on the dedicated LLM
+  // page (the backend registry is shared); this group's page is the
+  // same pointer the old all-in-one page rendered, with no form and
+  // no save bar.
+  if (group.key === "moderation") {
+    return (
+      <section className="rounded-xl border border-line bg-surface shadow-card">
+        <h2 className="border-b border-line-2 px-4 py-3 text-sm font-semibold text-ink">
+          {group.label}
+          <span className="ml-2 text-xs font-normal text-faint">
+            {group.items.length} 项
+          </span>
+        </h2>
+        <div className="px-4 py-4">
+          <p className="text-sm leading-relaxed text-mute">
+            审核开关、模型、API Key、审核队列与最近记录已独立成专页，在那里统一修改，避免两处编辑同一批配置。
+          </p>
+          <Link
+            href="/admin/llm"
+            className="mt-3 inline-flex min-h-11 items-center rounded-lg bg-accent px-4 text-sm font-medium text-on-accent transition-colors hover:bg-accent-hover"
+          >
+            打开 LLM 审核页
+          </Link>
+        </div>
+      </section>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-lg font-semibold text-ink">设置</h1>
-        <p className="mt-1 text-sm text-mute">
-          标「数据库」的项是管理端保存的覆盖值，优先于环境变量；改动按每项标注即时生效或需重启。启动配置只能查看，修改请编辑
-          /etc/dhtsearch/dhtsearch.env 后重启服务。
-        </p>
-      </div>
-
       {feedback && (
         <div className="flex flex-col gap-2">
           {feedback.applied.length > 0 && (
@@ -447,161 +435,66 @@ export default function SettingsForm({
         </p>
       )}
 
-      <div className="flex items-start gap-6">
-        {/* Group index, desktop: a sticky rail. */}
-        <nav
-          aria-label="设置分组"
-          className="sticky top-4 hidden w-40 shrink-0 lg:block"
-        >
-          <ul className="space-y-1">
-            {groups.map((g) => (
-              <li key={g.key}>
-                <a
-                  href={`#settings-group-${g.key}`}
-                  aria-current={activeGroup === g.key ? "true" : undefined}
-                  className={`flex min-h-9 items-center justify-between gap-2 rounded-lg px-3 text-sm transition-colors ${
-                    activeGroup === g.key
-                      ? "bg-accent-soft font-medium text-accent-ink"
-                      : "text-mute hover:bg-soft hover:text-accent-ink"
-                  }`}
-                >
-                  <span className="min-w-0 truncate">{g.label}</span>
-                  <span className="shrink-0 text-xs tabular-nums opacity-70">
-                    {g.items.length}
-                  </span>
-                </a>
-              </li>
-            ))}
-          </ul>
-        </nav>
-
-        <div className="flex min-w-0 flex-1 flex-col gap-6">
-          {/* Group index, mobile: a sticky horizontal chip bar. */}
-          <nav
-            aria-label="设置分组"
-            className="sticky top-2 z-20 flex gap-2 overflow-x-auto rounded-xl border border-line bg-surface p-2 shadow-card lg:hidden"
-          >
-            {groups.map((g) => (
-              <a
-                key={g.key}
-                href={`#settings-group-${g.key}`}
-                aria-current={activeGroup === g.key ? "true" : undefined}
-                className={`inline-flex min-h-9 shrink-0 items-center rounded-lg px-3 text-sm whitespace-nowrap transition-colors ${
-                  activeGroup === g.key
-                    ? "bg-accent-soft font-medium text-accent-ink"
-                    : "text-mute hover:text-accent-ink"
-                }`}
-              >
-                {g.label}
-              </a>
-            ))}
-          </nav>
-
-      {groups.map((group) => (
-        <section
-          key={group.key}
-          id={`settings-group-${group.key}`}
-          className="scroll-mt-20 rounded-xl border border-line bg-surface shadow-card lg:scroll-mt-4"
-        >
-          <h2 className="border-b border-line-2 text-sm font-semibold text-ink">
-            <button
-              type="button"
-              onClick={() => toggleGroup(group.key)}
-              aria-expanded={!collapsed.has(group.key)}
-              className="flex w-full items-center gap-2 px-4 py-3 text-left"
+      <section className="rounded-xl border border-line bg-surface shadow-card">
+        <h2 className="flex items-center gap-2 border-b border-line-2 px-4 py-3 text-sm font-semibold text-ink">
+          <span className="min-w-0 flex-1">
+            {group.label}
+            {group.key === "service" && (
+              <span className="ml-2 text-xs font-normal text-faint">
+                只读 · 在 env 文件里改，重启生效
+              </span>
+            )}
+          </span>
+          <span className="shrink-0 text-xs font-normal text-faint">
+            {group.items.length} 项
+          </span>
+        </h2>
+        {group.key === "auth" && <AuthCallbackInfo />}
+        <div className="divide-y divide-line-2">
+          {group.items.map((item) => (
+            <div
+              key={item.key}
+              className="grid gap-2 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-4"
             >
-              <span className="min-w-0 flex-1">
-                {group.label}
-                {group.key === "service" && (
-                  <span className="ml-2 text-xs font-normal text-faint">
-                    只读 · 在 env 文件里改，重启生效
-                  </span>
+              <div className="min-w-0">
+                <p className="flex flex-wrap items-center gap-2 text-sm font-medium text-ink">
+                  {item.label}
+                  <SourceBadge source={item.source} />
+                  {item.restart && item.editable && (
+                    <span className="rounded-md border border-line px-1.5 py-0.5 text-[11px] text-warn-ink">
+                      需重启
+                    </span>
+                  )}
+                  {item.source === "db" && item.editable && (
+                    <button
+                      type="button"
+                      onClick={() => resetOverride(item)}
+                      disabled={saving}
+                      className="text-[11px] text-mute underline decoration-dotted hover:text-accent-ink disabled:opacity-50"
+                    >
+                      恢复默认
+                    </button>
+                  )}
+                </p>
+                <p className="mt-0.5 font-mono text-[11px] text-faint">
+                  {item.key}
+                </p>
+                {item.desc && (
+                  <p className="mt-1 text-xs leading-relaxed text-mute">
+                    {item.desc}
+                  </p>
                 )}
-              </span>
-              <span className="shrink-0 text-xs font-normal text-faint">
-                {group.items.length} 项
-              </span>
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className={`h-4 w-4 shrink-0 text-faint transition-transform ${
-                  collapsed.has(group.key) ? "-rotate-90" : ""
-                }`}
-                aria-hidden
-              >
-                <path d="m6 9 6 6 6-6" />
-              </svg>
-            </button>
-          </h2>
-          {!collapsed.has(group.key) && (
-            <>
-          {group.key === "auth" && <AuthCallbackInfo />}
-          {group.key === "moderation" ? (
-            <div className="px-4 py-4">
-              <p className="text-sm leading-relaxed text-mute">
-                审核开关、模型、API Key、审核队列与最近记录已独立成专页，在那里统一修改，避免两处编辑同一批配置。
-              </p>
-              <Link
-                href="/admin/llm"
-                className="mt-3 inline-flex min-h-11 items-center rounded-lg bg-accent px-4 text-sm font-medium text-on-accent transition-colors hover:bg-accent-hover"
-              >
-                打开 LLM 审核页
-              </Link>
-            </div>
-          ) : (
-          <div className="divide-y divide-line-2">
-            {group.items.map((item) => (
-              <div
-                key={item.key}
-                className="grid gap-2 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-4"
-              >
-                <div className="min-w-0">
-                  <p className="flex flex-wrap items-center gap-2 text-sm font-medium text-ink">
-                    {item.label}
-                    <SourceBadge source={item.source} />
-                    {item.restart && item.editable && (
-                      <span className="rounded-md border border-line px-1.5 py-0.5 text-[11px] text-warn-ink">
-                        需重启
-                      </span>
-                    )}
-                    {item.source === "db" && item.editable && (
-                      <button
-                        type="button"
-                        onClick={() => resetOverride(item)}
-                        disabled={saving}
-                        className="text-[11px] text-mute underline decoration-dotted hover:text-accent-ink disabled:opacity-50"
-                      >
-                        恢复默认
-                      </button>
-                    )}
+                {errors[item.key] && (
+                  <p className="mt-1 text-xs text-warn-ink">
+                    {errors[item.key]}
                   </p>
-                  <p className="mt-0.5 font-mono text-[11px] text-faint">
-                    {item.key}
-                  </p>
-                  {item.desc && (
-                    <p className="mt-1 text-xs leading-relaxed text-mute">
-                      {item.desc}
-                    </p>
-                  )}
-                  {errors[item.key] && (
-                    <p className="mt-1 text-xs text-warn-ink">
-                      {errors[item.key]}
-                    </p>
-                  )}
-                </div>
-                <div className="sm:justify-self-end">{renderControl(item)}</div>
+                )}
               </div>
-            ))}
-          </div>
-          )}
-            </>
-          )}
-        </section>
-      ))}
+              <div className="sm:justify-self-end">{renderControl(item)}</div>
+            </div>
+          ))}
+        </div>
+      </section>
 
       <div className="sticky bottom-4 flex items-center justify-end gap-3 rounded-xl border border-line bg-surface px-4 py-3 shadow-bar">
         <span className="text-sm text-mute">
@@ -615,8 +508,6 @@ export default function SettingsForm({
         >
           {saving ? "保存中…" : "保存设置"}
         </button>
-      </div>
-        </div>
       </div>
       {/* Offset clears this page's own sticky save bar. */}
       <BackToTop bottomClass="bottom-24" />

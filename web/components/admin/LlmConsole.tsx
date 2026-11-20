@@ -85,7 +85,7 @@ export default function LlmConsole({
   const [saving, setSaving] = useState(false);
 
   // Resync from fresh props after a save (router.refresh), same
-  // render-time adjustment pattern as SettingsForm.
+  // render-time adjustment pattern as SettingsGroupForm.
   const propSig = useMemo(() => JSON.stringify(items), [items]);
   const [seenSig, setSeenSig] = useState(propSig);
   if (seenSig !== propSig) {
