@@ -328,19 +328,7 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 		f.count(&f.failed)
 		return rec, false
 	}
-	rec.Name = info.BestName()
-	rec.TotalSize = info.TotalLength()
-	files := info.UpvertedFiles()
-	rec.FileCount = len(files)
-	if n := len(files); n > f.cfg.MaxFiles {
-		files = files[:f.cfg.MaxFiles]
-	}
-	for _, fi := range files {
-		rec.Files = append(rec.Files, filter.File{
-			Path: fi.DisplayPath(info),
-			Size: fi.Length,
-		})
-	}
+	rec = RecordFromInfo(info, hexHash, f.cfg.MaxFiles)
 	f.count(&f.fetched)
 	return rec, true
 }
