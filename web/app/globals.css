@@ -187,6 +187,69 @@
   }
 }
 
+/* Admin overview pipeline flow (components/admin/overview/PipelineFlow.tsx).
+   A dot is painted at the trailing edge of a full-track span; sliding
+   the span from -100% to 0 carries the dot across the whole track with
+   transform only — no layout, no per-frame JS. The dashboard sets
+   animation-duration/delay inline from the poll-delta tier; a stage
+   with a zero delta renders no dots at all (visibly still), and the
+   .flow-paused wrapper freezes every dot when the data goes stale.
+   Under reduced motion the dots are not shown: the diagram stays as
+   static boxes with live counters. */
+@keyframes flow-x {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes flow-y {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+.flow-dot {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+.flow-dot-x {
+  background: radial-gradient(
+    circle at calc(100% - 4px) 50%,
+    var(--pri) 0 2.5px,
+    transparent 3.5px
+  );
+  animation-name: flow-x;
+}
+
+.flow-dot-y {
+  background: radial-gradient(
+    circle at 50% calc(100% - 4px),
+    var(--pri) 0 2.5px,
+    transparent 3.5px
+  );
+  animation-name: flow-y;
+}
+
+.flow-paused .flow-dot {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-dot {
+    display: none;
+  }
+}
+
 /* Admin sidebar (left side, components/admin/AdminShellClient.tsx).
    The desktop width and the collapsed icon-rail state live here
    because the state is an attribute on <html> restored before first
