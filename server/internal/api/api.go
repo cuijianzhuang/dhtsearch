@@ -145,6 +145,10 @@ type CrawlerStatus struct {
 	AvgNodeScore  float64 `json:"avg_node_score"`
 	BannedNodes   int     `json:"banned_nodes"`
 	RestoredNodes int     `json:"restored_nodes"`
+	// Identities is how many DHT node identities the crawler runs
+	// (1 = the historical single node). The sampler and node-quality
+	// fields above aggregate across all identities.
+	Identities int `json:"identities"`
 	// Stall watchdog (internal/watchdog): Watchdog is ok, stalled
 	// (discovery moving, ingest frozen), frozen (both frozen) or
 	// disabled; WatchdogSince is the unix time the current non-ok

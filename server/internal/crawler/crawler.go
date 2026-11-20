@@ -1,12 +1,21 @@
 // Package crawler runs a DHT node that passively observes get_peers,
 // announce_peer and sample_infohashes traffic (BEP 5 / BEP 51) to discover
 // infohashes, and actively queries known nodes to expand coverage.
+//
+// A crawler can run several DHT identities at once (Config.Identities).
+// One identity only ever samples the neighbourhood of its own routing
+// table, so a single node ID caps BEP 51 coverage no matter how many
+// sampler workers it runs; extra identities — each with its own node
+// ID, routing table and node-quality tracker — sit in different parts
+// of the ID space and widen the net. All identities feed the same
+// deduplicated harvest channel.
 package crawler
 
 import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"net"
 	"sort"
@@ -41,6 +50,13 @@ const (
 	nodeQueueSize   = 8192
 	nodeTrackMax    = 1 << 16 // addresses remembered for resample scheduling
 
+	// maxIdentities bounds Config.Identities. Each identity is a full
+	// DHT server with its own socket and table maintenance, so the cap
+	// keeps a typo'd setting from turning into hundreds of servers;
+	// 16 already covers the ID space far past the point of diminishing
+	// returns for a single host.
+	maxIdentities = 16
+
 	// BEP 51 lets a node advertise how often its sample set is worth
 	// re-reading. Clamp it: some nodes report absurd values, and a node we
 	// never revisit is a node whose new torrents we never see.
@@ -67,45 +83,64 @@ const (
 
 // Config controls the crawler.
 type Config struct {
-	// Port is the UDP listen port; 0 picks a random one.
+	// Port is the UDP listen port; 0 picks a random one. With more
+	// than one identity, identity i listens on Port+i (Port=0 keeps
+	// every identity on its own random port).
 	Port int
 	// Enabled=false disables the crawler entirely (offline environments).
 	Enabled bool
-	// Samplers is the number of concurrent BEP 51 sampling workers.
+	// Samplers is the number of concurrent BEP 51 sampling workers
+	// per identity, so the total is Samplers × Identities.
 	// 0 selects defaultSamplers.
 	Samplers int
+	// Identities is how many DHT node identities to run. Each is a
+	// full DHT server with its own random node ID, UDP port, routing
+	// table and node-quality tracker, all feeding the same harvest
+	// channel. 0 or 1 selects a single identity — exactly the
+	// historical behaviour; the value is clamped to [1, maxIdentities].
+	Identities int
 	// Logger, nil for log.Default().
 	Logger *log.Logger
 	// LoadSeedNodes, when non-nil, supplies node-quality state saved
-	// by a previous run. The restored nodes seed the quality tracker
-	// and join the bootstrap set (the public routers stay as fallback:
-	// if every restored node is dead by now, bootstrap must still
-	// work). Nil disables node persistence.
+	// by a previous run. The restored nodes seed every identity's
+	// quality tracker and join every identity's bootstrap set (the
+	// public routers stay as fallback: if every restored node is dead
+	// by now, bootstrap must still work). Nil disables node persistence.
 	LoadSeedNodes func(ctx context.Context) ([]PersistedNode, error)
-	// SaveSeedNodes, when non-nil, receives the current top-quality
-	// nodes every nodePersistInterval and once more at Close. Nil
-	// disables node persistence.
+	// SaveSeedNodes, when non-nil, receives the merged top-quality
+	// nodes of all identities every nodePersistInterval and once more
+	// at Close. Nil disables node persistence.
 	SaveSeedNodes func(ctx context.Context, nodes []PersistedNode) error
 }
 
-// Crawler is a running (or disabled) DHT crawler.
-type Crawler struct {
-	enabled  bool
-	samplers int
-	server   *dht.Server
-	out      chan string
-	cancel   context.CancelFunc
-	logger   *log.Logger
+// clampIdentities normalises Config.Identities into [1, maxIdentities].
+func clampIdentities(n int) int {
+	if n < 1 {
+		return 1
+	}
+	if n > maxIdentities {
+		return maxIdentities
+	}
+	return n
+}
 
-	// Node quality scoring and its persistence hooks (nodequality.go).
-	quality   *nodeQuality
-	restored  int // persisted nodes loaded at Start
-	saveNodes func(ctx context.Context, nodes []PersistedNode) error
+// identity is one running DHT node identity: a server with its own
+// node ID, socket, routing table, quality tracker and sampler pool.
+// Everything that made a lone Crawler stateful lives here now; the
+// Crawler owns only the shared harvest pipeline (dedup set, output
+// channel, counters) that every identity feeds.
+type identity struct {
+	c   *Crawler // parent: shared push/counters/logger
+	idx int
 
-	mu    sync.Mutex
-	seen  map[[20]byte]struct{}
-	ring  [][20]byte // FIFO eviction order for seen
-	known [][20]byte // recent infohashes for active probing
+	server *dht.Server
+
+	// Node quality scoring (nodequality.go), this identity's own:
+	// scores are only ever compared within one table, because a node
+	// that answers this identity proves nothing about its behaviour
+	// toward another identity's neighbourhood.
+	quality  *nodeQuality
+	restored int // persisted nodes seeded into this identity
 
 	// Sampling state. nodeQ carries nodes waiting to be sampled; nodeNext
 	// records the earliest time each address is worth sampling again, which
@@ -113,23 +148,59 @@ type Crawler struct {
 	// best-first by quality score, so after a refill the queue drains
 	// toward the nodes most likely to answer with fresh samples.
 	nodeQ    chan krpc.NodeAddr
+	nodeMu   *sync.Mutex
+	nodeNext map[string]time.Time
+}
+
+// Crawler is a running (or disabled) DHT crawler: one or more
+// identities feeding one shared harvest pipeline.
+type Crawler struct {
+	enabled  bool
+	samplers int
+	out      chan string
+	cancel   context.CancelFunc
+	logger   *log.Logger
+
+	identities []*identity
+
+	// Identity 0's state, aliased from identities[0] by Start so the
+	// fields keep meaning what they always have. A Crawler assembled
+	// by hand (unit tests) has no identities slice, and then these
+	// fields ARE identity 0 — selfIdentity wraps them on the fly.
+	server   *dht.Server
+	quality  *nodeQuality
+	nodeQ    chan krpc.NodeAddr
 	nodeMu   sync.Mutex
 	nodeNext map[string]time.Time
+	restored int // persisted nodes loaded at Start (the shared seed set)
 
-	// Counters, read via Stats.
+	// Node-persistence hook (nodequality.go).
+	saveNodes func(ctx context.Context, nodes []PersistedNode) error
+
+	mu    sync.Mutex
+	seen  map[[20]byte]struct{}
+	ring  [][20]byte // FIFO eviction order for seen
+	known [][20]byte // recent infohashes for active probing
+
+	// Counters, read via Stats. Shared by all identities: they count
+	// harvest-pipeline events, not per-identity activity.
 	statMu    sync.Mutex
 	sampled   int64 // sample_infohashes queries answered
 	sampleErr int64 // queries that failed or returned nothing
 	harvested int64 // infohashes returned by samples (before dedup)
 }
 
-// Stats reports sampler activity. Nodes is the routing table size, which is
-// the pool the samplers draw from — if it collapses, discovery stalls. The
-// node-quality fields describe the scoring layer (nodequality.go):
-// TrackedNodes is the quality tracker's pool, AvgNodeScore the mean score
-// of nodes with at least one observation, BannedNodes how many are parked
-// in a failure cooldown, and RestoredNodes how many persisted nodes were
-// loaded at startup.
+// Stats reports sampler activity, aggregated over all identities.
+// Nodes is the summed routing table size, which is the pool the
+// samplers draw from — if it collapses, discovery stalls. The
+// node-quality fields describe the scoring layer (nodequality.go),
+// likewise summed: TrackedNodes counts tracker entries across
+// identities (the same address tracked by two identities counts
+// twice — the entries are independent scorings), AvgNodeScore is the
+// mean score of nodes with at least one observation across all
+// trackers, BannedNodes how many entries are parked in a failure
+// cooldown, and RestoredNodes how many persisted nodes were loaded at
+// startup. Identities is how many DHT identities are running.
 type Stats struct {
 	Nodes         int
 	Queued        int
@@ -140,6 +211,7 @@ type Stats struct {
 	AvgNodeScore  float64
 	BannedNodes   int
 	RestoredNodes int
+	Identities    int
 }
 
 // Start launches the crawler. With Enabled=false it returns a Crawler whose
@@ -153,44 +225,107 @@ func Start(cfg Config) (*Crawler, error) {
 	if samplers <= 0 {
 		samplers = defaultSamplers
 	}
+	nIdent := clampIdentities(cfg.Identities)
 	c := &Crawler{
 		enabled:   cfg.Enabled,
 		samplers:  samplers,
 		logger:    logger,
 		seen:      make(map[[20]byte]struct{}, seenCapacity),
-		nodeQ:     make(chan krpc.NodeAddr, nodeQueueSize),
-		nodeNext:  make(map[string]time.Time),
-		quality:   newNodeQuality(),
 		saveNodes: cfg.SaveSeedNodes,
 	}
 	if !cfg.Enabled {
 		return c, nil
 	}
 
-	// Restore persisted node quality before the server exists: the
-	// tracker resumes the restored scores, and the addresses join the
-	// bootstrap set below. A load failure is not fatal — bootstrap
-	// falls back to the public routers alone, exactly as before.
-	var seedAddrs []string
+	// Restore persisted node quality before any server exists: the
+	// snapshot is loaded once and every identity seeds its tracker
+	// from the same set, and the addresses join every identity's
+	// bootstrap set. A load failure is not fatal — bootstrap falls
+	// back to the public routers alone, exactly as before.
+	var saved []PersistedNode
 	if cfg.LoadSeedNodes != nil {
 		lctx, lcancel := context.WithTimeout(context.Background(), 10*time.Second)
-		saved, lerr := cfg.LoadSeedNodes(lctx)
+		rows, lerr := cfg.LoadSeedNodes(lctx)
 		lcancel()
 		if lerr != nil {
 			logger.Printf("crawler: load persisted nodes: %v (continuing without)", lerr)
-		} else if len(saved) > 0 {
-			seedAddrs = c.quality.Seed(saved)
-			c.restored = len(seedAddrs)
-			logger.Printf("crawler: restored %d persisted nodes into the bootstrap set", c.restored)
+		} else {
+			saved = rows
 		}
 	}
 
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: cfg.Port})
+	c.out = make(chan string, channelSize)
+	ctx, cancel := context.WithCancel(context.Background())
+	c.cancel = cancel
+
+	// Identity 0 failing to start is fatal, as a lone crawler's start
+	// failure has always been. An extra identity failing (its port is
+	// taken, say) only narrows coverage, so it is logged loudly and
+	// skipped — the identities that did start keep harvesting.
+	for i := 0; i < nIdent; i++ {
+		id, err := c.startIdentity(ctx, i, cfg.Port, saved)
+		if err != nil {
+			if i == 0 {
+				cancel()
+				return nil, err
+			}
+			logger.Printf("crawler: DHT identity %d of %d failed to start: %v (continuing with %d)",
+				i+1, nIdent, err, len(c.identities))
+			continue
+		}
+		c.identities = append(c.identities, id)
+		if i == 0 && len(saved) > 0 {
+			c.restored = id.restored
+			logger.Printf("crawler: restored %d persisted nodes into the bootstrap set", c.restored)
+		}
+	}
+	// Identity 0's state backs the Crawler-level fields.
+	id0 := c.identities[0]
+	c.server, c.quality, c.nodeQ, c.nodeNext = id0.server, id0.quality, id0.nodeQ, id0.nodeNext
+	if c.saveNodes != nil {
+		go c.persistLoop(ctx)
+	}
+	if nIdent > 1 {
+		logger.Printf("crawler: %d DHT identities running, %d samplers each (%d total)",
+			len(c.identities), c.samplers, len(c.identities)*c.samplers)
+	}
+	return c, nil
+}
+
+// startIdentity brings up identity idx: its own UDP socket (base port
+// + idx, or a random port when the base is 0), an explicit random
+// node ID, and its own refill/walk/sampler loops, all feeding the
+// Crawler's shared harvest pipeline.
+func (c *Crawler) startIdentity(ctx context.Context, idx, basePort int, saved []PersistedNode) (*identity, error) {
+	id := &identity{
+		c:        c,
+		idx:      idx,
+		quality:  newNodeQuality(),
+		nodeQ:    make(chan krpc.NodeAddr, nodeQueueSize),
+		nodeMu:   new(sync.Mutex),
+		nodeNext: make(map[string]time.Time),
+	}
+	seedAddrs := id.quality.Seed(saved)
+	id.restored = len(seedAddrs)
+
+	port := basePort
+	if port > 0 {
+		port += idx
+		if port > 65535 {
+			return nil, fmt.Errorf("listen port %d out of range", port)
+		}
+	}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: port})
 	if err != nil {
 		return nil, err
 	}
 	sc := dht.NewDefaultServerConfig()
 	sc.Conn = conn
+	// An explicit random node ID per identity. Left to the library the
+	// ID would still be random today (PublicIP is unset), but the
+	// identities must be distinct by construction, not by accident of
+	// library defaults.
+	sc.NodeId = krpc.ID(randomID())
 	sc.StartingNodes = func() ([]dht.Addr, error) {
 		var out []dht.Addr
 		for _, a := range seedAddrs {
@@ -213,25 +348,19 @@ func Start(cfg Config) (*Crawler, error) {
 		conn.Close()
 		return nil, err
 	}
-	c.server = s
-	c.out = make(chan string, channelSize)
+	id.server = s
 
-	ctx, cancel := context.WithCancel(context.Background())
-	c.cancel = cancel
 	// The library does not run this itself: NewServer's contract is that the
 	// caller starts it once the server is set up. Without it the routing
 	// table is whatever the initial bootstrap returned and slowly decays, so
 	// the samplers run out of nodes to ask. It bootstraps on its own, so an
 	// explicit Bootstrap alongside it only races and logs "already
 	// bootstrapping".
-	go c.server.TableMaintainer()
-	go c.refillLoop(ctx)
-	go c.walkLoop(ctx)
+	go s.TableMaintainer()
+	go id.refillLoop(ctx)
+	go id.walkLoop(ctx)
 	for i := 0; i < c.samplers; i++ {
-		go c.sampleLoop(ctx)
-	}
-	if c.saveNodes != nil {
-		go c.persistLoop(ctx)
+		go id.sampleLoop(ctx)
 	}
 	// Offer the restored nodes to the samplers right away: they are
 	// proven sample sources, and asking them immediately is what turns
@@ -239,12 +368,34 @@ func Start(cfg Config) (*Crawler, error) {
 	// waiting for the routing table to fill around them.
 	for _, a := range seedAddrs {
 		if ua, rerr := net.ResolveUDPAddr("udp", a); rerr == nil && ua.Port != 0 {
-			c.enqueueNode(krpc.NodeAddr{IP: ua.IP, Port: ua.Port})
+			id.enqueueNode(krpc.NodeAddr{IP: ua.IP, Port: ua.Port})
 		}
 	}
-	logger.Printf("crawler: DHT node listening on %s (%d samplers)",
+	c.logger.Printf("crawler: DHT node listening on %s (%d samplers)",
 		conn.LocalAddr(), c.samplers)
-	return c, nil
+	return id, nil
+}
+
+// selfIdentity returns identity 0: the first started identity, or —
+// for a Crawler assembled by hand rather than via Start — a wrapper
+// over the Crawler's own fields, which are identity 0 in that case.
+func (c *Crawler) selfIdentity() *identity {
+	if len(c.identities) > 0 {
+		return c.identities[0]
+	}
+	return &identity{
+		c: c, server: c.server, quality: c.quality,
+		nodeQ: c.nodeQ, nodeMu: &c.nodeMu, nodeNext: c.nodeNext,
+		restored: c.restored,
+	}
+}
+
+// enqueueNode and scheduleResample stay on Crawler as identity-0
+// shorthands; the sampling machinery itself lives on identity.
+func (c *Crawler) enqueueNode(na krpc.NodeAddr) { c.selfIdentity().enqueueNode(na) }
+
+func (c *Crawler) scheduleResample(na krpc.NodeAddr, interval *int64) {
+	c.selfIdentity().scheduleResample(na, interval)
 }
 
 // persistLoop snapshots the top-quality nodes for the next start.
@@ -269,12 +420,57 @@ func (c *Crawler) saveQuality() {
 	if !c.enabled || c.saveNodes == nil {
 		return
 	}
-	nodes := c.quality.Top(nodePersistTop, nodePersistMinScore)
+	nodes := c.mergedTopNodes()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := c.saveNodes(ctx, nodes); err != nil {
 		c.logger.Printf("crawler: persist nodes: %v", err)
 	}
+}
+
+// mergedTopNodes builds the single persistence snapshot from all
+// identities. The dht_nodes table holds one replace-all snapshot, so
+// the identities must not take turns overwriting it with their own
+// top sets; instead each contributes its Top set and the results are
+// merged here: an address proven to several identities collapses to
+// the entry with the most observations behind it, and the merged set
+// is capped at nodePersistTop so the stored snapshot stays the size
+// it has always been. The snapshot is deliberately shared rather than
+// keyed per identity: the addresses are global DHT nodes, every
+// identity seeds from the same merged set at the next start and
+// re-scores them independently from there, and keying the table per
+// identity would store N largely identical copies of the proven set
+// for no bootstrap benefit.
+func (c *Crawler) mergedTopNodes() []PersistedNode {
+	if len(c.identities) == 0 {
+		return c.quality.Top(nodePersistTop, nodePersistMinScore)
+	}
+	best := make(map[string]PersistedNode)
+	for _, id := range c.identities {
+		for _, n := range id.quality.Top(nodePersistTop, nodePersistMinScore) {
+			if cur, ok := best[n.Addr]; !ok || n.Attempts > cur.Attempts {
+				best[n.Addr] = n
+			}
+		}
+	}
+	out := make([]PersistedNode, 0, len(best))
+	for _, n := range best {
+		out = append(out, n)
+	}
+	// Best first, following nodeQuality.Top's ordering discipline:
+	// score, then the evidence behind it.
+	sort.Slice(out, func(i, j int) bool {
+		si := out[i].SuccW / (out[i].SuccW + out[i].FailW)
+		sj := out[j].SuccW / (out[j].SuccW + out[j].FailW)
+		if si != sj {
+			return si > sj
+		}
+		return out[i].Attempts > out[j].Attempts
+	})
+	if len(out) > nodePersistTop {
+		out = out[:nodePersistTop]
+	}
+	return out
 }
 
 // Infohashes returns the channel of newly seen infohashes (hex encoded).
@@ -300,7 +496,31 @@ func (c *Crawler) Stats() Stats {
 		Harvested: c.harvested,
 	}
 	c.statMu.Unlock()
+	st.RestoredNodes = c.restored
+	if len(c.identities) > 0 {
+		st.Identities = len(c.identities)
+		var scored int
+		var scoreSum float64
+		for _, id := range c.identities {
+			if id.server != nil {
+				st.Nodes += id.server.NumNodes()
+			}
+			st.Queued += len(id.nodeQ)
+			tracked, sc, ss, banned := id.quality.aggregate()
+			st.TrackedNodes += tracked
+			st.BannedNodes += banned
+			scored += sc
+			scoreSum += ss
+		}
+		if scored > 0 {
+			st.AvgNodeScore = scoreSum / float64(scored)
+		}
+		return st
+	}
+	// No started identities: a disabled crawler (everything zero) or
+	// a hand-built one whose fields are identity 0.
 	if c.server != nil {
+		st.Identities = 1
 		st.Nodes = c.server.NumNodes()
 	}
 	st.Queued = len(c.nodeQ)
@@ -310,7 +530,6 @@ func (c *Crawler) Stats() Stats {
 		st.AvgNodeScore = qs.AvgScore
 		st.BannedNodes = qs.Banned
 	}
-	st.RestoredNodes = c.restored
 	return st
 }
 
@@ -322,7 +541,13 @@ func (c *Crawler) Close() {
 	if c.cancel != nil {
 		c.cancel()
 	}
-	if c.server != nil {
+	if len(c.identities) > 0 {
+		for _, id := range c.identities {
+			if id.server != nil {
+				id.server.Close()
+			}
+		}
+	} else if c.server != nil {
 		c.server.Close()
 	}
 	if c.out != nil {
@@ -381,7 +606,7 @@ func (c *Crawler) push(ih [20]byte) {
 // refillLoop keeps the sampler queue fed from the routing table. Nodes that
 // were sampled recently are skipped by enqueue, so this re-offers the whole
 // table cheaply and only the due ones get through.
-func (c *Crawler) refillLoop(ctx context.Context) {
+func (id *identity) refillLoop(ctx context.Context) {
 	t := time.NewTicker(refillInterval)
 	defer t.Stop()
 	for {
@@ -390,12 +615,12 @@ func (c *Crawler) refillLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		nodes := c.server.Nodes()
+		nodes := id.server.Nodes()
 		sort.Slice(nodes, func(i, j int) bool {
-			return c.quality.Score(nodes[i].Addr.String()) > c.quality.Score(nodes[j].Addr.String())
+			return id.quality.Score(nodes[i].Addr.String()) > id.quality.Score(nodes[j].Addr.String())
 		})
 		for _, n := range nodes {
-			c.enqueueNode(n.Addr)
+			id.enqueueNode(n.Addr)
 		}
 	}
 }
@@ -404,7 +629,7 @@ func (c *Crawler) refillLoop(ctx context.Context) {
 // random target returns the nodes closest to it, which is how we reach parts
 // of the ID space our own table does not cover — and each new node is a new
 // sample set. Without this the samplers keep re-reading the same neighbours.
-func (c *Crawler) walkLoop(ctx context.Context) {
+func (id *identity) walkLoop(ctx context.Context) {
 	t := time.NewTicker(walkInterval)
 	defer t.Stop()
 	for {
@@ -413,30 +638,30 @@ func (c *Crawler) walkLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		nodes := c.server.Nodes()
+		nodes := id.server.Nodes()
 		if len(nodes) == 0 {
 			continue
 		}
 		node := nodes[randIntn(len(nodes))]
 		start := time.Now()
-		res := c.server.FindNode(
+		res := id.server.FindNode(
 			dht.NewAddr(node.Addr.UDP()), int160.FromByteArray(randomID()),
 			dht.QueryRateLimiting{},
 		)
 		// find_node is the walk's own query/response exchange with this
 		// node: fold the outcome into its quality score.
 		if res.Err == nil && res.Reply.R != nil {
-			c.quality.Record(node.Addr.String(), true, time.Since(start))
+			id.quality.Record(node.Addr.String(), true, time.Since(start))
 		} else {
-			c.quality.Record(node.Addr.String(), false, 0)
+			id.quality.Record(node.Addr.String(), false, 0)
 		}
-		c.absorbNodes(res)
+		id.absorbNodes(res)
 
 		// Piggyback a get_peers for something recently seen: it keeps this
 		// node in other peers' routing tables, which is what makes inbound
 		// get_peers traffic (the passive half of discovery) arrive at all.
-		if ih, ok := c.randomKnown(); ok {
-			c.server.GetPeers(ctx, dht.NewAddr(node.Addr.UDP()),
+		if ih, ok := id.c.randomKnown(); ok {
+			id.server.GetPeers(ctx, dht.NewAddr(node.Addr.UDP()),
 				int160.FromByteArray(ih), false, dht.QueryRateLimiting{})
 		}
 	}
@@ -446,19 +671,19 @@ func (c *Crawler) walkLoop(ctx context.Context) {
 // infohashes it knows (BEP 51). This is the active half of discovery and the
 // one that scales: every distinct node answers with up to a few dozen
 // infohashes we would otherwise have to wait for peers to announce.
-func (c *Crawler) sampleLoop(ctx context.Context) {
+func (id *identity) sampleLoop(ctx context.Context) {
 	for {
 		var addr krpc.NodeAddr
 		select {
 		case <-ctx.Done():
 			return
-		case addr = <-c.nodeQ:
+		case addr = <-id.nodeQ:
 		}
-		c.sampleNode(ctx, addr)
+		id.sampleNode(ctx, addr)
 	}
 }
 
-func (c *Crawler) sampleNode(ctx context.Context, na krpc.NodeAddr) {
+func (id *identity) sampleNode(ctx context.Context, na krpc.NodeAddr) {
 	qctx, cancel := context.WithTimeout(ctx, sampleTimeout)
 	defer cancel()
 
@@ -467,25 +692,25 @@ func (c *Crawler) sampleNode(ctx context.Context, na krpc.NodeAddr) {
 	// nodes closest to that target. Randomising it per query is what turns
 	// repeated sampling into a walk instead of a re-read.
 	start := time.Now()
-	res := c.server.Query(qctx, dht.NewAddr(na.UDP()), "sample_infohashes", dht.QueryInput{
-		MsgArgs:      krpc.MsgArgs{ID: c.server.ID(), Target: randomID()},
+	res := id.server.Query(qctx, dht.NewAddr(na.UDP()), "sample_infohashes", dht.QueryInput{
+		MsgArgs:      krpc.MsgArgs{ID: id.server.ID(), Target: randomID()},
 		RateLimiting: dht.QueryRateLimiting{},
 	})
-	c.absorbNodes(res)
+	id.absorbNodes(res)
 
 	if res.Err != nil || res.Reply.R == nil || res.Reply.R.Samples == nil {
-		c.quality.Record(na.String(), false, 0)
-		c.bump(&c.sampleErr)
+		id.quality.Record(na.String(), false, 0)
+		id.c.bump(&id.c.sampleErr)
 		return
 	}
-	c.quality.Record(na.String(), true, time.Since(start))
+	id.quality.Record(na.String(), true, time.Since(start))
 	samples := *res.Reply.R.Samples
-	c.bump(&c.sampled)
-	c.addStat(&c.harvested, int64(len(samples)))
+	id.c.bump(&id.c.sampled)
+	id.c.addStat(&id.c.harvested, int64(len(samples)))
 	for _, ih := range samples {
-		c.push(ih)
+		id.c.push(ih)
 	}
-	c.scheduleResample(na, res.Reply.R.Interval)
+	id.scheduleResample(na, res.Reply.R.Interval)
 }
 
 // scheduleResample honours the node's advertised refresh interval, scaled
@@ -493,28 +718,28 @@ func (c *Crawler) sampleNode(ctx context.Context, na krpc.NodeAddr) {
 // score 1), poor ones later (factor 1.5 at score 0) — then clamped so a
 // hostile or broken value cannot park a node forever or turn it into a
 // hot loop.
-func (c *Crawler) scheduleResample(na krpc.NodeAddr, interval *int64) {
+func (id *identity) scheduleResample(na krpc.NodeAddr, interval *int64) {
 	d := defaultResample
 	if interval != nil && *interval > 0 {
 		d = time.Duration(*interval) * time.Second
 	}
-	d = time.Duration(float64(d) * (1.5 - c.quality.Score(na.String())))
+	d = time.Duration(float64(d) * (1.5 - id.quality.Score(na.String())))
 	d = min(max(d, minResample), maxResample)
-	c.nodeMu.Lock()
-	c.nodeNext[na.String()] = time.Now().Add(d)
-	c.nodeMu.Unlock()
+	id.nodeMu.Lock()
+	id.nodeNext[na.String()] = time.Now().Add(d)
+	id.nodeMu.Unlock()
 }
 
 // absorbNodes feeds the nodes carried by a query reply back into the queue.
-func (c *Crawler) absorbNodes(res dht.QueryResult) {
+func (id *identity) absorbNodes(res dht.QueryResult) {
 	if res.Reply.R == nil {
 		return
 	}
 	for _, n := range res.Reply.R.Nodes {
-		c.enqueueNode(n.Addr)
+		id.enqueueNode(n.Addr)
 	}
 	for _, n := range res.Reply.R.Nodes6 {
-		c.enqueueNode(n.Addr)
+		id.enqueueNode(n.Addr)
 	}
 }
 
@@ -522,7 +747,7 @@ func (c *Crawler) absorbNodes(res dht.QueryResult) {
 // for a resample or the queue is full. Dropping is correct here: the routing
 // table refill re-offers everything a few seconds later, and blocking would
 // stall whichever query reply we are walking.
-func (c *Crawler) enqueueNode(na krpc.NodeAddr) {
+func (id *identity) enqueueNode(na krpc.NodeAddr) {
 	if na.Port == 0 {
 		return
 	}
@@ -530,30 +755,30 @@ func (c *Crawler) enqueueNode(na krpc.NodeAddr) {
 	// Register the node in the quality tracker and respect a failure
 	// cooldown: a persistently dead node stops consuming sampler slots
 	// until its ban expires (see nodeQuality.Banned).
-	c.quality.Touch(key)
-	if c.quality.Banned(key) {
+	id.quality.Touch(key)
+	if id.quality.Banned(key) {
 		return
 	}
 	now := time.Now()
 
-	c.nodeMu.Lock()
-	if next, ok := c.nodeNext[key]; ok && now.Before(next) {
-		c.nodeMu.Unlock()
+	id.nodeMu.Lock()
+	if next, ok := id.nodeNext[key]; ok && now.Before(next) {
+		id.nodeMu.Unlock()
 		return
 	}
-	if len(c.nodeNext) >= nodeTrackMax {
+	if len(id.nodeNext) >= nodeTrackMax {
 		// Cheap bound: forget everything rather than track insertion order.
 		// Re-learning a node costs one extra query, so the reset is harmless
 		// and keeps the map from growing without limit.
-		c.nodeNext = make(map[string]time.Time, nodeTrackMax/2)
+		id.nodeNext = make(map[string]time.Time, nodeTrackMax/2)
 	}
 	// Reserve the node now so the other samplers skip it while this query is
 	// in flight; a successful sample overwrites this with the real interval.
-	c.nodeNext[key] = now.Add(minResample)
-	c.nodeMu.Unlock()
+	id.nodeNext[key] = now.Add(minResample)
+	id.nodeMu.Unlock()
 
 	select {
-	case c.nodeQ <- na:
+	case id.nodeQ <- na:
 	default:
 	}
 }

@@ -213,7 +213,9 @@ func main() {
 		"database URL: postgres:// or postgresql:// selects Postgres; empty uses the SQLite file at DB_PATH")
 	crawlEnabled := flag.Bool("crawl", envBool("CRAWL_ENABLED", true), "enable the DHT crawler")
 	dhtPort := flag.Int("dht-port", envInt("DHT_PORT", 0), "DHT UDP listen port (0 = random)")
-	samplers := flag.Int("dht-samplers", envInt("DHT_SAMPLERS", 8), "concurrent BEP 51 sampling workers")
+	samplers := flag.Int("dht-samplers", envInt("DHT_SAMPLERS", 8), "concurrent BEP 51 sampling workers per DHT identity")
+	dhtIdentities := flag.Int("dht-identities", envInt("DHT_IDENTITIES", 1),
+		"DHT node identities in one process (each with its own node ID, routing table and quality tracker; identity i listens on DHT_PORT+i)")
 	metaWorkers := flag.Int("meta-workers", envInt("META_WORKERS", 128), "metadata fetch worker count")
 	metaShards := flag.Int("meta-shards", envInt("META_SHARDS", 8), "metadata torrent client shards (hashes are spread across clients to split the per-client lock contention)")
 	metaTimeout := flag.Duration("meta-timeout", envDuration("META_TIMEOUT", 45*time.Second), "metadata fetch timeout per torrent")
@@ -327,6 +329,7 @@ func main() {
 	reg(settings.KeyCrawlerWatchdogEnabled, strconv.FormatBool(envBool("CRAWLER_WATCHDOG_ENABLED", true)))
 	reg(settings.KeyDHTPort, strconv.Itoa(*dhtPort))
 	reg(settings.KeyDHTSamplers, strconv.Itoa(*samplers))
+	reg(settings.KeyDHTIdentities, strconv.Itoa(*dhtIdentities))
 	reg(settings.KeyFetchMetadata, strconv.FormatBool(*fetchMetadata))
 	reg(settings.KeyMetaWorkers, strconv.Itoa(*metaWorkers))
 	reg(settings.KeyMetaShards, strconv.Itoa(*metaShards))
@@ -424,10 +427,11 @@ func main() {
 	// pattern as scraperStatus below); the crawler itself stays
 	// store-free.
 	cr, err := crawler.Start(crawler.Config{
-		Port:     mgr.Int(settings.KeyDHTPort),
-		Enabled:  crawlOn,
-		Samplers: mgr.Int(settings.KeyDHTSamplers),
-		Logger:   logger,
+		Port:       mgr.Int(settings.KeyDHTPort),
+		Enabled:    crawlOn,
+		Samplers:   mgr.Int(settings.KeyDHTSamplers),
+		Identities: mgr.Int(settings.KeyDHTIdentities),
+		Logger:     logger,
 		LoadSeedNodes: func(ctx context.Context) ([]crawler.PersistedNode, error) {
 			rows, err := st.LoadDHTNodes(ctx, 512)
 			if err != nil {
@@ -832,6 +836,7 @@ func main() {
 				AvgNodeScore:  cs.AvgNodeScore,
 				BannedNodes:   cs.BannedNodes,
 				RestoredNodes: cs.RestoredNodes,
+				Identities:    cs.Identities,
 				Watchdog:      string(ws.State),
 				WatchdogSince: wSince,
 			}
