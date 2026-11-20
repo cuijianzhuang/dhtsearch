@@ -310,7 +310,10 @@ export interface AdminTorrentDetail extends AdminTorrentItem {
 /** One page of a torrent's stored file list (admin detail view). */
 export interface AdminFilesResponse {
   info_hash: string;
+  /** Entries being paged through: the filtered count when q is set. */
   total: number;
+  /** The torrent's full stored entry count, filter or not. */
+  total_all: number;
   page: number;
   page_size: number;
   total_pages: number;
@@ -408,12 +411,14 @@ export function fetchAdminFiles(
   token: string,
   hash: string,
   page = 1,
-  pageSize = 100
+  pageSize = 100,
+  q = ""
 ): Promise<AdminFilesResponse> {
   const params = new URLSearchParams({
     page: String(page),
     page_size: String(pageSize),
   });
+  if (q) params.set("q", q);
   return adminFetch<AdminFilesResponse>(
     token,
     `/api/admin/torrents/${encodeURIComponent(hash)}/files?${params}`

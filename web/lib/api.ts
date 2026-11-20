@@ -241,7 +241,11 @@ export async function fetchSimilar(hash: string): Promise<SimilarItem[]> {
  *  than the torrent's file_count when the crawler capped the list. */
 export interface TorrentFilesResponse {
   info_hash: string;
+  /** Entries being paged through: the filtered count when q is set,
+   *  the full stored count otherwise. */
   total: number;
+  /** The torrent's full stored entry count, filter or not. */
+  total_all: number;
   page: number;
   page_size: number;
   total_pages: number;
@@ -251,12 +255,14 @@ export interface TorrentFilesResponse {
 export async function fetchTorrentFiles(
   hash: string,
   page: number,
-  pageSize = 100
+  pageSize = 100,
+  q = ""
 ): Promise<TorrentFilesResponse | null> {
   const params = new URLSearchParams({
     page: String(page),
     page_size: String(pageSize),
   });
+  if (q) params.set("q", q);
   const res = await fetch(
     `${API_BASE}/api/torrents/${encodeURIComponent(hash)}/files?${params}`,
     { cache: "no-store", headers: await firstPartyHeaders() }

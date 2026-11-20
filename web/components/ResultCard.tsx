@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type {
   SearchResult,
   SimilarItem,
@@ -81,29 +81,61 @@ export default function ResultCard({
     embeddedFiles.length < FILES_PAGE_SIZE ? embeddedFiles.length : null
   );
   const [filesLoading, setFilesLoading] = useState(false);
-  const shownFiles =
-    filePage === 1 ? embeddedFiles : (extraPages[filePage] ?? []);
+
+  // File-name filter. The embedded page only ever holds the
+  // unfiltered first page, so a non-empty filter switches the list to
+  // server-filtered pages (?q= on the files endpoint filters the
+  // stored list before paging). Filtered pages/totals are cached
+  // separately from the unfiltered ones; clearing the filter returns
+  // to the embedded view untouched.
+  const [filterInput, setFilterInput] = useState("");
+  const [filterQuery, setFilterQuery] = useState("");
+  const [filteredPages, setFilteredPages] = useState<
+    Record<number, TorrentFile[]>
+  >({});
+  const [filteredTotal, setFilteredTotal] = useState<number | null>(null);
+  const [storedTotalAll, setStoredTotalAll] = useState<number | null>(null);
+  const filterTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const filtering = filterQuery.trim() !== "";
+
+  const shownFiles = filtering
+    ? (filteredPages[filePage] ?? [])
+    : filePage === 1
+      ? embeddedFiles
+      : (extraPages[filePage] ?? []);
   const knownStored = storedTotal ?? embeddedFiles.length;
+  const activeTotal = filtering ? (filteredTotal ?? 0) : knownStored;
   const totalFilePages = Math.max(
     1,
-    Math.ceil(knownStored / FILES_PAGE_SIZE)
+    Math.ceil(activeTotal / FILES_PAGE_SIZE)
   );
   // Computed over the first page, so the prefix doesn't shift while
   // paging through the rest.
   const root = commonDirPrefix(embeddedFiles.map((f) => f.path));
 
-  function loadFilePage(p: number) {
-    if (p === 1 || extraPages[p]) {
-      setFilePage(p);
-      return;
-    }
+  function fetchFilesPage(p: number, q: string) {
     setFilesLoading(true);
-    fetch(
-      `/api/files?hash=${encodeURIComponent(result.info_hash)}&page=${p}&page_size=${FILES_PAGE_SIZE}`
-    )
+    const params = new URLSearchParams({
+      hash: result.info_hash,
+      page: String(p),
+      page_size: String(FILES_PAGE_SIZE),
+    });
+    if (q) params.set("q", q);
+    fetch(`/api/files?${params.toString()}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data: TorrentFilesResponse | null) => {
         if (!data) return;
+        if (q) {
+          setFilteredTotal(data.total);
+          setStoredTotalAll(data.total_all);
+          if ((data.files ?? []).length === 0 && p > 1 && data.total > 0) {
+            setFilePage(Math.max(1, Math.ceil(data.total / FILES_PAGE_SIZE)));
+            return;
+          }
+          setFilteredPages((prev) => ({ ...prev, [p]: data.files ?? [] }));
+          setFilePage(p);
+          return;
+        }
         setStoredTotal(data.total);
         if ((data.files ?? []).length === 0 && p > 1) {
           // The stored list ended earlier than the embedded page
@@ -116,6 +148,35 @@ export default function ResultCard({
       })
       .catch(() => {})
       .finally(() => setFilesLoading(false));
+  }
+
+  function loadFilePage(p: number) {
+    if (filtering) {
+      if (filteredPages[p]) {
+        setFilePage(p);
+        return;
+      }
+      fetchFilesPage(p, filterQuery.trim());
+      return;
+    }
+    if (p === 1 || extraPages[p]) {
+      setFilePage(p);
+      return;
+    }
+    fetchFilesPage(p, "");
+  }
+
+  function onFilterInput(value: string) {
+    setFilterInput(value);
+    if (filterTimer.current) clearTimeout(filterTimer.current);
+    filterTimer.current = setTimeout(() => {
+      const q = value.trim();
+      setFilterQuery(value);
+      setFilePage(1);
+      setFilteredPages({});
+      setFilteredTotal(null);
+      if (q) fetchFilesPage(1, q);
+    }, 300);
   }
 
   return (
@@ -190,6 +251,23 @@ export default function ResultCard({
         <div className="mt-3 rounded-lg border border-line bg-canvas/60 p-3">
           {totalFiles > 0 ? (
             <>
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <input
+                  type="search"
+                  value={filterInput}
+                  onChange={(e) => onFilterInput(e.target.value)}
+                  placeholder="按文件名过滤…"
+                  aria-label="按文件名过滤文件列表"
+                  className="h-10 min-w-0 flex-1 rounded-lg border border-input bg-surface px-3 text-xs text-ink placeholder-faint outline-none focus:border-accent focus:ring-4 focus:ring-accent/15 sm:max-w-64"
+                />
+                {(filterInput.trim() !== "" || filtering) && (
+                  <span className="text-xs tabular-nums text-mute">
+                    共 {formatCount(storedTotalAll ?? knownStored)} 个文件
+                    {filtering &&
+                      ` · 筛出 ${formatCount(filteredTotal ?? 0)} 个`}
+                  </span>
+                )}
+              </div>
               {root && (
                 <p
                   className="mb-2 line-clamp-2 border-b border-line-2 pb-2 font-mono text-[11px] wrap-anywhere text-mute"
@@ -213,7 +291,9 @@ export default function ResultCard({
               {shownFiles.length > 0 ? (
                 <ul className="space-y-2 text-xs text-mute">
                   {shownFiles.map((f, i) => {
-                    const rest = f.path.slice(root.length);
+                    const rest = f.path.startsWith(root)
+                      ? f.path.slice(root.length)
+                      : f.path;
                     const cut = rest.lastIndexOf("/");
                     const dir = cut >= 0 ? rest.slice(0, cut + 1) : "";
                     const name = cut >= 0 ? rest.slice(cut + 1) : rest;
@@ -241,14 +321,20 @@ export default function ResultCard({
                 </ul>
               ) : (
                 <p className="text-xs text-mute">
-                  {filesLoading ? "正在加载…" : "暂无文件列表信息"}
+                  {filesLoading
+                    ? "正在加载…"
+                    : filtering
+                      ? `没有文件名包含「${filterQuery.trim()}」的文件`
+                      : "暂无文件列表信息"}
                 </p>
               )}
               {filesLoading && shownFiles.length > 0 && (
                 <p className="pt-2 text-xs text-faint">正在加载…</p>
               )}
-              {(totalFilePages > 1 || storedTotal === null) &&
-                knownStored > 0 && (
+              {(totalFilePages > 1 ||
+                (!filtering && storedTotal === null) ||
+                (filtering && filteredTotal === null)) &&
+                activeTotal > 0 && (
                   <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line-2 pt-2 text-xs">
                     <button
                       type="button"
@@ -259,15 +345,21 @@ export default function ResultCard({
                       ← 上一页
                     </button>
                     <span className="text-mute">
-                      {storedTotal !== null
-                        ? `第 ${filePage} / ${totalFilePages} 页 · 共 ${formatCount(knownStored)} 个文件`
-                        : `第 ${filePage} 页`}
+                      {filtering
+                        ? filteredTotal !== null
+                          ? `第 ${filePage} / ${totalFilePages} 页 · 筛出 ${formatCount(filteredTotal)} 个`
+                          : `第 ${filePage} 页`
+                        : storedTotal !== null
+                          ? `第 ${filePage} / ${totalFilePages} 页 · 共 ${formatCount(knownStored)} 个文件`
+                          : `第 ${filePage} 页`}
                     </span>
                     <button
                       type="button"
                       className={pagerBtnCls}
                       disabled={
-                        storedTotal !== null && filePage >= totalFilePages
+                        (filtering
+                          ? filteredTotal !== null
+                          : storedTotal !== null) && filePage >= totalFilePages
                       }
                       onClick={() => loadFilePage(filePage + 1)}
                     >
@@ -275,7 +367,7 @@ export default function ResultCard({
                     </button>
                   </div>
                 )}
-              {storedTotal !== null && totalFiles > storedTotal && (
+              {!filtering && storedTotal !== null && totalFiles > storedTotal && (
                 <p className="pt-2 text-xs text-mute">
                   种子共 {formatCount(totalFiles)} 个文件，收录的文件列表为前{" "}
                   {formatCount(storedTotal)} 个
@@ -285,12 +377,15 @@ export default function ResultCard({
           ) : (
             <p className="text-xs text-mute">暂无文件列表信息</p>
           )}
-          <p
-            className="mt-3 line-clamp-2 border-t border-line-2 pt-2 font-mono text-[11px] leading-relaxed break-all text-faint"
-            title={result.magnet}
-          >
-            {result.magnet}
-          </p>
+          <div className="mt-3 flex items-start gap-2 border-t border-line-2 pt-2">
+            <p
+              className="line-clamp-2 min-w-0 flex-1 font-mono text-[11px] leading-relaxed break-all text-faint"
+              title={result.magnet}
+            >
+              {result.magnet}
+            </p>
+            <CopyMagnetButton magnet={result.magnet} />
+          </div>
 
           {trackers.length > 0 && (
             <div className="mt-3 border-t border-line-2 pt-2">

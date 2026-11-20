@@ -34,10 +34,11 @@ export default async function AdminTorrentDetailPage({
   searchParams,
 }: {
   params: Promise<{ hash: string }>;
-  searchParams: Promise<{ page?: string }>;
+  searchParams: Promise<{ page?: string; fq?: string }>;
 }) {
   const { hash } = await params;
-  const { page: pageRaw } = await searchParams;
+  const { page: pageRaw, fq: fqRaw } = await searchParams;
+  const fileQuery = (fqRaw ?? "").trim();
   const parsedPage = Number.parseInt(pageRaw ?? "1", 10);
   const filePage = Number.isFinite(parsedPage) && parsedPage >= 1 ? parsedPage : 1;
   const token = await tokenOrRedirect();
@@ -61,7 +62,7 @@ export default async function AdminTorrentDetailPage({
   let filesResp: AdminFilesResponse | null = null;
   let filesError: string | null = null;
   try {
-    filesResp = await fetchAdminFiles(token, hash, filePage, FILES_PAGE_SIZE);
+    filesResp = await fetchAdminFiles(token, hash, filePage, FILES_PAGE_SIZE, fileQuery);
   } catch (e) {
     if (isAdminUnauthorized(e)) redirect("/admin/login");
     if (isAdminDisabled(e)) return <AdminDisabledNotice />;
@@ -69,6 +70,7 @@ export default async function AdminTorrentDetailPage({
   }
   const files = filesResp?.files ?? [];
   const filesTotal = filesResp?.total ?? 0;
+  const filesTotalAll = filesResp?.total_all ?? filesTotal;
 
   return (
     <AdminShell active="torrents">
@@ -135,8 +137,37 @@ export default async function AdminTorrentDetailPage({
         </div>
 
         <h2 className="mt-6 text-sm font-semibold text-ink">
-          文件列表（{formatCount(filesTotal)}）
+          文件列表（共 {formatCount(filesTotalAll)} 个
+          {fileQuery && ` · 筛出 ${formatCount(filesTotal)} 个`}）
         </h2>
+        <form
+          method="get"
+          action={`/admin/torrents/${t.info_hash}`}
+          className="mt-2 flex flex-wrap items-center gap-2"
+        >
+          <input
+            type="search"
+            name="fq"
+            defaultValue={fileQuery}
+            placeholder="按文件名过滤…"
+            aria-label="按文件名过滤文件列表"
+            className="min-h-11 min-w-0 flex-1 rounded-lg border border-input bg-surface px-3 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none sm:flex-none sm:basis-72"
+          />
+          <button
+            type="submit"
+            className="inline-flex min-h-11 items-center rounded-lg bg-accent px-4 text-sm font-medium text-on-accent transition-colors hover:bg-accent-hover"
+          >
+            过滤
+          </button>
+          {fileQuery && (
+            <Link
+              href={`/admin/torrents/${t.info_hash}`}
+              className="inline-flex min-h-11 items-center rounded-lg border border-input bg-soft px-3 text-sm text-ink-2 hover:border-accent hover:text-accent-ink"
+            >
+              清除
+            </Link>
+          )}
+        </form>
         {filesError ? (
           <p className="mt-2 text-sm text-mute">
             文件列表加载失败：{filesError}
@@ -160,14 +191,18 @@ export default async function AdminTorrentDetailPage({
             </ul>
             <AdminPagination
               basePath={`/admin/torrents/${t.info_hash}`}
-              params={{}}
+              params={fileQuery ? { fq: fileQuery } : {}}
               page={filePage}
               total={filesTotal}
               pageSize={FILES_PAGE_SIZE}
             />
           </>
         ) : (
-          <p className="mt-2 text-sm text-mute">暂无文件列表信息</p>
+          <p className="mt-2 text-sm text-mute">
+            {fileQuery
+              ? `没有文件名包含「${fileQuery}」的文件`
+              : "暂无文件列表信息"}
+          </p>
         )}
 
         <p className="mt-4 font-mono text-[11px] leading-relaxed break-all text-faint">

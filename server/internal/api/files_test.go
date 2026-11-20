@@ -47,6 +47,7 @@ func filesFixture(t *testing.T) string {
 type filesPage struct {
 	InfoHash   string `json:"info_hash"`
 	Total      int    `json:"total"`
+	TotalAll   int    `json:"total_all"`
 	Page       int    `json:"page"`
 	PageSize   int    `json:"page_size"`
 	TotalPages int    `json:"total_pages"`
@@ -121,6 +122,26 @@ func TestPublicTorrentFiles(t *testing.T) {
 	code, _ = getFilesPage(t, base+"/api/torrents/"+strings.Repeat("0", 40)+"/files", "")
 	if code != http.StatusNotFound {
 		t.Fatalf("unknown hash: status %d, want 404", code)
+	}
+
+	// Without q, total_all mirrors total.
+	code, p = getFilesPage(t, url, "")
+	if code != 200 || p.TotalAll != 300 {
+		t.Fatalf("unfiltered: code %d, total_all %d, want 200 / 300", code, p.TotalAll)
+	}
+
+	// ?q= filters by case-insensitive path substring before paging:
+	// "FILE-02" matches file-0200..file-0299, total becomes the
+	// filtered count and total_all keeps the full stored count.
+	code, p = getFilesPage(t, url+"?q=FILE-02", "")
+	if code != 200 {
+		t.Fatalf("filtered: status %d", code)
+	}
+	if p.Total != 100 || p.TotalAll != 300 || p.TotalPages != 1 {
+		t.Fatalf("filtered header: %+v", p)
+	}
+	if len(p.Files) != 100 || p.Files[0].Path != "pack/file-0200.bin" || p.Files[99].Path != "pack/file-0299.bin" {
+		t.Fatalf("filtered files: %d entries", len(p.Files))
 	}
 }
 

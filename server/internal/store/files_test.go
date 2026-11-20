@@ -39,7 +39,10 @@ func checkFilesPage(t *testing.T, s *Store, hash string) {
 	// 250 files in pages of 100: 100 + 100 + 50, order preserved.
 	wantLens := []int{100, 100, 50}
 	for page, want := range wantLens {
-		files, total, found, err := s.FilesPage(ctx, hash, page+1, 100)
+		files, total, totalAll, found, err := s.FilesPage(ctx, hash, page+1, 100, "")
+		if totalAll != 250 {
+			t.Fatalf("page %d: totalAll = %d, want 250", page+1, totalAll)
+		}
 		if err != nil {
 			t.Fatalf("page %d: %v", page+1, err)
 		}
@@ -62,7 +65,7 @@ func checkFilesPage(t *testing.T, s *Store, hash string) {
 	}
 
 	// A page past the end is empty but keeps the real total.
-	files, total, found, err := s.FilesPage(ctx, hash, 99, 100)
+	files, total, _, found, err := s.FilesPage(ctx, hash, 99, 100, "")
 	if err != nil || !found {
 		t.Fatalf("past-end page: found=%v err=%v", found, err)
 	}
@@ -71,14 +74,33 @@ func checkFilesPage(t *testing.T, s *Store, hash string) {
 	}
 
 	// Unknown hash: found=false, no error.
-	if _, _, found, err := s.FilesPage(ctx, "0000000000000000000000000000000000000000", 1, 100); err != nil || found {
+	if _, _, _, found, err := s.FilesPage(ctx, "0000000000000000000000000000000000000000", 1, 100, ""); err != nil || found {
 		t.Fatalf("unknown hash: found=%v err=%v, want false / nil", found, err)
 	}
 
 	// Page size larger than the list returns everything at once.
-	files, _, _, err = s.FilesPage(ctx, hash, 1, 500)
+	files, _, _, _, err = s.FilesPage(ctx, hash, 1, 500, "")
 	if err != nil || len(files) != 250 {
 		t.Fatalf("oversize page: %d files, err %v; want 250", len(files), err)
+	}
+
+	// The q filter narrows before paging: "file-01" matches
+	// file-0100..file-0199 (100 entries), case-insensitively, and
+	// total counts the filtered set while totalAll stays at 250.
+	files, total, totalAll, found, err := s.FilesPage(ctx, hash, 1, 100, "FILE-01")
+	if err != nil || !found {
+		t.Fatalf("filter: found=%v err=%v", found, err)
+	}
+	if total != 100 || totalAll != 250 || len(files) != 100 {
+		t.Fatalf("filter: total=%d totalAll=%d len=%d, want 100 / 250 / 100", total, totalAll, len(files))
+	}
+	if got, want := files[0].Path, "pack/file-0100.bin"; got != want {
+		t.Fatalf("filter: first = %q, want %q", got, want)
+	}
+	// A filter with no hits is an empty page, not an error.
+	files, total, totalAll, _, err = s.FilesPage(ctx, hash, 1, 100, "no-such-file")
+	if err != nil || total != 0 || totalAll != 250 || len(files) != 0 {
+		t.Fatalf("filter miss: total=%d totalAll=%d len=%d err=%v, want 0 / 250 / 0 / nil", total, totalAll, len(files), err)
 	}
 }
 
@@ -93,7 +115,7 @@ func TestFilesPageEmptyTorrent(t *testing.T) {
 	if err := s.Upsert(Torrent{InfoHash: "emptyfiles00000000000000000000000000001", Name: "No Files", CreatedAt: 1}); err != nil {
 		t.Fatal(err)
 	}
-	files, total, found, err := s.FilesPage(context.Background(), "emptyfiles00000000000000000000000000001", 1, 100)
+	files, total, _, found, err := s.FilesPage(context.Background(), "emptyfiles00000000000000000000000000001", 1, 100, "")
 	if err != nil || !found {
 		t.Fatalf("found=%v err=%v", found, err)
 	}
