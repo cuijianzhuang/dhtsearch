@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"dhtsearch/server/internal/filter"
@@ -43,6 +44,79 @@ const (
 	AdminStatusReviewed   = "reviewed"
 )
 
+// Sort orders accepted by AdminListEx. The value set is the admin
+// console's own (the public search's SearchEx sorts are a different,
+// smaller set): the operator triages a 100k+ row table, so both
+// directions of the triage-relevant columns are offered.
+const (
+	AdminSortNewest    = "newest"     // created_at DESC (the historical default)
+	AdminSortOldest    = "oldest"     // created_at ASC
+	AdminSortSizeDesc  = "size_desc"  // total_size DESC
+	AdminSortSizeAsc   = "size_asc"   // total_size ASC
+	AdminSortFilesDesc = "files_desc" // file_count DESC
+	AdminSortSeeders   = "seeders"    // scraped seeder count DESC (see sortBySeeders)
+)
+
+// NormalizeAdminSort maps any input to a valid admin sort order:
+// "" and unrecognized values fall back to AdminSortNewest, so a
+// hand-typed or stale ?sort= can never break the list.
+func NormalizeAdminSort(s string) string {
+	switch s {
+	case AdminSortNewest, AdminSortOldest, AdminSortSizeDesc,
+		AdminSortSizeAsc, AdminSortFilesDesc, AdminSortSeeders:
+		return s
+	}
+	return AdminSortNewest
+}
+
+// adminSortSQL is the ORDER BY clause for the sorts SQL can express.
+// Every clause ends in a deterministic tiebreak (created_at, then
+// info_hash) mirroring the in-memory comparator adminSortRows uses,
+// so the SQL path and the in-memory path (category filter / seeders
+// sort) order identically, on both dialects.
+var adminSortSQL = map[string]string{
+	AdminSortNewest:    `created_at DESC, info_hash ASC`,
+	AdminSortOldest:    `created_at ASC, info_hash ASC`,
+	AdminSortSizeDesc:  `total_size DESC, created_at DESC, info_hash ASC`,
+	AdminSortSizeAsc:   `total_size ASC, created_at DESC, info_hash ASC`,
+	AdminSortFilesDesc: `file_count DESC, created_at DESC, info_hash ASC`,
+}
+
+// Size filter buckets for AdminListEx, keyed by the ?size= value.
+// Ranges are half-open [min, max) in bytes; a negative max means
+// unbounded. The boundaries are binary (MiB/GiB), matching how the
+// UI labels them (10 MB means 10 MiB, as everywhere sizes display).
+const AdminSizeAll = ""
+
+var adminSizeBuckets = map[string]struct{ min, max int64 }{
+	"lt10m":    {0, 10 << 20},
+	"10m_100m": {10 << 20, 100 << 20},
+	"100m_1g":  {100 << 20, 1 << 30},
+	"1g_10g":   {1 << 30, 10 << 30},
+	"gt10g":    {10 << 30, -1},
+}
+
+// AdminSizeRange resolves a size bucket key to its byte range.
+// ok is false for an unrecognized key ("" included: it means "all
+// sizes" and needs no range at all).
+func AdminSizeRange(bucket string) (min, max int64, ok bool) {
+	b, ok := adminSizeBuckets[bucket]
+	if !ok {
+		return 0, 0, false
+	}
+	return b.min, b.max, true
+}
+
+// ValidAdminSize reports whether bucket is "" (all sizes) or a known
+// bucket key.
+func ValidAdminSize(bucket string) bool {
+	if bucket == AdminSizeAll {
+		return true
+	}
+	_, ok := adminSizeBuckets[bucket]
+	return ok
+}
+
 // keywordWhere builds the same AND-of-keywords LIKE conditions Search
 // uses (raw name, cleaned name and alias), for the admin list. The
 // returned fragment has no leading WHERE.
@@ -65,42 +139,242 @@ func (s *Store) keywordWhere(query string) (string, []interface{}) {
 	return strings.Join(conds, " AND "), args
 }
 
+// AdminListParams bundles the admin torrent list's knobs. Query and
+// Status are the historical filters; Sort, Category and Size are the
+// added ones. All filters combine with AND. Invalid Sort/Category/
+// Size values are normalized to the defaults (newest / all / all)
+// rather than rejected, mirroring NormalizeAdminSort.
+type AdminListParams struct {
+	Query    string
+	Status   string // AdminStatus* constant
+	Sort     string // AdminSort* constant; "" means newest
+	Category string // CategoryOf key; "" means all categories
+	Size     string // size bucket key; "" means all sizes
+	Page     int
+	PageSize int
+}
+
 // AdminList returns one page of torrents for the admin console, newest
 // first, filtered by review status and the same keyword semantics as
 // public Search. Files are not loaded; use AdminGet for one torrent.
+// It is AdminListEx with the default sort and no category/size filter.
 func (s *Store) AdminList(ctx context.Context, query, status string, page, pageSize int) (items []AdminTorrent, total int, err error) {
+	return s.AdminListEx(ctx, AdminListParams{Query: query, Status: status, Page: page, PageSize: pageSize})
+}
+
+// AdminListEx is AdminList plus sorting and category/size filtering.
+//
+// The keyword, status and size filters and every sort except seeders
+// are plain SQL, so the common case stays a COUNT + one paginated
+// query. Two features cannot be expressed in SQL, exactly as in
+// SearchEx: a torrent's category is computed from its file list
+// (CategoryOf), and seeders live in swarm_stats. When either is in
+// play, every match is loaded, classified / joined and sorted in
+// memory with adminSortRows — the same total order adminSortSQL
+// encodes — and paged there. The returned items never carry Files:
+// classification reads the blobs into a scratch column only.
+func (s *Store) AdminListEx(ctx context.Context, p AdminListParams) (items []AdminTorrent, total int, err error) {
+	page := p.Page
 	if page < 1 {
 		page = 1
 	}
+	pageSize := p.PageSize
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	sortOrder := NormalizeAdminSort(p.Sort)
+	category := p.Category
+	if !ValidCategory(category) {
+		category = ""
+	}
+	size := p.Size
+	if !ValidAdminSize(size) {
+		size = AdminSizeAll
+	}
+
 	var conds []string
 	var args []interface{}
-	if kw, kwArgs := s.keywordWhere(query); kw != "" {
+	if kw, kwArgs := s.keywordWhere(p.Query); kw != "" {
 		conds = append(conds, kw)
 		args = append(args, kwArgs...)
 	}
-	switch status {
+	switch p.Status {
 	case AdminStatusUnreviewed:
 		conds = append(conds, "reviewed_at = 0")
 	case AdminStatusReviewed:
 		conds = append(conds, "reviewed_at <> 0")
 	}
+	if size != AdminSizeAll {
+		min, max, _ := AdminSizeRange(size)
+		conds = append(conds, "total_size >= ?")
+		args = append(args, min)
+		if max >= 0 {
+			conds = append(conds, "total_size < ?")
+			args = append(args, max)
+		}
+	}
 	where := ""
 	if len(conds) > 0 {
 		where = " WHERE " + strings.Join(conds, " AND ")
 	}
-	if err = s.queryRowContext(ctx, `SELECT COUNT(*) FROM torrents`+where, args...).Scan(&total); err != nil {
-		return nil, 0, err
-	}
+
 	// The display-name expression differs per dialect, so the name column
 	// is selected twice: once raw, once through the expression.
-	q := `SELECT info_hash, name, ` + s.d.displayNameExpr() + `, clean_name, alias, total_size, file_count, created_at, reviewed_at FROM torrents` +
-		where + ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
-	rows, err := s.queryContext(ctx, q, append(args, pageSize, (page-1)*pageSize)...)
+	cols := `info_hash, name, ` + s.d.displayNameExpr() + `, clean_name, alias, total_size, file_count, created_at, reviewed_at`
+
+	if category == "" && sortOrder != AdminSortSeeders {
+		// SQL path: count, then one ordered page.
+		if err = s.queryRowContext(ctx, `SELECT COUNT(*) FROM torrents`+where, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+		q := `SELECT ` + cols + ` FROM torrents` + where +
+			` ORDER BY ` + adminSortSQL[sortOrder] + ` LIMIT ? OFFSET ?`
+		rows, err := s.queryContext(ctx, q, append(args, pageSize, (page-1)*pageSize)...)
+		if err != nil {
+			return nil, 0, err
+		}
+		items, err = scanAdminList(rows)
+		return items, total, err
+	}
+
+	// In-memory path: load every match (with the files blob only when
+	// classifying), filter by category, sort, then cut the page.
+	if category != "" {
+		cols += `, files`
+	}
+	rows, err := s.queryContext(ctx, `SELECT `+cols+` FROM torrents`+where, args...)
 	if err != nil {
 		return nil, 0, err
 	}
-	items, err = scanAdminList(rows)
-	return items, total, err
+	all, err := scanAdminListFiles(rows, category != "")
+	if err != nil {
+		return nil, 0, err
+	}
+	if category != "" {
+		kept := all[:0]
+		for _, t := range all {
+			if t.category == category {
+				kept = append(kept, t)
+			}
+		}
+		all = kept
+	}
+	var swarm map[string]SwarmStats
+	if sortOrder == AdminSortSeeders {
+		hashes := make([]string, len(all))
+		for i, t := range all {
+			hashes[i] = t.InfoHash
+		}
+		if swarm, err = s.SwarmStatsFor(ctx, hashes); err != nil {
+			return nil, 0, err
+		}
+	}
+	sortAdminRows(all, sortOrder, swarm)
+	total = len(all)
+	start := (page - 1) * pageSize
+	if start >= total {
+		return []AdminTorrent{}, total, nil
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	items = make([]AdminTorrent, 0, end-start)
+	for _, t := range all[start:end] {
+		items = append(items, t.AdminTorrent)
+	}
+	return items, total, nil
+}
+
+// adminRow is an AdminTorrent plus the category computed from its
+// file list, carried only through AdminListEx's in-memory path.
+type adminRow struct {
+	AdminTorrent
+	category string
+}
+
+// scanAdminListFiles drains rows of the AdminList projection; with
+// withFiles the projection's trailing files blob is decompressed per
+// row and classified with CategoryOf (against the display name — the
+// same input scanTorrents classifies by), then discarded.
+func scanAdminListFiles(rows *sql.Rows, withFiles bool) (out []adminRow, err error) {
+	defer rows.Close()
+	for rows.Next() {
+		var r adminRow
+		if withFiles {
+			var fb []byte
+			if err := rows.Scan(&r.InfoHash, &r.RawName, &r.Name, &r.CleanName, &r.Alias,
+				&r.TotalSize, &r.FileCount, &r.CreatedAt, &r.ReviewedAt, &fb); err != nil {
+				return nil, err
+			}
+			fj, err := decompressFiles(fb)
+			if err != nil {
+				return nil, err
+			}
+			var files []filter.File
+			if err := json.Unmarshal(fj, &files); err != nil {
+				return nil, err
+			}
+			r.category = CategoryOf(files, r.Name)
+		} else {
+			if err := rows.Scan(&r.InfoHash, &r.RawName, &r.Name, &r.CleanName, &r.Alias,
+				&r.TotalSize, &r.FileCount, &r.CreatedAt, &r.ReviewedAt); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// sortAdminRows orders rows by the same total order adminSortSQL
+// encodes for SQL-expressible sorts. The seeders case reuses
+// sortBySeeders' rule — snapshot count descending, no snapshot below
+// a scraped true zero, then created_at descending, then info_hash —
+// applied to the admin projection.
+func sortAdminRows(rows []adminRow, sortOrder string, swarm map[string]SwarmStats) {
+	byCreatedHash := func(a, b *adminRow, createdDesc bool) bool {
+		if a.CreatedAt != b.CreatedAt {
+			if createdDesc {
+				return a.CreatedAt > b.CreatedAt
+			}
+			return a.CreatedAt < b.CreatedAt
+		}
+		return a.InfoHash < b.InfoHash
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		a, b := &rows[i], &rows[j]
+		switch sortOrder {
+		case AdminSortOldest:
+			return byCreatedHash(a, b, false)
+		case AdminSortSizeDesc:
+			if a.TotalSize != b.TotalSize {
+				return a.TotalSize > b.TotalSize
+			}
+		case AdminSortSizeAsc:
+			if a.TotalSize != b.TotalSize {
+				return a.TotalSize < b.TotalSize
+			}
+		case AdminSortFilesDesc:
+			if a.FileCount != b.FileCount {
+				return a.FileCount > b.FileCount
+			}
+		case AdminSortSeeders:
+			sa, sb := int64(-1), int64(-1)
+			if sw, ok := swarm[a.InfoHash]; ok {
+				sa = sw.Seeders
+			}
+			if sw, ok := swarm[b.InfoHash]; ok {
+				sb = sw.Seeders
+			}
+			if sa != sb {
+				return sa > sb
+			}
+		}
+		// AdminSortNewest and every tie above: created_at DESC,
+		// info_hash ASC.
+		return byCreatedHash(a, b, true)
+	})
 }
 
 // scanAdminList drains rows of the AdminList projection.

@@ -6,7 +6,14 @@ export const metadata: Metadata = { title: "未审核队列" };
 export default function AdminReviewPage({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string; status?: string; page?: string }>;
+  searchParams: Promise<{
+    q?: string;
+    status?: string;
+    sort?: string;
+    category?: string;
+    size?: string;
+    page?: string;
+  }>;
 }) {
   return (
     <AdminTorrentBrowser

@@ -446,7 +446,7 @@ npm run dev                  # 开发，访问 http://localhost:3000
 | `POST /api/admin/reports/{id}/resolve` | 举报标记已处理 |
 | `POST /api/admin/reports/{id}/dismiss` | 举报忽略 |
 | `POST /api/admin/reports/{id}/block` | 一键拉黑被举报种子（删除+黑名单）并标记已处理 |
-| `GET /api/admin/torrents` | 种子列表（分页 + 关键词 + 审核状态过滤） |
+| `GET /api/admin/torrents` | 种子列表（分页 + 关键词 + 审核状态/分类/大小过滤 + 排序：`sort=newest\|oldest\|size_desc\|size_asc\|files_desc\|seeders`、`category`、`size=lt10m\|10m_100m\|100m_1g\|1g_10g\|gt10g`，非法值回落默认） |
 | `GET /api/admin/torrents/{hash}` | 种子详情（不含文件列表，文件走下一行分页接口，避免大文件种子撑爆响应） |
 | `GET /api/admin/torrents/{hash}/files?page=1&page_size=100` | 种子文件列表分页（默认 100 条/页，上限 500，支持 `q` 按文件名过滤；`total` 为过滤后条数、`total_all` 为全量） |
 | `POST /api/admin/torrents/{hash}/approve` | 标记已审核 |

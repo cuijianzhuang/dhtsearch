@@ -8,6 +8,7 @@ import AdminTorrentList from "@/components/admin/AdminTorrentList";
 import { fetchAdminTorrents } from "@/lib/admin";
 import { adminPageFetch } from "@/lib/admin-page";
 import { formatCount } from "@/lib/format";
+import { CATEGORIES } from "@/lib/search-ui";
 
 const PAGE_SIZE = 20;
 
@@ -17,11 +18,45 @@ const STATUS_OPTIONS = [
   { value: "reviewed", label: "已审核" },
 ];
 
+/** Sort orders of the admin list API (store.AdminSort*). The keys
+ *  are the admin console's own set — wider than the public search's,
+ *  because triage runs in both directions. */
+const SORT_OPTIONS = [
+  { value: "newest", label: "最新收录" },
+  { value: "oldest", label: "最早收录" },
+  { value: "size_desc", label: "体积最大" },
+  { value: "size_asc", label: "体积最小" },
+  { value: "files_desc", label: "文件最多" },
+  { value: "seeders", label: "做种最多" },
+];
+
+/** Category filter options: the public search's taxonomy
+ *  (lib/search-ui CATEGORIES, mirroring store.CategoryOf) plus the
+ *  "all" entry. */
+const CATEGORY_OPTIONS = [
+  { value: "", label: "全部分类" },
+  ...CATEGORIES.map((c) => ({ value: c.key, label: c.label })),
+];
+
+/** Size buckets of the admin list API (store adminSizeBuckets);
+ *  boundaries are binary, as everywhere sizes display. */
+const SIZE_OPTIONS = [
+  { value: "", label: "全部大小" },
+  { value: "lt10m", label: "< 10 MB" },
+  { value: "10m_100m", label: "10–100 MB" },
+  { value: "100m_1g", label: "100 MB – 1 GB" },
+  { value: "1g_10g", label: "1–10 GB" },
+  { value: "gt10g", label: "> 10 GB" },
+];
+
 /**
  * Shared body of /admin/torrents (full management) and /admin/review
  * (the unreviewed queue: status locked). Both are the same list
  * underneath; the queue just presets the filter. Selection with the
- * floating bulk bar is available on both.
+ * floating bulk bar is available on both. The sort/category/size
+ * controls show on both pages — they stay meaningful in the queue
+ * (biggest unreviewed first, only videos, …); only the status
+ * select is locked away there, as before.
  */
 export default async function AdminTorrentBrowser({
   tab,
@@ -30,15 +65,36 @@ export default async function AdminTorrentBrowser({
 }: {
   tab: AdminTabKey;
   lockedStatus?: string;
-  searchParams: Promise<{ q?: string; status?: string; page?: string }>;
+  searchParams: Promise<{
+    q?: string;
+    status?: string;
+    sort?: string;
+    category?: string;
+    size?: string;
+    page?: string;
+  }>;
 }) {
   const params = await searchParams;
   const q = (params.q ?? "").trim();
   const status = lockedStatus ?? (params.status ?? "");
+  // An absent or unrecognized sort is the API default, newest.
+  const sort = SORT_OPTIONS.some((o) => o.value === params.sort)
+    ? (params.sort as string)
+    : "newest";
+  const category = params.category ?? "";
+  const size = params.size ?? "";
   const page = Math.max(1, parseInt(params.page ?? "1", 10) || 1);
 
   const outcome = await adminPageFetch((token) =>
-    fetchAdminTorrents(token, { q, status, page, pageSize: PAGE_SIZE })
+    fetchAdminTorrents(token, {
+      q,
+      status,
+      sort,
+      category,
+      size,
+      page,
+      pageSize: PAGE_SIZE,
+    })
   );
   if (!outcome.ok) {
     return outcome.kind === "disabled" ? (
@@ -83,6 +139,42 @@ export default async function AdminTorrentBrowser({
             ))}
           </select>
         )}
+        <select
+          name="sort"
+          defaultValue={sort}
+          aria-label="排序"
+          className="min-h-11 rounded-lg border border-input bg-surface px-3 text-sm text-ink focus:border-accent focus:outline-none"
+        >
+          {SORT_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        <select
+          name="category"
+          defaultValue={category}
+          aria-label="分类"
+          className="min-h-11 rounded-lg border border-input bg-surface px-3 text-sm text-ink focus:border-accent focus:outline-none"
+        >
+          {CATEGORY_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        <select
+          name="size"
+          defaultValue={size}
+          aria-label="大小"
+          className="min-h-11 rounded-lg border border-input bg-surface px-3 text-sm text-ink focus:border-accent focus:outline-none"
+        >
+          {SIZE_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
         <button
           type="submit"
           className="inline-flex min-h-11 items-center rounded-lg bg-accent px-4 text-sm font-medium text-on-accent transition-colors hover:bg-accent-hover"
@@ -104,7 +196,13 @@ export default async function AdminTorrentBrowser({
 
       <AdminPagination
         basePath={basePath}
-        params={{ q, ...(lockedStatus ? {} : { status }) }}
+        params={{
+          q,
+          ...(lockedStatus ? {} : { status }),
+          sort,
+          category,
+          size,
+        }}
         page={data.page}
         total={data.total}
         pageSize={data.page_size}

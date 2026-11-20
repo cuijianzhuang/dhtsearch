@@ -475,3 +475,50 @@ func TestAdminOverviewModerationEnabled(t *testing.T) {
 		t.Fatalf("moderation.enabled with key = %v, want true", got)
 	}
 }
+
+// The sort/category/size params reach the store and shape the list;
+// unrecognized values degrade to the defaults (200, unfiltered,
+// newest first) rather than failing the request.
+func TestAdminListSortAndFilters(t *testing.T) {
+	base, _ := adminFixture(t, testAdminToken)
+	hashA, hashB, hashC := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)
+
+	hashes := func(m map[string]any) []string {
+		out := []string{}
+		for _, r := range m["results"].([]any) {
+			out = append(out, r.(map[string]any)["info_hash"].(string))
+		}
+		return out
+	}
+	check := func(query string, wantTotal float64, want []string) {
+		t.Helper()
+		code, m := adminReq(t, "GET", base+"/api/admin/torrents?"+query, testAdminToken, nil)
+		if code != 200 {
+			t.Fatalf("%s: code %d", query, code)
+		}
+		if m["total"].(float64) != wantTotal {
+			t.Fatalf("%s: total %v, want %v", query, m["total"], wantTotal)
+		}
+		got := hashes(m)
+		if len(got) != len(want) {
+			t.Fatalf("%s: got %v, want %v", query, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%s: got %v, want %v", query, got, want)
+			}
+		}
+	}
+
+	// Fixture: a=1 GiB/created 100, b=2 GiB/101, c=3 GiB/102, all .mkv.
+	check("sort=size_desc", 3, []string{hashC, hashB, hashA})
+	check("sort=size_asc", 3, []string{hashA, hashB, hashC})
+	check("sort=oldest", 3, []string{hashA, hashB, hashC})
+	check("sort=newest", 3, []string{hashC, hashB, hashA})
+	check("category=video", 3, []string{hashC, hashB, hashA})
+	check("category=audio", 0, []string{})
+	check("size=1g_10g", 3, []string{hashC, hashB, hashA}) // 1 GiB is min-inclusive
+	check("size=100m_1g", 0, []string{})
+	check("size=gt10g", 0, []string{})
+	check("sort=bogus&category=bogus&size=bogus", 3, []string{hashC, hashB, hashA})
+}

@@ -6,7 +6,14 @@ export const metadata: Metadata = { title: "种子管理" };
 export default function AdminTorrentsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string; status?: string; page?: string }>;
+  searchParams: Promise<{
+    q?: string;
+    status?: string;
+    sort?: string;
+    category?: string;
+    size?: string;
+    page?: string;
+  }>;
 }) {
   return <AdminTorrentBrowser tab="torrents" searchParams={searchParams} />;
 }
