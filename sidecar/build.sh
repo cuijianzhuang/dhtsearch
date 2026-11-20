@@ -11,6 +11,17 @@
 # in one place per environment.
 #
 # Output: sidecar/dist/dhtsearch-lt-sidecar
+#
+# SIDECAR_BUILD_MODE selects which half runs:
+#   all        (default) libtorrent, then the sidecar — the local /
+#              standalone-Dockerfile behaviour, unchanged.
+#   libtorrent clone + build + install libtorrent only. The
+#              Dockerfile's first stage runs this so CI layer caching
+#              can reuse the result across runs.
+#   sidecar    build only the sidecar, assuming libtorrent is already
+#              installed under $SIDECAR_PREFIX. The Dockerfile's
+#              second stage runs this against the prefix copied from
+#              the first stage.
 set -euo pipefail
 
 LIBTORRENT_VERSION="${LIBTORRENT_VERSION:-v2.0.11}"
@@ -18,42 +29,52 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${SIDECAR_BUILD_DIR:-$SRC_DIR/.build}"
 PREFIX="${SIDECAR_PREFIX:-/usr/local}"
 JOBS="${JOBS:-$(nproc)}"
+MODE="${SIDECAR_BUILD_MODE:-all}"
+
+case "$MODE" in
+    all|libtorrent|sidecar) ;;
+    *) echo "build.sh: unknown SIDECAR_BUILD_MODE '$MODE' (want all|libtorrent|sidecar)" >&2; exit 2 ;;
+esac
 
 mkdir -p "$WORK"
 
-if [ ! -d "$WORK/libtorrent" ]; then
-    echo "==> Fetching libtorrent $LIBTORRENT_VERSION"
-    # --recurse-submodules is load-bearing: libtorrent's CMakeLists
-    # compiles deps/try_signal (a submodule) unconditionally, and a
-    # plain clone leaves it empty — CMake then fails at generate time
-    # with "Cannot find source file: deps/try_signal/try_signal.cpp".
-    git clone --depth 1 --recurse-submodules --shallow-submodules \
-        --branch "$LIBTORRENT_VERSION" \
-        https://github.com/arvidn/libtorrent.git "$WORK/libtorrent"
+if [ "$MODE" != "sidecar" ]; then
+    if [ ! -d "$WORK/libtorrent" ]; then
+        echo "==> Fetching libtorrent $LIBTORRENT_VERSION"
+        # --recurse-submodules is load-bearing: libtorrent's CMakeLists
+        # compiles deps/try_signal (a submodule) unconditionally, and a
+        # plain clone leaves it empty — CMake then fails at generate time
+        # with "Cannot find source file: deps/try_signal/try_signal.cpp".
+        git clone --depth 1 --recurse-submodules --shallow-submodules \
+            --branch "$LIBTORRENT_VERSION" \
+            https://github.com/arvidn/libtorrent.git "$WORK/libtorrent"
+    fi
+
+    echo "==> Building libtorrent (static)"
+    # deprecated-functions=OFF makes libtorrent define TORRENT_NO_DEPRECATE,
+    # which selects ABI version 3 (the libtorrent::v2 symbol namespace);
+    # the sidecar's CMakeLists pins the matching TORRENT_ABI_VERSION=3
+    # consumer define. Keep the two in step.
+    cmake -S "$WORK/libtorrent" -B "$WORK/libtorrent-build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -Ddeprecated-functions=OFF
+    cmake --build "$WORK/libtorrent-build" -j "$JOBS"
+    cmake --install "$WORK/libtorrent-build"
 fi
 
-echo "==> Building libtorrent (static)"
-# deprecated-functions=OFF makes libtorrent define TORRENT_NO_DEPRECATE,
-# which selects ABI version 3 (the libtorrent::v2 symbol namespace);
-# the sidecar's CMakeLists pins the matching TORRENT_ABI_VERSION=3
-# consumer define. Keep the two in step.
-cmake -S "$WORK/libtorrent" -B "$WORK/libtorrent-build" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-    -DBUILD_SHARED_LIBS=OFF \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    -Ddeprecated-functions=OFF
-cmake --build "$WORK/libtorrent-build" -j "$JOBS"
-cmake --install "$WORK/libtorrent-build"
+if [ "$MODE" != "libtorrent" ]; then
+    echo "==> Building dhtsearch-lt-sidecar"
+    cmake -S "$SRC_DIR" -B "$WORK/sidecar-build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH="$PREFIX"
+    cmake --build "$WORK/sidecar-build" -j "$JOBS"
 
-echo "==> Building dhtsearch-lt-sidecar"
-cmake -S "$SRC_DIR" -B "$WORK/sidecar-build" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_PREFIX_PATH="$PREFIX"
-cmake --build "$WORK/sidecar-build" -j "$JOBS"
-
-mkdir -p "$SRC_DIR/dist"
-cp "$WORK/sidecar-build/dhtsearch-lt-sidecar" "$SRC_DIR/dist/dhtsearch-lt-sidecar"
-echo "==> Done: $SRC_DIR/dist/dhtsearch-lt-sidecar"
-"$SRC_DIR/dist/dhtsearch-lt-sidecar" --version
-ldd "$SRC_DIR/dist/dhtsearch-lt-sidecar" || true
+    mkdir -p "$SRC_DIR/dist"
+    cp "$WORK/sidecar-build/dhtsearch-lt-sidecar" "$SRC_DIR/dist/dhtsearch-lt-sidecar"
+    echo "==> Done: $SRC_DIR/dist/dhtsearch-lt-sidecar"
+    "$SRC_DIR/dist/dhtsearch-lt-sidecar" --version
+    ldd "$SRC_DIR/dist/dhtsearch-lt-sidecar" || true
+fi
