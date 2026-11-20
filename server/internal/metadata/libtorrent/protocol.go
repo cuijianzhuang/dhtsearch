@@ -18,11 +18,14 @@ import (
 //
 // Message flow:
 //
-//	server -> sidecar  {"type":"fetch","id":N,"magnet":"...","deadline_ms":45000,"max_files":50}
+//	server -> sidecar  {"type":"fetch","id":N,"magnet":"...","deadline_ms":45000,"max_files":50,
+//	                     "peer_hints":["1.2.3.4:6881","[2001:db8::1]:6881"]}
 //	server -> sidecar  {"type":"cancel","id":N}
 //	server -> sidecar  {"type":"shutdown"}
 //	sidecar -> server  {"type":"ready","sidecar":"x.y.z","libtorrent":"2.0.x"}
 //	sidecar -> server  {"type":"peers","id":N,"peers":K}     (first peer, then on change)
+//	sidecar -> server  {"type":"status","dht_running":true,"dht_nodes":N}
+//	                     (the sidecar session's own DHT state, on change)
 //	sidecar -> server  {"type":"result","id":N,"outcome":"ok","name":"...",
 //	                     "total_size":N,"file_count":N,
 //	                     "files":[{"path":"...","size":N}]}
@@ -58,6 +61,18 @@ type frame struct {
 	Error      string     `json:"error,omitempty"`
 	Sidecar    string     `json:"sidecar,omitempty"`
 	Libtorrent string     `json:"libtorrent,omitempty"`
+	// PeerHints rides a fetch frame server -> sidecar: initial peer
+	// addresses ("host:port") the sidecar connects alongside its
+	// tracker/PEX/DHT supply — the #46 peer-hint cache contents for
+	// this hash (metadata.Item.Peers). Absent means no hints; the
+	// field postdates the original protocol, so an older sidecar
+	// simply ignores it and an older server never sends it.
+	PeerHints []string `json:"peer_hints,omitempty"`
+	// DHTRunning / DHTNodes ride a status frame sidecar -> server:
+	// the sidecar session's own DHT state (running, routing-table
+	// node count), surfaced to the admin via Fetcher.DHTStatus.
+	DHTRunning bool `json:"dht_running,omitempty"`
+	DHTNodes   int  `json:"dht_nodes,omitempty"`
 }
 
 type wireFile struct {

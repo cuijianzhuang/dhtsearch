@@ -106,11 +106,13 @@ jobs:
       - name: Protocol smoke (ready -> fetch timeout -> shutdown)
         if: steps.extract.outcome == 'success'
         # Drives the REAL binary over the framed-JSON protocol: the
-        # session must come up, a fetch against a magnet whose
-        # trackers are unreachable here must come back as a timeout
-        # outcome at its deadline, and shutdown must exit cleanly.
-        # A full metadata exchange needs a live peer and is exercised
-        # on real hosts, not CI.
+        # session must come up, its DHT must report itself running
+        # (status frame), a fetch against a magnet whose trackers
+        # are unreachable here must come back as a timeout outcome
+        # at its deadline (peer_hints included, one malformed — the
+        # sidecar must drop it, not die), and shutdown must exit
+        # cleanly. A full metadata exchange needs a live peer and is
+        # exercised on real hosts, not CI.
         run: |
           python3 - <<'EOF'
           import json, struct, subprocess, sys
@@ -137,9 +139,20 @@ jobs:
 
           send({"type": "fetch", "id": 1,
                 "magnet": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-                "deadline_ms": 1500, "max_files": 10})
-          res = recv()
-          assert res["type"] == "result" and res["id"] == 1, res
+                "deadline_ms": 3000, "max_files": 10,
+                "peer_hints": ["127.0.0.1:9", "not-an-address"]})
+          status = None
+          res = None
+          while res is None:
+              f = recv()
+              if f["type"] == "status":
+                  status = f
+              elif f["type"] == "result":
+                  res = f
+          assert status is not None and status["dht_running"] is True, status
+          assert isinstance(status["dht_nodes"], int), status
+          print("status:", status)
+          assert res["id"] == 1, res
           assert res["outcome"] == "timeout", res
           print("fetch result:", res)
 

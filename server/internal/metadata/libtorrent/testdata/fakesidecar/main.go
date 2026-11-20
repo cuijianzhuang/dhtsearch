@@ -10,6 +10,12 @@
 //	         behave like ok — exercises supervisor restart
 //	noready  exits(1) immediately, before the ready frame
 //
+// Every mode also sends one status frame right after ready
+// (dht_running=true, dht_nodes=42) so the parent's DHT-status
+// plumbing has something to observe, and appends each fetch's
+// peer_hints to the file named by FAKE_SIDECAR_HINTS_LOG when set,
+// so tests can prove the hints crossed the wire.
+//
 // This file lives in testdata so it is never part of the server
 // build; the tests compile it on demand.
 package main
@@ -36,6 +42,9 @@ type frame struct {
 	TotalSize  int64      `json:"total_size,omitempty"`
 	FileCount  int        `json:"file_count,omitempty"`
 	Files      []wireFile `json:"files,omitempty"`
+	PeerHints  []string   `json:"peer_hints,omitempty"`
+	DHTRunning bool       `json:"dht_running,omitempty"`
+	DHTNodes   int        `json:"dht_nodes,omitempty"`
 }
 
 type wireFile struct {
@@ -89,6 +98,7 @@ func main() {
 		}
 	}
 	send(&frame{Type: "ready", Sidecar: "fake-1.0", Libtorrent: "2.0.0-fake"})
+	send(&frame{Type: "status", DHTRunning: true, DHTNodes: 42})
 	for {
 		f, err := recv(os.Stdin)
 		if err != nil {
@@ -101,6 +111,15 @@ func main() {
 			// forget the job; nothing to do — replies are keyed by id
 			// and the parent drops late results anyway.
 		case "fetch":
+			if logPath := os.Getenv("FAKE_SIDECAR_HINTS_LOG"); logPath != "" {
+				fh, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+				if err == nil {
+					for _, h := range f.PeerHints {
+						fh.WriteString(h + "\n")
+					}
+					fh.Close()
+				}
+			}
 			switch {
 			case mode == "die" && incarnation == 0:
 				os.Exit(2)

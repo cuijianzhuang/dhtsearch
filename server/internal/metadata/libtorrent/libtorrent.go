@@ -28,12 +28,19 @@
 //   - uTP/TCP behaviour, tracker handling and PEX are libtorrent's
 //     own, not anacrolix's; peer-supply inputs (the magnet and its
 //     tracker suffix) are constructed exactly as the incumbent does.
+//     On top of that the sidecar session runs its own DHT (read-only
+//     in effect: upload_mode still means it never serves data) for
+//     get_peers, and queue items' peer hints (metadata.Item.Peers)
+//     ride the fetch frame as initial peers — the same two extra
+//     supplies the incumbent gets from its client's DHT and the
+//     peer-hint cache.
 package libtorrent
 
 import (
 	"context"
 	"fmt"
 	"log"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -196,7 +203,7 @@ func (f *Fetcher) Run(ctx context.Context, in <-chan string, onRecord func(metad
 					if !ok {
 						return
 					}
-					if rec, ok := f.fetch(ctx, hexHash); ok {
+					if rec, ok := f.fetch(ctx, hexHash, nil); ok {
 						onRecord(rec)
 					}
 				}
@@ -217,7 +224,7 @@ func (f *Fetcher) RunQueue(ctx context.Context, q *metadata.Queue, onRecord func
 				if !ok {
 					return
 				}
-				if rec, ok := f.fetch(ctx, it.Hash); ok {
+				if rec, ok := f.fetch(ctx, it.Hash, it.Peers); ok {
 					onRecord(rec)
 				}
 			}
@@ -226,8 +233,10 @@ func (f *Fetcher) RunQueue(ctx context.Context, q *metadata.Queue, onRecord func
 }
 
 // fetch runs one job through the sidecar and classifies the outcome
-// into the shared stats, mirroring metadata.Fetcher.fetch.
-func (f *Fetcher) fetch(ctx context.Context, hexHash string) (metadata.Record, bool) {
+// into the shared stats, mirroring metadata.Fetcher.fetch. peers are
+// the item's DHT peer hints (metadata.Item.Peers), forwarded to the
+// sidecar as initial peers for this hash.
+func (f *Fetcher) fetch(ctx context.Context, hexHash string, peers []netip.AddrPort) (metadata.Record, bool) {
 	rec := metadata.Record{InfoHash: hexHash}
 	if !validInfohash(hexHash) {
 		f.count(&f.failed)
@@ -242,7 +251,13 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (metadata.Record, b
 	}
 	prescreen := f.prescreenWindow(timeout)
 
-	id, job, err := f.sup.submit(ctx, "magnet:?xt=urn:btih:"+hexHash+f.magnetSuffix, timeout, f.cfg.MaxFiles)
+	var hints []string
+	for _, ap := range peers {
+		if ap.IsValid() {
+			hints = append(hints, ap.String())
+		}
+	}
+	id, job, err := f.sup.submit(ctx, "magnet:?xt=urn:btih:"+hexHash+f.magnetSuffix, timeout, f.cfg.MaxFiles, hints)
 	if err != nil {
 		if ctx.Err() != nil {
 			return rec, false // aborted, like the incumbent's waitAborted
@@ -471,6 +486,19 @@ func (f *Fetcher) PrescreenDropped() int64 {
 // the incumbent's PeerHintStats.
 func (f *Fetcher) UnavailableReason() string {
 	return f.sup.unavailableReason()
+}
+
+// DHTStatus reports the sidecar session's own DHT state: whether
+// its DHT is running and how many routing-table nodes it knows.
+// The sidecar runs that DHT purely as a peer supply for get_peers
+// (the session is metadata-only; see sidecar/src/main.cpp), and
+// main.go surfaces this through the API's MetaStatus so the admin
+// can see the table actually populate — a running DHT stuck at
+// zero nodes is how a blocked-UDP deployment shows up. It is an
+// optional capability of this backend, consumed via interface
+// assertion like UnavailableReason.
+func (f *Fetcher) DHTStatus() (running bool, nodes int) {
+	return f.sup.dhtStatus()
 }
 
 // Close stops the workers and shuts the sidecar down.

@@ -1046,6 +1046,15 @@ func main() {
 							ms.BackendWarning = r
 						}
 					}
+					// A backend running its own DHT as a peer
+					// supply (the libtorrent sidecar) reports its
+					// state, so the admin can see the routing
+					// table populate — or spot it pinned at zero
+					// nodes on a UDP-blocked host.
+					if d, ok := fetcher.(interface{ DHTStatus() (bool, int) }); ok {
+						running, nodes := d.DHTStatus()
+						ms.DHT = &api.BackendDHT{Running: running, Nodes: nodes}
+					}
 				}
 				return ms
 			},

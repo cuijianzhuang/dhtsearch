@@ -22,11 +22,11 @@ reader aborts the process generation.
 
 ### server → sidecar
 
-| type       | fields                                             | meaning |
-|------------|----------------------------------------------------|---------|
-| `fetch`    | `id`, `magnet`, `deadline_ms`, `max_files`         | start a metadata fetch job |
-| `cancel`   | `id`                                               | drop the job (no result will follow) |
-| `shutdown` | —                                                  | exit cleanly |
+| type       | fields                                                       | meaning |
+|------------|--------------------------------------------------------------|---------|
+| `fetch`    | `id`, `magnet`, `deadline_ms`, `max_files`, `peer_hints` (optional) | start a metadata fetch job |
+| `cancel`   | `id`                                                         | drop the job (no result will follow) |
+| `shutdown` | —                                                            | exit cleanly |
 
 `magnet` is constructed by the Go side exactly as the anacrolix
 fetcher constructs it: `magnet:?xt=urn:btih:<hex>` plus the shared
@@ -35,12 +35,22 @@ META_TIMEOUT value); the sidecar removes the torrent and answers
 `timeout` when it expires. `max_files` caps the `files` array in the
 result; `file_count` always reports the true count.
 
+`peer_hints` is an optional array of `"host:port"` strings
+(`"1.2.3.4:6881"`, `"[2001:db8::1]:6881"` — the shapes Go's
+`netip.AddrPort.String()` produces): initial peers for this hash
+from the Go side's peer-hint cache (`metadata.Item.Peers`), which
+the sidecar connects (`connect_peer`) alongside its tracker, PEX
+and DHT supply. The field is additive: a sidecar that predates it
+ignores it, a server that predates it never sends it, and a
+malformed hint is dropped by the sidecar without failing the job.
+
 ### sidecar → server
 
 | type     | fields                                                        | meaning |
 |----------|---------------------------------------------------------------|---------|
 | `ready`  | `sidecar`, `libtorrent` (version strings)                     | sent once, right after the session is up; the supervisor's readiness handshake |
 | `peers`  | `id`, `peers`                                                 | peer count for a job: first time it exceeds 0, then on change (~100 ms poll cadence) |
+| `status` | `dht_running`, `dht_nodes`                                    | the session's own DHT state, sent on change (~1 s poll cadence): whether its DHT is running and its routing-table node count |
 | `result` | `id`, `outcome`, …                                            | terminal job outcome (below) |
 
 Result outcomes:
