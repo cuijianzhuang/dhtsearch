@@ -185,6 +185,10 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 			"timed_out":         counters["meta_timed_out"],
 			"failed":            counters["meta_failed"],
 			"prescreen_dropped": counters["prescreen_dropped"],
+			// Admission refusals (internal/admission): hashes the
+			// queue never spent a worker on, split by reason.
+			"skipped_stored":  counters["admission_skipped_stored"],
+			"skipped_backoff": counters["admission_skipped_backoff"],
 		},
 		"moderation": map[string]any{
 			"enabled":       s.moderationEnabled(),

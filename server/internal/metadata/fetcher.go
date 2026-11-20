@@ -20,6 +20,25 @@ import (
 	"dhtsearch/server/internal/filter"
 )
 
+// FetchOutcome is the terminal result of one fetch attempt, as
+// reported to Config.ResultFunc. The labels deliberately mirror the
+// fetcher's own counters (Stats / PrescreenDropped).
+type FetchOutcome int
+
+const (
+	// OutcomeFetched: the info dict arrived in time.
+	OutcomeFetched FetchOutcome = iota
+	// OutcomeTimedOut: peers connected (or prescreen was off) but no
+	// info arrived inside the fetch timeout.
+	OutcomeTimedOut
+	// OutcomeFailed: the attempt never got going — malformed hash,
+	// bad magnet, client error, or an empty info after GotInfo.
+	OutcomeFailed
+	// OutcomePrescreened: the prescreen window closed without a
+	// single peer connection.
+	OutcomePrescreened
+)
+
 // Record is the extracted metadata of one torrent.
 type Record struct {
 	InfoHash  string
@@ -77,6 +96,15 @@ type Config struct {
 	// eat most of the fetch timeout — for well-tracked (popular) content
 	// this is the difference between fetching and timing out.
 	Trackers []string
+	// ResultFunc, when non-nil, is called synchronously from the
+	// worker goroutine with the terminal outcome of every fetch
+	// attempt (a context abort at shutdown is not an outcome and is
+	// not reported). It runs in the worker's loop, so it must be
+	// fast and must bound any store writes itself — the same
+	// contract onRecord already lives under. The admission negative
+	// cache (internal/admission) is the consumer: successes clear a
+	// hash's failure state, failures extend its backoff.
+	ResultFunc func(hash string, outcome FetchOutcome)
 	// Logger, nil for log.Default().
 	Logger *log.Logger
 }
@@ -274,11 +302,13 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 	// untrusted value reaches the library, so check here too.
 	if !validInfohash(hexHash) {
 		f.count(&f.failed)
+		f.report(hexHash, OutcomeFailed)
 		return rec, false
 	}
 	spec, err := torrent.TorrentSpecFromMagnetUri("magnet:?xt=urn:btih:" + hexHash + f.magnetSuffix)
 	if err != nil {
 		f.count(&f.failed)
+		f.report(hexHash, OutcomeFailed)
 		return rec, false
 	}
 	spec.DisallowDataDownload = true
@@ -301,6 +331,7 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 	t, _, err := f.clientFor(hexHash).AddTorrentSpec(spec)
 	if err != nil {
 		f.count(&f.failed)
+		f.report(hexHash, OutcomeFailed)
 		return rec, false
 	}
 	defer t.Drop()
@@ -315,9 +346,11 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 	case waitGotInfo:
 	case waitPrescreened:
 		f.count(&f.prescreenDropped)
+		f.report(hexHash, OutcomePrescreened)
 		return rec, false
 	case waitTimedOut:
 		f.count(&f.timedOut)
+		f.report(hexHash, OutcomeTimedOut)
 		return rec, false
 	case waitAborted:
 		return rec, false
@@ -326,11 +359,20 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 	info := t.Info()
 	if info == nil {
 		f.count(&f.failed)
+		f.report(hexHash, OutcomeFailed)
 		return rec, false
 	}
 	rec = RecordFromInfo(info, hexHash, f.cfg.MaxFiles)
 	f.count(&f.fetched)
+	f.report(hexHash, OutcomeFetched)
 	return rec, true
+}
+
+// report delivers a fetch outcome to Config.ResultFunc, when set.
+func (f *Fetcher) report(hash string, outcome FetchOutcome) {
+	if f.cfg.ResultFunc != nil {
+		f.cfg.ResultFunc(hash, outcome)
+	}
 }
 
 // prescreenWindow resolves the prescreen phase length for one fetch

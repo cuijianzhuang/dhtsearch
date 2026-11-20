@@ -172,6 +172,24 @@ func (d dialect) schemaStatements() []string {
 			attempts   ` + intType + ` NOT NULL DEFAULT 0,
 			updated_at ` + intType + ` NOT NULL
 		)`,
+		// Fetch admission negative cache (see fetchattempts.go):
+		// one row per infohash whose metadata fetch failed, carrying
+		// the consecutive-failure count and the instant the hash may
+		// be admitted again. The queue-push path consults it (plus a
+		// torrents existence check) so dead hashes stop re-burning
+		// worker slots. Unlike dht_nodes this IS copied by the
+		// cross-backend Migrate: a backoff state takes days of
+		// failures to accumulate, and losing it in a database switch
+		// would re-open the retry flood the cache exists to stop —
+		// it is operator state, not rebuildable runtime state.
+		`CREATE TABLE IF NOT EXISTS fetch_attempts (
+			info_hash     TEXT PRIMARY KEY,
+			fails         ` + intType + ` NOT NULL,
+			next_retry_at ` + intType + ` NOT NULL,
+			last_outcome  TEXT NOT NULL DEFAULT '',
+			updated_at    ` + intType + ` NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_fetch_attempts_retry ON fetch_attempts(next_retry_at)`,
 		// Tracker-scrape swarm snapshots (see swarm.go): the latest
 		// BEP 15 answer per infohash — seeders/leechers/completed as
 		// the per-field maximum across the trackers that answered,

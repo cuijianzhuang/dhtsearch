@@ -65,6 +65,16 @@ var migrateTables = []migrateTable{
 		kind: []colKind{colText, colText, colText, colInt},
 	},
 	{
+		// fetch_attempts is copied for the same reason as
+		// swarm_stats: the failure-backoff state is operator state
+		// that takes days to accumulate, and dropping it in a
+		// switch would re-admit every known-dead hash at once.
+		name: "fetch_attempts",
+		pk:   "info_hash",
+		cols: []string{"info_hash", "fails", "next_retry_at", "last_outcome", "updated_at"},
+		kind: []colKind{colText, colInt, colInt, colText, colInt},
+	},
+	{
 		// swarm_stats is copied, unlike the dht_nodes snapshot and
 		// the trending cache (both absent from this list): those are
 		// runtime state a fresh process rebuilds, while swarm rows
