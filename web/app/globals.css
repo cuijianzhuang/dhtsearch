@@ -250,6 +250,280 @@
   }
 }
 
+/* Pipeline hero spider + network layer (PipelineFlow.tsx). The track
+   reads as a network: each stage box carries a node glyph on its
+   inbound edge, a node-mesh decorates the DHT end, and one spider —
+   the crawler itself — rides the track at the position the data says
+   work currently reaches. Anchor geometry is pure calc() over the
+   track: five equal stage cells plus four fixed spacers (2.5rem tall
+   on phones; 3rem wide from sm, 4rem from lg), so anchor k sits at
+   (2k+1)/10 of the free space plus k spacers along the axis.
+   Movement is a transform transition stepped by React state at poll
+   cadence — never per-frame JS; a step to a LOWER anchor (the loop
+   wrap, or the frontier retreating) jumps with the transition
+   disabled (.spider-jump) instead of sliding backwards across the
+   track. The mesh pulses opacity at segment 1's tier rate and sits
+   dim and still at a zero delta. The legs wiggle only while the
+   spider travels. .flow-paused freezes mesh and legs together with
+   the dots when data goes stale; reduced motion removes the
+   transitions and the wiggle while positions — which are data —
+   still update once per poll.
+
+   The spider always faces the direction of data flow: its SVG is
+   drawn head-up, then rotated 180deg on phones (head down the
+   vertical track) and 90deg from sm up (head right along the
+   horizontal track); waiting or resting it keeps facing forward.
+   It never crawls backwards: any move to a lower anchor — the
+   loop wrap at the end of a traverse, or the frontier retreating —
+   is a fade cycle (.spider-faded): fade out in place, reposition
+   while invisible, fade back in, then crawl forward again.
+   The spider alone breaks the teal discipline: near-black body
+   and legs with red eyes and a red abdomen marking. In dark
+   appearance a soft light halo (drop-shadow) keeps the black
+   silhouette readable. On the diagnosed fetch stall (.spider-alarm)
+   the red intensifies: brighter, larger marking and eyes plus a
+   soft red ring. At rest it sits slightly transparent (.spider-idle). */
+@keyframes spider-legs-a {
+  from {
+    transform: rotate(-5deg);
+  }
+  to {
+    transform: rotate(6deg);
+  }
+}
+
+@keyframes spider-legs-b {
+  from {
+    transform: rotate(6deg);
+  }
+  to {
+    transform: rotate(-5deg);
+  }
+}
+
+.spider-legs {
+  transform-box: view-box;
+  transform-origin: 50% 50%;
+  animation-duration: 0.45s;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+  animation-play-state: paused;
+}
+
+.spider-legs-a {
+  animation-name: spider-legs-a;
+}
+
+.spider-legs-b {
+  animation-name: spider-legs-b;
+}
+
+.spider-moving .spider-legs {
+  animation-play-state: running;
+}
+
+@keyframes mesh-pulse {
+  0%,
+  100% {
+    opacity: 0.15;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.mesh-pulse {
+  animation-name: mesh-pulse;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+
+.flow-paused .mesh-pulse,
+.flow-paused .spider-legs {
+  animation-play-state: paused;
+}
+
+.spider-step {
+  transition: transform 2s linear;
+}
+
+.spider-jump {
+  transition: none;
+}
+
+/* Anchor 0 is the first stage's centre; each step advances by one
+   stage-plus-spacer spacing along the track axis (vertical on
+   phones, horizontal from sm up). */
+.spider-body {
+  position: absolute;
+  left: 50%;
+  top: calc(10% - 16px);
+  transform: translate(-50%, -50%);
+  transition: opacity 0.35s ease;
+}
+
+.spider-idle {
+  opacity: 0.55;
+}
+
+.spider-faded {
+  opacity: 0;
+}
+
+/* Facing: the SVG is drawn head-up; phones crawl downwards (head
+   rotated to the bottom), sm up crawls rightwards. */
+.spider-body > svg {
+  transform: rotate(180deg);
+}
+
+/* The spider's own palette: near-black ink, red accents. */
+.spider-ink {
+  stroke: #1b1b1f;
+}
+
+.spider-core {
+  fill: #1b1b1f;
+}
+
+.spider-marking {
+  fill: #d92b2b;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition:
+    transform 0.3s ease,
+    fill 0.3s ease;
+}
+
+.spider-eyes {
+  fill: #d92b2b;
+  transition: fill 0.3s ease;
+}
+
+.spider-ring {
+  fill: none;
+  stroke: #ff4040;
+  stroke-width: 1.5;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.spider-alarm .spider-marking {
+  fill: #ff4040;
+  transform: scale(1.45);
+}
+
+.spider-alarm .spider-eyes {
+  fill: #ff4040;
+}
+
+.spider-alarm .spider-ring {
+  opacity: 0.45;
+}
+
+/* Dark appearance: a soft light halo outlines the black spider. */
+:root[data-appearance="dark"] .spider-svg {
+  filter:
+    drop-shadow(0 0 1.5px rgb(255 255 255 / 0.38))
+    drop-shadow(0 0 0.5px rgb(255 255 255 / 0.25));
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-appearance="system"] .spider-svg,
+  :root:not([data-appearance]) .spider-svg {
+    filter:
+      drop-shadow(0 0 1.5px rgb(255 255 255 / 0.38))
+      drop-shadow(0 0 0.5px rgb(255 255 255 / 0.25));
+  }
+}
+
+.spider-step-1 {
+  transform: translateY(calc(20% + 8px));
+}
+
+.spider-step-2 {
+  transform: translateY(calc(40% + 16px));
+}
+
+.spider-step-3 {
+  transform: translateY(calc(60% + 24px));
+}
+
+.spider-step-4 {
+  transform: translateY(calc(80% + 32px));
+}
+
+@media (min-width: 640px) {
+  .spider-body {
+    left: calc(10% - 19.2px);
+    top: 50%;
+  }
+
+  .spider-body > svg {
+    transform: rotate(90deg);
+  }
+
+  .spider-step-1 {
+    transform: translateX(calc(20% + 9.6px));
+  }
+
+  .spider-step-2 {
+    transform: translateX(calc(40% + 19.2px));
+  }
+
+  .spider-step-3 {
+    transform: translateX(calc(60% + 28.8px));
+  }
+
+  .spider-step-4 {
+    transform: translateX(calc(80% + 38.4px));
+  }
+}
+
+@media (min-width: 1024px) {
+  .spider-body {
+    left: calc(10% - 25.6px);
+  }
+
+  .spider-step-1 {
+    transform: translateX(calc(20% + 12.8px));
+  }
+
+  .spider-step-2 {
+    transform: translateX(calc(40% + 25.6px));
+  }
+
+  .spider-step-3 {
+    transform: translateX(calc(60% + 38.4px));
+  }
+
+  .spider-step-4 {
+    transform: translateX(calc(80% + 51.2px));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spider-step {
+    transition: none;
+  }
+
+  .spider-body,
+  .spider-marking,
+  .spider-eyes,
+  .spider-ring {
+    transition: none;
+  }
+
+  .spider-legs {
+    animation: none;
+  }
+
+  .mesh-pulse {
+    animation: none;
+    opacity: 0.25;
+  }
+}
+
 /* Admin sidebar (left side, components/admin/AdminShellClient.tsx).
    The desktop width and the collapsed icon-rail state live here
    because the state is an attribute on <html> restored before first
