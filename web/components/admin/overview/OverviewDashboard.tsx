@@ -361,6 +361,10 @@ export default function OverviewDashboard({
                 ["采样次数", formatCount(o.crawler.sampled)],
                 ["采样出错", formatCount(o.crawler.sample_errors)],
                 ["采样收获", formatCount(o.crawler.harvested)],
+                ["评分追踪节点", formatCount(o.crawler.tracked_nodes)],
+                ["节点平均分", (o.crawler.avg_node_score ?? 0).toFixed(2)],
+                ["冷却剔除节点", formatCount(o.crawler.banned_nodes)],
+                ["启动恢复节点", formatCount(o.crawler.restored_nodes)],
               ]}
             />
           </Panel>

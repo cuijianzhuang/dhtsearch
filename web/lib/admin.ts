@@ -220,6 +220,10 @@ export interface AdminCrawler {
   sampled: number;
   sample_errors: number;
   harvested: number;
+  tracked_nodes: number;
+  avg_node_score: number;
+  banned_nodes: number;
+  restored_nodes: number;
 }
 
 export interface AdminOverview {
