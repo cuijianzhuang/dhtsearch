@@ -170,6 +170,19 @@ tracker announce 取 peer、TCP/uTP 直连、BEP 9 分片拼装，拼全后 SHA-
 fetched/超时/失败/早筛丢弃计数，翻设置重启即可用管线日志 A/B 对比；
 订阅源专用抓取器固定 anacrolix。
 
+第三个底座 `libtorrent` 跑在独立的边车进程里（libtorrent-rasterbar
+2.0.11，Go 侧只经长度前缀 JSON 帧协议与之通信，主二进制保持纯 Go
+静态构建）。边车以预编译发布资产的形式随版本发布
+（`dhtsearch-lt-sidecar-linux-<arch>`，非主包的一部分）：安装/升级时
+install.sh 会自动从同一发布里下载它、校验 sha256 并安装到服务端
+二进制旁边（`/usr/local/bin/dhtsearch-lt-sidecar`），切
+`META_FETCHER=libtorrent` 不需要任何手工配置。装没装上是明账：
+安装/升级结尾的汇总与 `dhtsearch status` 都有一行
+「libtorrent 边车：已安装 … / 未安装（原因）」；下载失败会重试一次
+并在汇总里大声警告，但不会让安装/升级整体失败（边车是可选组件）。
+早于边车的旧发布不带这个资产（汇总里会写明），选了 libtorrent 又
+没有边车时，服务端按设计在启动时大声报错退出、不会静默降级。
+
 **停转看门狗**（`CRAWLER_WATCHDOG_ENABLED`，默认开）：入库管线有两类坏法
 ——全冻（抓取路径被锁焊死，`fetched` 纹丝不动）和爬行（没冻死但吞吐塌到
 基线的零头）。看门狗每分钟采样：发现还在动而入库 15 分钟零增长 → 打
@@ -232,7 +245,7 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | `DHT_IDENTITIES` | `1` | 单进程 DHT 身份数（各自 node ID/路由表，监听 `DHT_PORT..DHT_PORT+N-1`，钳 1–16，需重启） |
 | `META_WORKERS` | `128` | 元数据并发 worker 数（入库速度的主要旋钮） |
 | `META_SHARDS` | `8` | anacrolix 底座的客户端分片数（按哈希首字节路由，摊薄单客户端全局锁，需重启） |
-| `META_FETCHER` | `anacrolix` | 元数据抓取底座：`anacrolix` / `native`（自研薄抓取器），需重启；订阅源抓取器固定 anacrolix |
+| `META_FETCHER` | `anacrolix` | 元数据抓取底座：`anacrolix` / `native`（自研薄抓取器）/ `libtorrent`（边车进程，安装/升级时自动下载安装，见「抓取管线」一节），需重启；订阅源抓取器固定 anacrolix |
 | `META_TIMEOUT` | `45s` | 单个元数据获取超时 |
 | `META_NEG_CACHE_ENABLED` | `true` | 抓取准入负缓存：已入库跳过 + 失败退避（热生效） |
 | `META_NEG_CACHE_MAX_BACKOFF_H` | `24` | 失败退避上限小时数（1h 起翻倍，热生效） |
