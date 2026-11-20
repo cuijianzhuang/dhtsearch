@@ -116,8 +116,12 @@ export default async function SearchPage({ searchParams }: PageProps) {
 
   return (
     <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 py-6">
-      {/* Header: logo + search box + appearance switcher */}
-      <header className="flex items-center gap-4">
+      {/* Header: logo + search box + appearance switcher. On phones
+          the three no longer share one row: logo + switcher keep the
+          first row and the search box wraps to its own full-width row
+          — squeezed into the leftover ~110px it collapsed to a 41px
+          input that showed a single character of the query. */}
+      <header className="flex flex-wrap items-center gap-x-4 gap-y-3">
         <Link
           href="/"
           className="inline-flex min-h-11 shrink-0 items-center text-xl font-bold tracking-tight hover:text-accent-ink"
@@ -127,10 +131,10 @@ export default async function SearchPage({ searchParams }: PageProps) {
         {/* min-w-0 lets this flex child shrink below the input's intrinsic
             width; without it the row overflows narrow viewports and pushes
             the submit button off-screen. */}
-        <div className="min-w-0 flex-1">
+        <div className="order-3 min-w-0 w-full sm:order-none sm:w-auto sm:flex-1">
           <SearchBox initialQuery={q} />
         </div>
-        <div className="shrink-0">
+        <div className="ml-auto shrink-0 sm:ml-0">
           <AppearanceSwitcher defaultAppearance={site.themeAppearance} />
         </div>
       </header>
