@@ -234,7 +234,7 @@ func TestPrescreenAB(t *testing.T) {
 			}
 		}
 		cfg.MaxFiles = 50
-		return &Fetcher{client: dest, cfg: cfg}
+		return &Fetcher{clients: []*torrent.Client{dest}, cfg: cfg}
 	}
 
 	runBatch := func(f *Fetcher, hashes []string, workers int) (fetched int, wall time.Duration) {
@@ -302,7 +302,7 @@ func TestPrescreenAB(t *testing.T) {
 // item must come back as a prescreen drop, quickly).
 func TestRunQueuePrescreen(t *testing.T) {
 	dest := loopbackClient(t)
-	f := &Fetcher{client: dest, cfg: Config{
+	f := &Fetcher{clients: []*torrent.Client{dest}, cfg: Config{
 		Workers: 2, Timeout: 5 * time.Second, MaxFiles: 50,
 		PrescreenEnabled: true, PrescreenTimeout: 200 * time.Millisecond,
 	}}

@@ -31,6 +31,7 @@ const (
 	KeyCrawlerWatchdogEnabled = "CRAWLER_WATCHDOG_ENABLED"
 	// metadata
 	KeyMetaWorkers          = "META_WORKERS"
+	KeyMetaShards           = "META_SHARDS"
 	KeyMetaTimeout          = "META_TIMEOUT"
 	KeyMetaPrescreenEnabled = "META_PRESCREEN_ENABLED"
 	KeyMetaPrescreenTimeout = "META_PRESCREEN_TIMEOUT"
@@ -189,6 +190,8 @@ var Registry = []Item{
 	// --- metadata ---
 	{Key: KeyMetaWorkers, Group: "metadata", Label: "元数据 worker 数", Type: TypeInt, Default: "128", Editable: true, Restart: true,
 		Min: f64(1), Max: f64(2048), Desc: "入库吞吐的主要旋钮；实测 128 最优，256 反而因争抢下降"},
+	{Key: KeyMetaShards, Group: "metadata", Label: "元数据客户端分片数", Type: TypeInt, Default: "8", Editable: true, Restart: true,
+		Min: f64(1), Max: f64(64), Desc: "抓取用的 torrent 客户端数量：种子按 infohash 首字节分片到各客户端，把单客户端全局锁的争用摊开（128 worker、8 片时每片约 16 个并发种子，而不是 128 个全挤在一把锁上）；调大摊薄锁争用，调到 1 回到单客户端"},
 	{Key: KeyMetaTimeout, Group: "metadata", Label: "元数据超时", Type: TypeDuration, Default: "45s", Editable: true,
 		Min: f64(1), Max: f64(600), Desc: "单个种子等元数据的最长时长，保存后立即生效；实测缩短会让成功率塌陷，不要低于 20s"},
 	{Key: KeyMetaPrescreenEnabled, Group: "metadata", Label: "元数据早筛", Type: TypeBool, Default: "true", Editable: true,

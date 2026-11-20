@@ -215,6 +215,7 @@ func main() {
 	dhtPort := flag.Int("dht-port", envInt("DHT_PORT", 0), "DHT UDP listen port (0 = random)")
 	samplers := flag.Int("dht-samplers", envInt("DHT_SAMPLERS", 8), "concurrent BEP 51 sampling workers")
 	metaWorkers := flag.Int("meta-workers", envInt("META_WORKERS", 128), "metadata fetch worker count")
+	metaShards := flag.Int("meta-shards", envInt("META_SHARDS", 8), "metadata torrent client shards (hashes are spread across clients to split the per-client lock contention)")
 	metaTimeout := flag.Duration("meta-timeout", envDuration("META_TIMEOUT", 45*time.Second), "metadata fetch timeout per torrent")
 	metaPrescreen := flag.Bool("meta-prescreen", envBool("META_PRESCREEN_ENABLED", true),
 		"prescreen fetches: abandon a hash early when no peer connects within the prescreen window")
@@ -328,6 +329,7 @@ func main() {
 	reg(settings.KeyDHTSamplers, strconv.Itoa(*samplers))
 	reg(settings.KeyFetchMetadata, strconv.FormatBool(*fetchMetadata))
 	reg(settings.KeyMetaWorkers, strconv.Itoa(*metaWorkers))
+	reg(settings.KeyMetaShards, strconv.Itoa(*metaShards))
 	reg(settings.KeyMetaTimeout, metaTimeout.String())
 	reg(settings.KeyMetaPrescreenEnabled, strconv.FormatBool(*metaPrescreen))
 	reg(settings.KeyMetaPrescreenTimeout, metaPrescreenTimeout.String())
@@ -491,6 +493,7 @@ func main() {
 		var err error
 		mainMetaCfg := metadata.Config{
 			Workers:     mgr.Int(settings.KeyMetaWorkers),
+			Shards:      mgr.Int(settings.KeyMetaShards),
 			Timeout:     mgr.Duration(settings.KeyMetaTimeout),
 			TimeoutFunc: func() time.Duration { return mgr.Duration(settings.KeyMetaTimeout) },
 			Trackers:    trackerList,
@@ -578,7 +581,11 @@ func main() {
 			fs.Run(ctx)
 		}(feedSvc)
 		feedMetaCfg := metadata.Config{
-			Workers:     mgr.Int(settings.KeyFeedsWorkers),
+			Workers: mgr.Int(settings.KeyFeedsWorkers),
+			// One client, as before: feed hashes are few and their
+			// swarms are live — the dedicated single client is the
+			// point of this fetcher (see the comment above).
+			Shards:      1,
 			Timeout:     mgr.Duration(settings.KeyFeedsMetaTimeout),
 			TimeoutFunc: func() time.Duration { return mgr.Duration(settings.KeyFeedsMetaTimeout) },
 			Trackers:    trackerList,
