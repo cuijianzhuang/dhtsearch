@@ -1,8 +1,10 @@
 // Hand-rolled SVG/div charts for the admin overview dashboard.
 //
-// No chart library: the dashboard needs exactly three shapes (funnel
-// bars, a donut, an area line) and a dependency would cost more bundle
-// than these ~150 lines. Every color is a CSS custom property (or a
+// No chart library: the dashboard needs exactly two shapes (a donut
+// and an area line) and a dependency would cost more bundle than
+// these ~150 lines. (The ingest funnel that used to live here was
+// replaced by the PipelineFlow hero, which shows the same counters
+// as a live flow instead of static bars.) Every color is a CSS custom property (or a
 // color-mix of one), so charts follow the operator's chosen theme
 // color and both appearances — nothing here names a raw hue.
 
@@ -17,54 +19,6 @@ export const CHART = {
   danger: "var(--danger)",
   warn: "var(--warn)",
 } as const;
-
-export interface FunnelStage {
-  label: string;
-  value: number;
-  color: string;
-  /** Small note under the value, e.g. a share percentage. */
-  sub?: string;
-}
-
-/** Horizontal funnel: one bar per stage, widths relative to the first
- *  stage, animated on value change. The fill is a full-width div
- *  scaled on X (transform, compositor-driven) rather than a width
- *  transition, which would re-run layout every frame of every poll
- *  on a phone CPU. */
-export function FunnelBars({ stages }: { stages: FunnelStage[] }) {
-  const base = Math.max(1, stages[0]?.value ?? 1);
-  return (
-    <div>
-      {stages.map((s) => (
-        <div
-          key={s.label}
-          className="grid grid-cols-[4.4rem_1fr_auto] items-center gap-3 py-1.5 sm:grid-cols-[5.5rem_1fr_auto]"
-        >
-          <span className="truncate text-sm text-mute">{s.label}</span>
-          <div className="h-6 overflow-hidden rounded-md bg-soft">
-            <div
-              className="h-full w-full origin-left rounded-md transition-transform duration-700 ease-out"
-              style={{
-                transform: `scaleX(${Math.max(s.value > 0 ? 0.015 : 0, s.value / base)})`,
-                background: s.color,
-              }}
-            />
-          </div>
-          <span className="text-right">
-            <span className="text-sm font-medium tabular-nums text-ink-2">
-              {formatCount(s.value)}
-            </span>
-            {s.sub && (
-              <span className="block text-[11px] tabular-nums text-faint">
-                {s.sub}
-              </span>
-            )}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 export interface DonutSegment {
   label: string;

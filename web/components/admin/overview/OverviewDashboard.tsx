@@ -17,7 +17,8 @@ import type {
 } from "@/lib/admin";
 import { formatCount, formatDate, formatRelativeTime, formatSize } from "@/lib/format";
 import AnimatedNumber from "./AnimatedNumber";
-import { CHART, DonutChart, FunnelBars, MeterBar, TrendLine } from "./charts";
+import PipelineFlow from "./PipelineFlow";
+import { CHART, DonutChart, MeterBar, TrendLine } from "./charts";
 
 const POLL_MS = 8000;
 
@@ -44,6 +45,14 @@ export default function OverviewDashboard({
   initialLatest: AdminListResponse;
 }) {
   const [overview, setOverview] = useState(initialOverview);
+  // The previous poll's payload, kept so the pipeline hero can derive
+  // per-interval deltas (the only honest source of "is it moving").
+  // Seeded from the SSR payload, so the first poll already yields a
+  // real interval instead of a fabricated one.
+  const overviewRef = useRef(initialOverview);
+  const [prevOverview, setPrevOverview] = useState<AdminOverview | null>(
+    null
+  );
   const [trends, setTrends] = useState(initialTrends);
   const [range, setRange] = useState<AdminTrendsRange>(initialTrends.range);
   const [latest, setLatest] = useState<AdminTorrentItem[]>(
@@ -79,6 +88,8 @@ export default function OverviewDashboard({
         fetchKind<AdminTrends>("trends", rangeRef.current),
         fetchKind<AdminListResponse>("latest"),
       ]);
+      setPrevOverview(overviewRef.current);
+      overviewRef.current = o;
       setOverview(o);
       setTrends(t);
       applyLatest(l.results);
@@ -120,13 +131,11 @@ export default function OverviewDashboard({
 
   const o = overview;
   const s = o.stats ?? {};
-  const seen = s.seen ?? 0;
   const fetched = s.fetched ?? 0;
   const adult = s.adult_filtered ?? 0;
   const spam = s.spam_filtered ?? 0;
   const size = s.size_filtered ?? 0;
   const filtered = adult + spam + size;
-  const passed = Math.max(0, fetched - filtered);
   const mod = o.moderation;
 
   return (
@@ -154,6 +163,14 @@ export default function OverviewDashboard({
         </button>
       </div>
 
+      {/* Hero: the ingest pipeline, live. First because it is the
+          page's primary signal — is data moving, and where does it
+          stop — and because every pipeline counter lives here and
+          nowhere else (the blocks below never repeat them). */}
+      <div className="mt-3">
+        <PipelineFlow overview={o} prev={prevOverview} stale={stale} />
+      </div>
+
       {/* KPI row. min-w-0 on every grid item below (here and in the
           panels): a grid item's automatic minimum size is its content's
           min-content, and a truncating (nowrap) descendant still
@@ -161,7 +178,7 @@ export default function OverviewDashboard({
           torrent name in 最新入库 used to stretch the whole column to
           ~1900px on a 390px phone, and the browser then rendered the
           page at desktop width. min-w-0 caps the item at its track. */}
-      <section className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6 [&>*]:min-w-0">
+      <section className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6 [&>*]:min-w-0">
         <KpiCard label="种子总数" value={o.torrents} sub={`数据库 ${o.dialect}`} />
         <KpiCard label="今日新增" value={o.today} sub="今日 0 点以来" />
         <KpiCard
@@ -252,107 +269,20 @@ export default function OverviewDashboard({
         </Panel>
       </div>
 
-      {/* Pipeline funnel + live ingest stream */}
-      <div className="mt-4 grid gap-4 lg:grid-cols-3 [&>*]:min-w-0">
-        <Panel title="收录管线" className="lg:col-span-2">
-          <FunnelBars
-            stages={[
-              { label: "发现", value: seen, color: CHART.neutral },
-              {
-                label: "元数据成功",
-                value: fetched,
-                color: CHART.priSoft,
-                sub: pct(fetched, seen),
-              },
-              {
-                label: "通过过滤",
-                value: passed,
-                color: CHART.pri,
-                sub: pct(passed, fetched),
-              },
-            ]}
-          />
-          <div className="mt-2 border-t border-line-2 pt-2">
-            <p className="py-1 text-xs font-medium text-faint">其中被过滤</p>
-            <FunnelBars
-              stages={[
-                { label: "成人", value: adult, color: CHART.danger },
-                { label: "垃圾", value: spam, color: CHART.warn },
-                { label: "体积", value: size, color: CHART.priFaint },
-              ]}
-            />
-          </div>
-          <p className="mt-3 text-xs leading-relaxed text-faint">
-            管线计数为进程累计值；库内总量另含订阅源直投与人工删除，不在此漏斗内。
-            元数据超时 {formatCount(o.fetch?.timed_out)} · 失败{" "}
-            {formatCount(o.fetch?.failed)} · 早筛丢弃{" "}
-            {formatCount(o.fetch?.prescreen_dropped)}。
-          </p>
-          <DetailRows
-            rows={[
-              ["发现 infohash（seen）", formatCount(seen)],
-              ["成功入库（fetched）", formatCount(fetched)],
-              ["成人过滤", formatCount(adult)],
-              ["垃圾过滤", formatCount(spam)],
-              ["体积过滤", formatCount(size)],
-              ["元数据超时", formatCount(o.fetch?.timed_out)],
-              ["元数据失败", formatCount(o.fetch?.failed)],
-              ["早筛丢弃", formatCount(o.fetch?.prescreen_dropped)],
-              ["抓取队列深度", formatCount(o.fetch?.queue_depth)],
-            ]}
-          />
-        </Panel>
 
-        <Panel
-          title="最新入库"
-          action={
-            <span className="inline-flex items-center gap-1.5 text-xs text-faint">
-              <span className="anim-live-dot h-1.5 w-1.5 rounded-full bg-accent" />
-              实时
-            </span>
-          }
-        >
-          {latest.length === 0 ? (
-            <p className="py-6 text-center text-sm text-faint">暂无数据</p>
-          ) : (
-            <ul className="-my-1">
-              {latest.map((it) => (
-                <li
-                  key={it.info_hash}
-                  className={fresh.has(it.info_hash) ? "anim-rise-in" : undefined}
-                >
-                  <Link
-                    href={`/admin/torrents/${it.info_hash}`}
-                    className="block py-2"
-                  >
-                    <span className="block truncate text-sm text-ink-2 transition-colors hover:text-accent-ink">
-                      {it.name || it.raw_name}
-                    </span>
-                    <span className="mt-0.5 block text-xs tabular-nums text-faint">
-                      {formatRelativeTime(it.created_at)} ·{" "}
-                      {formatSize(it.total_size)} · {it.file_count} 个文件
-                    </span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Panel>
-      </div>
-
-      {/* Module status panels */}
-      <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4 [&>*]:min-w-0">
+      {/* Module status panels: secondary detail. Their 明细 lists no
+          longer repeat numbers shown in the hero, the KPI row, the
+          donut or the panel's own meters/ministats — each counter
+          lives in exactly one visible place on this page. */}
+      <p className="mt-6 mb-3 text-xs font-medium tracking-wide text-faint">
+        模块状态
+      </p>
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 [&>*]:min-w-0">
         {o.crawler && (
           <Panel title="爬虫状态">
             <StatusLine
               ok={o.crawler.enabled}
               text={o.crawler.enabled ? "运行中" : "已禁用"}
-            />
-            <MeterBar
-              label="排队节点"
-              value={o.crawler.queued_nodes}
-              max={o.crawler.nodes + o.crawler.queued_nodes}
-              color={CHART.priSoft}
             />
             <MeterBar
               label="采样收获"
@@ -361,12 +291,8 @@ export default function OverviewDashboard({
             />
             <DetailRows
               rows={[
-                ["已见 infohash", formatCount(o.crawler.seen_infohashes)],
-                ["路由表节点", formatCount(o.crawler.nodes)],
-                ["排队节点", formatCount(o.crawler.queued_nodes)],
                 ["采样次数", formatCount(o.crawler.sampled)],
                 ["采样出错", formatCount(o.crawler.sample_errors)],
-                ["采样收获", formatCount(o.crawler.harvested)],
                 ["评分追踪节点", formatCount(o.crawler.tracked_nodes)],
                 ["节点平均分", (o.crawler.avg_node_score ?? 0).toFixed(2)],
                 ["冷却剔除节点", formatCount(o.crawler.banned_nodes)],
@@ -393,9 +319,6 @@ export default function OverviewDashboard({
             />
             <DetailRows
               rows={[
-                ["队列深度", formatCount(o.scraper.queue)],
-                ["已刮削", formatCount(o.scraper.scraped)],
-                ["有 seeder", formatCount(o.scraper.seeded)],
                 ["刮削出错", formatCount(o.scraper.scrape_errors)],
                 ["丢弃", formatCount(o.scraper.dropped)],
                 ["被挤出", formatCount(o.scraper.evicted)],
@@ -438,14 +361,7 @@ export default function OverviewDashboard({
             </>
           )}
           <DetailRows
-            rows={[
-              ["已审核", formatCount(mod?.reviewed)],
-              ["成人删除", formatCount(mod?.adult_removed)],
-              ["垃圾删除", formatCount(mod?.spam_removed)],
-              ["审核出错", formatCount(mod?.errors)],
-              ["待审核", formatCount(mod?.pending)],
-              ["黑名单总数", formatCount(mod?.blocked)],
-            ]}
+            rows={[["审核出错", formatCount(mod?.errors)]]}
           />
         </Panel>
 
@@ -486,16 +402,47 @@ export default function OverviewDashboard({
                     ([k, v]) => [`订阅源 ${k}`, formatCount(v)] as [string, string]
                   )
                 : []),
-              ...(o.trending
-                ? [
-                    ["欧美电影", formatCount(o.trending.movies)],
-                    ["美剧", formatCount(o.trending.tv)],
-                    ["日剧", formatCount(o.trending.tv_jp)],
-                    ["韩剧", formatCount(o.trending.tv_kr)],
-                  ] as [string, string][]
-                : []),
             ]}
           />
+        </Panel>
+      </div>
+
+      {/* Latest ingested stream: last, it is a feed, not a status. */}
+      <div className="mt-4 [&>*]:min-w-0">
+        <Panel
+          title="最新入库"
+          action={
+            <span className="inline-flex items-center gap-1.5 text-xs text-faint">
+              <span className="anim-live-dot h-1.5 w-1.5 rounded-full bg-accent" />
+              实时
+            </span>
+          }
+        >
+          {latest.length === 0 ? (
+            <p className="py-6 text-center text-sm text-faint">暂无数据</p>
+          ) : (
+            <ul className="-my-1 sm:grid sm:grid-cols-2 sm:gap-x-8">
+              {latest.map((it) => (
+                <li
+                  key={it.info_hash}
+                  className={fresh.has(it.info_hash) ? "anim-rise-in" : undefined}
+                >
+                  <Link
+                    href={`/admin/torrents/${it.info_hash}`}
+                    className="block py-2"
+                  >
+                    <span className="block truncate text-sm text-ink-2 transition-colors hover:text-accent-ink">
+                      {it.name || it.raw_name}
+                    </span>
+                    <span className="mt-0.5 block text-xs tabular-nums text-faint">
+                      {formatRelativeTime(it.created_at)} ·{" "}
+                      {formatSize(it.total_size)} · {it.file_count} 个文件
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
         </Panel>
       </div>
     </div>

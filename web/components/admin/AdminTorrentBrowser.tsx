@@ -67,7 +67,7 @@ export default async function AdminTorrentBrowser({
           defaultValue={q}
           placeholder="按名称关键词搜索"
           aria-label="按名称关键词搜索"
-          className="min-h-11 min-w-0 flex-1 rounded-lg border border-input bg-surface px-4 text-base text-ink placeholder:text-faint focus:border-accent focus:outline-none sm:flex-none sm:basis-72"
+          className="min-h-11 min-w-0 flex-1 max-sm:basis-full rounded-lg border border-input bg-surface px-4 text-base text-ink placeholder:text-faint focus:border-accent focus:outline-none sm:flex-none sm:basis-72"
         />
         {!lockedStatus && (
           <select
