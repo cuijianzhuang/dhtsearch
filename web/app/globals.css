@@ -199,20 +199,41 @@
 }
 
 /* Admin overview pipeline flow (components/admin/overview/PipelineFlow.tsx).
-   A dot is painted at the trailing edge of a full-track span; sliding
-   the span from -100% to 0 carries the dot across the whole track with
-   transform only — no layout, no per-frame JS. The dashboard sets
-   animation-duration/delay inline from the poll-delta tier; a stage
-   with a zero delta renders no dots at all (visibly still), and the
-   .flow-paused wrapper freezes every dot when the data goes stale.
-   Under reduced motion the dots are not shown: the diagram stays as
-   static boxes with live counters. */
+   A comet is painted at the trailing edge of a full-track span;
+   sliding the span from -100% to 0 carries the comet across the
+   whole segment with transform only — no layout, no per-frame JS.
+   The dashboard sets animation-duration/delay inline from the
+   poll-delta tier; a stage with a zero delta renders no comets at
+   all (visibly still), and the .flow-paused wrapper freezes every
+   comet when the data goes stale. Under reduced motion the comets
+   are not shown: the diagram stays as static boxes with live
+   counters.
+
+   The paint is a comet, not a speck — the previous read (a 1.8px
+   radius dot at 78% accent, no halo, hard loop pop) was invisible
+   at desktop size and lost against the mesh backdrop's own static
+   node dots. Now: a bright head (white-hot core into full accent,
+   ≈9px across) riding the rail line, a soft accent halo around it,
+   and a tapering trail behind it — behind, because travel is
+   strictly in the data-flow direction, so the tail points back at
+   the stage the work came from. The keyframes fade the comet in
+   at the upstream edge and out at the downstream edge, so it
+   appears to leave one ring and dissolve into the next instead of
+   popping at the loop seam. */
 @keyframes flow-x {
-  from {
+  0% {
     transform: translateX(-100%);
+    opacity: 0;
   }
-  to {
+  12% {
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  100% {
     transform: translateX(0);
+    opacity: 0;
   }
 }
 
@@ -225,11 +246,59 @@
 }
 
 .flow-dot-x {
-  background: radial-gradient(
-    circle at calc(100% - 3px) 50%,
-    color-mix(in srgb, var(--pri) 78%, var(--card)) 0 1.8px,
-    transparent 2.8px
-  );
+  background:
+    radial-gradient(
+      circle at calc(100% - 7px) 50%,
+      color-mix(in srgb, var(--pri) 52%, #fff) 0 2.2px,
+      var(--pri) 4.4px,
+      transparent 5.6px
+    ),
+    linear-gradient(
+      to left,
+      color-mix(in srgb, var(--pri) 55%, transparent),
+      color-mix(in srgb, var(--pri) 18%, transparent) 55%,
+      transparent
+    ),
+    radial-gradient(
+      30px 8px at calc(100% - 30px) 50%,
+      color-mix(in srgb, var(--pri) 26%, transparent),
+      transparent 72%
+    ),
+    radial-gradient(
+      circle at calc(100% - 7px) 50%,
+      color-mix(in srgb, var(--pri) 34%, transparent) 0,
+      transparent 14px
+    );
+  background-size:
+    auto,
+    46px 4px,
+    auto,
+    auto;
+  background-position:
+    0 0,
+    right center,
+    0 0,
+    0 0;
+  background-repeat: no-repeat;
+  animation-name: flow-x;
+}
+
+/* Phone variant: the rail slot is only 6px wide, so there is no
+   room for a trail — the comet is just the head and a clipped
+   halo, pulsing through the slot on the same tier timing. */
+.flow-dot-m {
+  background:
+    radial-gradient(
+      circle at calc(100% - 3px) 50%,
+      color-mix(in srgb, var(--pri) 45%, #fff) 0 1.4px,
+      var(--pri) 2.8px,
+      transparent 3.6px
+    ),
+    radial-gradient(
+      circle at calc(100% - 3px) 50%,
+      color-mix(in srgb, var(--pri) 40%, transparent) 0,
+      transparent 7px
+    );
   animation-name: flow-x;
 }
 
