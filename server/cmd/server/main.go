@@ -924,10 +924,11 @@ func main() {
 					st.IncrStatContext(wctx, "meta_failed", failed-prevFailed(&failed))
 					pd := fetcher.PrescreenDropped()
 					st.IncrStatContext(wctx, "prescreen_dropped", pd-prevPrescreen(&pd))
-					// Peer-hint counters are an incumbent-backend
-					// capability: the native backend does not
-					// consume Item.Peers yet, so under it the
-					// counters simply stay at zero.
+					// Peer-hint counters are an optional backend
+					// capability: the incumbent and native backends
+					// consume Item.Peers and report them; a backend
+					// without the surface leaves the counters at
+					// zero.
 					if hp, ok := fetcher.(interface{ PeerHintStats() (int64, int64) }); ok {
 						hi, hf := hp.PeerHintStats()
 						st.IncrStatContext(wctx, "peer_hint_items", hi-prevHintItems(&hi))

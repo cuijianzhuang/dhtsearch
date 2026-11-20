@@ -28,7 +28,11 @@
 // Peer supply parity with the incumbent, and the one divergence:
 // the incumbent's clients get peers from the magnet's trackers plus
 // PEX; so does this fetcher (same tracker list, same announces, PEX
-// consumed). The incumbent also accepts inbound connections on its
+// consumed). Both also consume the queue's DHT peer hints
+// (metadata.Item.Peers): the native fetcher seeds them into the
+// attempt's pool before the announce round starts, so they take the
+// first fan-out slots and race tracker/PEX peers inside the same
+// budget and prescreen. The incumbent also accepts inbound connections on its
 // listen socket; this fetcher has no listener, so peers that would
 // have connected inbound after seeing our tracker announces are not
 // reached. Outbound tracker+PEX supply is the dominant channel (the
@@ -44,6 +48,7 @@ import (
 	"encoding/hex"
 	"log"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -79,6 +84,8 @@ type Fetcher struct {
 	timedOut         int64
 	failed           int64
 	prescreenDropped int64
+	hintItems        int64 // fetches that carried at least one DHT peer hint
+	hintFetched      int64 // of those, successes with a hint peer connected during the attempt
 }
 
 var _ metadata.Backend = (*Fetcher)(nil)
@@ -166,7 +173,7 @@ func (f *Fetcher) RunQueue(ctx context.Context, q *metadata.Queue, onRecord func
 				if !ok {
 					return
 				}
-				if rec, ok := f.fetch(ctx, it.Hash); ok {
+				if rec, ok := f.fetchPeers(ctx, it.Hash, it.Peers); ok {
 					onRecord(rec)
 				}
 			}
@@ -184,6 +191,19 @@ func (f *Fetcher) RunQueue(ctx context.Context, q *metadata.Queue, onRecord func
 //     completed metadata blob whose SHA-1 is not the requested
 //     infohash, or a peer claiming an impossible metadata size.
 func (f *Fetcher) fetch(ctx context.Context, hexHash string) (metadata.Record, bool) {
+	return f.fetchPeers(ctx, hexHash, nil)
+}
+
+// fetchPeers is fetch with DHT peer hints (metadata.Item.Peers):
+// addresses the crawler already knows are in this swarm, seeded
+// into the attempt's pool before the tracker announce round starts
+// so they race the tracker-supplied peers inside the same timeout
+// and prescreen budget — the incumbent's warm start, in native
+// terms. A hint is just an address: it goes through the same dial,
+// handshake and SHA-1 verification as any tracker or PEX candidate,
+// and a dead hint costs nothing but a failed dial in parallel with
+// the tracker path.
+func (f *Fetcher) fetchPeers(ctx context.Context, hexHash string, peers []netip.AddrPort) (metadata.Record, bool) {
 	rec := metadata.Record{InfoHash: hexHash}
 	if !validInfohash(hexHash) {
 		f.count(&f.failed)
@@ -199,6 +219,20 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (metadata.Record, b
 	var ih [20]byte
 	copy(ih[:], raw)
 
+	// Normalise hints to the pool's string form. Unmapping matches
+	// the incumbent's attribution (a 4-in-6 hint is the same peer as
+	// the IPv4 address trackers report in compact form).
+	var hintAddrs []string
+	for _, ap := range peers {
+		if !ap.IsValid() {
+			continue
+		}
+		hintAddrs = append(hintAddrs, netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()).String())
+	}
+	if len(peers) > 0 {
+		f.count(&f.hintItems)
+	}
+
 	timeout := f.cfg.Timeout
 	if f.cfg.TimeoutFunc != nil {
 		if d := f.cfg.TimeoutFunc(); d > 0 {
@@ -206,9 +240,13 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (metadata.Record, b
 		}
 	}
 	a := newAttempt(f, ih, hexHash)
+	a.addHints(hintAddrs)
 	outRec, outcome := a.run(ctx, timeout, f.prescreenWindow(timeout))
 	switch outcome {
 	case outcomeSuccess:
+		if len(peers) > 0 && a.hintWasConnected() {
+			f.count(&f.hintFetched)
+		}
 		f.count(&f.fetched)
 		f.report(hexHash, metadata.OutcomeFetched)
 		return outRec, true
@@ -299,6 +337,21 @@ func (f *Fetcher) PrescreenDropped() int64 {
 	return f.prescreenDropped
 }
 
+// PeerHintStats returns the peer-hint counters, mirroring
+// metadata.Fetcher.PeerHintStats: items is how many fetches carried
+// at least one DHT peer hint (Item.Peers); fetched is how many of
+// those succeeded with a hint peer connected during the attempt
+// (see attempt.hintWasConnected for exactly what that does and does
+// not claim). It is an optional Backend capability: the stats
+// mirror in main.go type-asserts for it, so the peer_hint_items /
+// peer_hint_fetched stats move under this backend exactly as they
+// do under the incumbent.
+func (f *Fetcher) PeerHintStats() (items, fetched int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hintItems, f.hintFetched
+}
+
 // Close stops the workers and releases the uTP socket.
 func (f *Fetcher) Close() {
 	if f.cancel != nil {
@@ -366,6 +419,8 @@ type attempt struct {
 	announceDone bool
 	completed    [][]byte
 	conns        map[net.Conn]struct{}
+	hints        map[string]struct{} // normalised hint addresses for this fetch
+	hintConn     bool                // a session to a hint address completed the handshake
 }
 
 func newAttempt(f *Fetcher, ih [20]byte, hexHash string) *attempt {
@@ -410,11 +465,51 @@ func (a *attempt) addPeers(addrs []string) {
 	}
 }
 
-func (a *attempt) sessionConnected() {
+// addHints records the fetch's DHT peer hints and seeds them into
+// the pool. Called once, before run, so the hints occupy the first
+// fan-out slots and race the tracker announce round rather than
+// queueing behind it. A hint address a tracker later returns is
+// deduplicated by addPeers like any repeat.
+func (a *attempt) addHints(addrs []string) {
+	if len(addrs) == 0 {
+		return
+	}
+	a.mu.Lock()
+	a.hints = make(map[string]struct{}, len(addrs))
+	for _, addr := range addrs {
+		a.hints[addr] = struct{}{}
+	}
+	a.mu.Unlock()
+	a.addPeers(addrs)
+}
+
+func (a *attempt) sessionConnected(addr string) {
 	a.mu.Lock()
 	a.connected = true
+	if _, ok := a.hints[addr]; ok {
+		a.hintConn = true
+	}
 	a.mu.Unlock()
 	a.signal()
+}
+
+// hintWasConnected reports whether any session to one of this
+// fetch's hint addresses completed the BitTorrent handshake during
+// the attempt. It is the attribution behind the hintFetched
+// counter, with the same deliberately narrow claim as the
+// incumbent's hintPeerConnected: it proves a hinted address was
+// connected for this torrent — not that the hint peer delivered
+// the decisive piece (a tracker or PEX peer at the same address
+// counts, exactly as there). One honest difference of mechanism:
+// native sessions are single-purpose and close as soon as they
+// have served, so "connected at the moment of completion" is not
+// observable here; handshake-during-the-attempt is the equivalent
+// signal, and it is still a lower bound on the hints' usefulness,
+// not a causal claim.
+func (a *attempt) hintWasConnected() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.hintConn
 }
 
 // complete hands a fully assembled (still unverified) metadata blob
