@@ -42,6 +42,11 @@
      hairlines stay visible on a dark card. */
   --web-c: color-mix(in srgb, var(--pri) 40%, var(--card));
   --mesh-c: color-mix(in srgb, var(--pri) 30%, var(--card));
+  /* The pipeline's connector track: a step stronger than the web
+     and mesh hairlines — a real rail the eye can follow from ring
+     to ring, still a mix into the card so it never competes with
+     the rings' full-strength bands. */
+  --track-c: color-mix(in srgb, var(--pri) 52%, var(--card));
   --on-pri: #ffffff;
   --warn: #d97706;
   --warn-ink: #92400e;
@@ -73,6 +78,7 @@
   --pri-line: color-mix(in srgb, var(--pri) 40%, var(--card));
   --web-c: color-mix(in srgb, var(--pri) 62%, var(--card));
   --mesh-c: color-mix(in srgb, var(--pri) 50%, var(--card));
+  --track-c: color-mix(in srgb, var(--pri) 70%, var(--card));
   --warn: #f59e0b;
   --warn-ink: #fcd34d;
   --danger: #f87171;
@@ -102,6 +108,7 @@
     --pri-line: color-mix(in srgb, var(--pri) 40%, var(--card));
     --web-c: color-mix(in srgb, var(--pri) 62%, var(--card));
     --mesh-c: color-mix(in srgb, var(--pri) 50%, var(--card));
+    --track-c: color-mix(in srgb, var(--pri) 70%, var(--card));
     --warn: #f59e0b;
     --warn-ink: #fcd34d;
     --danger: #f87171;
@@ -345,6 +352,198 @@ body:has(> main[data-search-shell]) {
 @media (prefers-reduced-motion: reduce) {
   .flow-dot {
     display: none;
+  }
+}
+
+/* Pipeline connectors (PipelineFlow.tsx's ConnectorLayer): a real
+   rail from each ring's edge to the next ring's edge, with an
+   accent chevron at the downstream end pointing into the next
+   ring — the stages read as one connected pipeline, not five
+   nodes floating over the mesh. The layer sits above the mesh
+   backdrop and below the stage row (so below the comets, which
+   ride the rail through their slots, and below the spider).
+
+   The geometry reuses the spider anchors' arithmetic exactly:
+   the five stage columns are equal flex shares and the spacers
+   are fixed (6px phones, 48px from sm, 64px from lg), so ring i's
+   centre sits at (10% − 2S/5) + i·(20% + S/5) of the row width
+   and each connector spans centre + R to the next centre − R
+   (R = 26px phones, 42px sm, 40px lg). The vertical position is
+   the ring centre (26/42/40px, the .spider-body tops). The rail
+   itself is a 2px rounded line in --track-c; while the segment
+   flows, a pale dash overlay drifts downstream inside it and the
+   chevron pulses, both at the tier's period set inline — the
+   same plumbing as the web/mesh pulses, no new data bindings.
+   The segment feeding the stalled fetch stage takes the warning
+   palette; the crawler-disabled case dims the whole layer. A
+   stale poll freezes drift and pulse with everything else
+   (.flow-paused). Under reduced motion the rail and chevron stay
+   — they are information, not motion — but the drift and pulse
+   stop. On phones the edge-to-edge gap is only ~15–20px: the
+   same rail, with a mini chevron (8px) at its end; nothing is
+   resized to make room for it. */
+.seg-conn {
+  position: absolute;
+  top: 26px;
+  height: 20px;
+  transform: translateY(-50%);
+}
+
+.seg-conn-0 {
+  left: calc(10% + 23.6px);
+  width: max(0px, calc(20% - 50.8px));
+}
+
+.seg-conn-1 {
+  left: calc(30% + 24.8px);
+  width: max(0px, calc(20% - 50.8px));
+}
+
+.seg-conn-2 {
+  left: calc(50% + 26px);
+  width: max(0px, calc(20% - 50.8px));
+}
+
+.seg-conn-3 {
+  left: calc(70% + 27.2px);
+  width: max(0px, calc(20% - 50.8px));
+}
+
+@media (min-width: 640px) {
+  .seg-conn {
+    top: 42px;
+  }
+
+  .seg-conn-0 {
+    left: calc(10% + 22.8px);
+    width: calc(20% - 74.4px);
+  }
+
+  .seg-conn-1 {
+    left: calc(30% + 32.4px);
+    width: calc(20% - 74.4px);
+  }
+
+  .seg-conn-2 {
+    left: calc(50% + 42px);
+    width: calc(20% - 74.4px);
+  }
+
+  .seg-conn-3 {
+    left: calc(70% + 51.6px);
+    width: calc(20% - 74.4px);
+  }
+}
+
+@media (min-width: 1024px) {
+  .seg-conn {
+    top: 40px;
+  }
+
+  .seg-conn-0 {
+    left: calc(10% + 14.4px);
+    width: calc(20% - 67.2px);
+  }
+
+  .seg-conn-1 {
+    left: calc(30% + 27.2px);
+    width: calc(20% - 67.2px);
+  }
+
+  .seg-conn-2 {
+    left: calc(50% + 40px);
+    width: calc(20% - 67.2px);
+  }
+
+  .seg-conn-3 {
+    left: calc(70% + 52.8px);
+    width: calc(20% - 67.2px);
+  }
+}
+
+.seg-track {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  left: 0;
+  height: 2px;
+  transform: translateY(-50%);
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--track-c);
+}
+
+.seg-conn-warn .seg-track {
+  background: color-mix(in srgb, var(--warn) 52%, var(--card));
+}
+
+.seg-track-drift {
+  position: absolute;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    to right,
+    rgb(255 255 255 / 0.5) 0 3px,
+    transparent 3px 11px
+  );
+  animation: seg-drift linear infinite;
+}
+
+@keyframes seg-drift {
+  to {
+    background-position-x: 11px;
+  }
+}
+
+.seg-arrow {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  width: 8px;
+  height: 12px;
+  transform: translateY(-50%);
+  color: var(--pri);
+}
+
+@media (min-width: 640px) {
+  .seg-arrow {
+    width: 12px;
+    height: 18px;
+  }
+}
+
+.seg-conn-warn .seg-arrow {
+  color: var(--warn);
+}
+
+.seg-arrow-pulse {
+  animation: seg-arrow-pulse ease-in-out infinite;
+}
+
+@keyframes seg-arrow-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: translateY(-50%) translateX(0);
+  }
+
+  50% {
+    opacity: 1;
+    transform: translateY(-50%) translateX(1px);
+  }
+}
+
+.flow-paused .seg-track-drift,
+.flow-paused .seg-arrow-pulse {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seg-track-drift {
+    display: none;
+  }
+
+  .seg-arrow-pulse {
+    animation: none;
   }
 }
 
