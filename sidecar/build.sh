@@ -23,7 +23,12 @@ mkdir -p "$WORK"
 
 if [ ! -d "$WORK/libtorrent" ]; then
     echo "==> Fetching libtorrent $LIBTORRENT_VERSION"
-    git clone --depth 1 --branch "$LIBTORRENT_VERSION" \
+    # --recurse-submodules is load-bearing: libtorrent's CMakeLists
+    # compiles deps/try_signal (a submodule) unconditionally, and a
+    # plain clone leaves it empty — CMake then fails at generate time
+    # with "Cannot find source file: deps/try_signal/try_signal.cpp".
+    git clone --depth 1 --recurse-submodules --shallow-submodules \
+        --branch "$LIBTORRENT_VERSION" \
         https://github.com/arvidn/libtorrent.git "$WORK/libtorrent"
 fi
 
