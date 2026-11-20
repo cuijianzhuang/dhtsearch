@@ -137,6 +137,12 @@ type CrawlerStatus struct {
 	AvgNodeScore  float64 `json:"avg_node_score"`
 	BannedNodes   int     `json:"banned_nodes"`
 	RestoredNodes int     `json:"restored_nodes"`
+	// Stall watchdog (internal/watchdog): Watchdog is ok, stalled
+	// (discovery moving, ingest frozen), frozen (both frozen) or
+	// disabled; WatchdogSince is the unix time the current non-ok
+	// episode began, 0 when ok or disabled.
+	Watchdog      string `json:"watchdog"`
+	WatchdogSince int64  `json:"watchdog_since,omitempty"`
 }
 
 // MetaStatus describes the metadata fetch pipeline's live state, as

@@ -325,6 +325,16 @@ func (s *Store) migrateFilesBlob() error {
 // Upsert inserts a torrent, ignoring duplicates (same info hash) and
 // infohashes previously rejected by moderation.
 func (s *Store) Upsert(t Torrent) error {
+	return s.UpsertContext(context.Background(), t)
+}
+
+// UpsertContext is Upsert with a caller-supplied context. The ingest
+// pipeline uses it with a per-record timeout: the plain Upsert runs
+// on the database/sql background context, where a write over a
+// half-dead Postgres connection (or behind a wedged pool) can park a
+// metadata worker indefinitely — the workers have no other way out,
+// since onRecord runs synchronously in their loop.
+func (s *Store) UpsertContext(ctx context.Context, t Torrent) error {
 	// Name, alias and file paths are raw DHT/feed bytes and may not be
 	// valid UTF-8; sanitize before they reach a TEXT column (Postgres
 	// rejects invalid UTF-8, SQLite does not). The file list itself is
@@ -339,7 +349,7 @@ func (s *Store) Upsert(t Torrent) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.exec(s.d.insertTorrent(),
+	_, err = s.execContext(ctx, s.d.insertTorrent(),
 		t.InfoHash, t.Name, t.TotalSize, t.FileCount, compressFiles(fj), t.CreatedAt, t.Alias, t.InfoHash)
 	return err
 }
@@ -599,7 +609,13 @@ func placeholders(n int) string {
 
 // IncrStat atomically adds delta to the named counter.
 func (s *Store) IncrStat(key string, delta int64) error {
-	_, err := s.exec(s.d.incrStat(), key, delta)
+	return s.IncrStatContext(context.Background(), key, delta)
+}
+
+// IncrStatContext is IncrStat with a caller-supplied context; see
+// UpsertContext for why the ingest pipeline bounds its writes.
+func (s *Store) IncrStatContext(ctx context.Context, key string, delta int64) error {
+	_, err := s.execContext(ctx, s.d.incrStat(), key, delta)
 	return err
 }
 

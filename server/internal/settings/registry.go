@@ -17,10 +17,11 @@ const (
 	KeyThemeColor      = "THEME_COLOR"
 	KeyThemeAppearance = "THEME_APPEARANCE"
 	// crawler
-	KeyCrawlEnabled  = "CRAWL_ENABLED"
-	KeyDHTPort       = "DHT_PORT"
-	KeyDHTSamplers   = "DHT_SAMPLERS"
-	KeyFetchMetadata = "FETCH_METADATA"
+	KeyCrawlEnabled           = "CRAWL_ENABLED"
+	KeyDHTPort                = "DHT_PORT"
+	KeyDHTSamplers            = "DHT_SAMPLERS"
+	KeyFetchMetadata          = "FETCH_METADATA"
+	KeyCrawlerWatchdogEnabled = "CRAWLER_WATCHDOG_ENABLED"
 	// metadata
 	KeyMetaWorkers          = "META_WORKERS"
 	KeyMetaTimeout          = "META_TIMEOUT"
@@ -160,6 +161,8 @@ var Registry = []Item{
 		Min: f64(1), Max: f64(256), Desc: "BEP 51 并发采样数；实测 8 已远超抓取池消耗速度，调大只会抢带宽"},
 	{Key: KeyFetchMetadata, Group: "crawler", Label: "抓取元数据", Type: TypeBool, Default: "true", Editable: true, Restart: true,
 		Desc: "关 = 只收集裸 infohash，不抓元数据、不做过滤"},
+	{Key: KeyCrawlerWatchdogEnabled, Group: "crawler", Label: "停转看门狗", Type: TypeBool, Default: "true", Editable: true,
+		Desc: "发现层在动但 15 分钟零入库时打全量 goroutine 栈告警，30 分钟仍无恢复则退出进程由 systemd 拉起自愈；发现层也冻住（像整机断网）时只告警不退出。保存后立即生效"},
 
 	// --- metadata ---
 	{Key: KeyMetaWorkers, Group: "metadata", Label: "元数据 worker 数", Type: TypeInt, Default: "128", Editable: true, Restart: true,
