@@ -164,7 +164,15 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]any{
-		"torrents":        total,
+		"torrents": total,
+		// stored_total is the same Count as "torrents", named for the
+		// pipeline hero: its 入库 stage displays the library's actual
+		// current size (identical to the 种子总数 KPI), not a value
+		// derived from the cumulative stats counters — the old
+		// fetched − filtered derivation drifted above the real total
+		// because a re-fetch of a known hash increments "fetched" on
+		// every upsert while deletions never decrement anything.
+		"stored_total":    total,
 		"today":           today,
 		"pending_review":  pending,
 		"reviewed":        total - pending,

@@ -14,7 +14,12 @@
 //                                         + timed_out + failed: work
 //                                         leaving the fetch queue)
 //   抓取 → 内容过滤    Δ fetched         (metadata successes)
-//   过滤 → 入库        Δ passed          (fetched − filtered)
+//   过滤 → 入库        Δ stored          (net new rows landing in the
+//                                         library: the stored_total
+//                                         poll delta — 入库 displays
+//                                         the library's actual current
+//                                         size, not a counter
+//                                         derivation)
 //
 //   delta tier         dots   dot period
 //   0                  0      — (stage visibly still)
@@ -38,7 +43,7 @@
 // each stage is itself a node (the ring described below), and one
 // spider — the crawler itself — rides the track at the position
 // the data says work currently reaches:
-//   Δpassed > 0            it travels the whole track, one anchor per
+//   Δstored > 0            it travels the whole track, one anchor per
 //                          quarter poll (a full traverse per poll
 //                          interval), looping while items keep
 //                          landing in the DB;
@@ -134,7 +139,14 @@ function statsOf(o: AdminOverview | null | undefined) {
     seen: s.seen ?? 0,
     fetched,
     filtered,
-    passed: Math.max(0, fetched - filtered),
+    // 入库 is the library itself: the current torrents row count
+    // the overview payload carries as stored_total (the same Count
+    // behind the 种子总数 KPI; torrents is the pre-rename field and
+    // the fallback for an older server). The old fetched − filtered
+    // derivation drifted above the real total — a re-fetch of a
+    // known hash increments fetched on every upsert, and deletions
+    // never decrement a counter.
+    stored: o?.stored_total ?? o?.torrents ?? 0,
     timedOut: o?.fetch?.timed_out ?? 0,
     failed: o?.fetch?.failed ?? 0,
     prescreen: o?.fetch?.prescreen_dropped ?? 0,
@@ -158,7 +170,10 @@ export default function PipelineFlow({
   const dSeen = before ? delta(cur.seen, before.seen) : null;
   const dFetched = before ? delta(cur.fetched, before.fetched) : null;
   const dFiltered = before ? delta(cur.filtered, before.filtered) : null;
-  const dPassed = before ? delta(cur.passed, before.passed) : null;
+  // Δ stored is net new rows in the interval: deletions net against
+  // additions, and the shared delta() clamp floors a net-negative
+  // interval at 0 — the stage never reports negative flow.
+  const dStored = before ? delta(cur.stored, before.stored) : null;
   const dAttempts =
     before === null
       ? null
@@ -187,14 +202,14 @@ export default function PipelineFlow({
   // whose delta is positive: work is currently getting that far. The
   // spider's anchor and color follow the position rule documented at
   // the top of this file; its stepping is state at poll cadence.
-  const segDeltas = [dSeen, dAttempts, dFetched, dPassed];
+  const segDeltas = [dSeen, dAttempts, dFetched, dStored];
   let frontier = 0;
   for (const d of segDeltas) {
     if (d !== null && d > 0) frontier += 1;
     else break;
   }
   const allStill = segDeltas.every((d) => d === null || d <= 0);
-  const traveling = !disabled && !allStill && dPassed !== null && dPassed > 0;
+  const traveling = !disabled && !allStill && dStored !== null && dStored > 0;
   const waiting = !disabled && !allStill && !traveling;
 
   const reducedMotion = useSyncExternalStore(
@@ -336,8 +351,8 @@ export default function PipelineFlow({
           />
           <Segment tier={seg(dFetched)} />
           <Stage label="内容过滤" value={cur.filtered} delta={dFiltered} dim={disabled} nodeTone={toneOf(dFetched)} />
-          <Segment tier={seg(dPassed)} />
-          <Stage label="入库" value={cur.passed} delta={dPassed} dim={disabled} nodeTone={toneOf(dPassed)} />
+          <Segment tier={seg(dStored)} />
+          <Stage label="入库" value={cur.stored} delta={dStored} dim={disabled} nodeTone={toneOf(dStored)} />
         </div>
         <SpiderLayer
           anchor={spider.anchor}
@@ -353,8 +368,9 @@ export default function PipelineFlow({
       <p className="mt-3 border-t border-line-2 pt-2 text-xs leading-relaxed text-faint">
         元数据超时 {formatCount(cur.timedOut)} · 元数据失败{" "}
         {formatCount(cur.failed)} · 早筛丢弃 {formatCount(cur.prescreen)}
-        。管线计数为进程累计值，「本轮」为最近一次轮询间隔内的增量；
-        库内总量另含订阅源直投与人工删除，不在此管线内。
+        。除「入库」外，管线计数为进程累计值，「本轮」为最近一次
+        轮询间隔内的增量；「入库」为库内当前总数，与下方种子总数
+        一致，其「本轮」为间隔内的净增行数。
       </p>
     </section>
   );
