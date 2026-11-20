@@ -22,7 +22,7 @@
 
 Go 后端通过 DHT 网络爬虫实时采集磁力链接元数据，自动过滤成人内容与垃圾信息，Next.js 前端提供干净的搜索界面。
 
-> 本仓库是 [madeye/dhtsearch](https://github.com/madeye/dhtsearch) 的 fork。改造点：存储层双后端（SQLite / Postgres，安装时可选、装后可带数据切换）、令牌鉴权的管理端与全量配置设置页（含主题）、自定义端口与交互菜单的一键部署、合 main 自动发版。感谢上游作者的工作，许可证保持 MIT（见 [LICENSE](LICENSE)）。
+> 本仓库是 [madeye/dhtsearch](https://github.com/madeye/dhtsearch) 的 fork。改造点：存储层双后端（SQLite / Postgres，安装时可选、装后可带数据切换）、令牌鉴权的管理端与全量配置设置页（含主题）、多身份 DHT 采样与可切换的元数据抓取底座、自定义端口与交互菜单的一键部署、合 main 自动发版。感谢上游作者的工作，许可证保持 MIT（见 [LICENSE](LICENSE)）。
 >
 > Co-authored by [Kimi K3](https://www.kimi.com/).
 
@@ -44,13 +44,15 @@ Go 后端通过 DHT 网络爬虫实时采集磁力链接元数据，自动过滤
 
 | 功能 | 说明 |
 | --- | --- |
-| DHT 爬虫 | 被动监听 + BEP 51 `sample_infohashes` 主动采样发现 infohash，路由表自动维护 |
-| 元数据获取 | BEP 9 并发获取；获取前先用 BEP 15 tracker scrape 按 seeder 数排序，热门优先；抓取队列按做种数/来源/新鲜度排优先级，死哈希经早筛窗口提前放弃、不占满超时 |
+| DHT 爬虫 | 被动监听 + BEP 51 `sample_infohashes` 主动采样发现 infohash；单进程可开多个 DHT 身份（`DHT_IDENTITIES`）拓宽采样覆盖；节点按成功率/延迟打分、优选回填路由表，优质节点落库持久化，重启不从零攒 |
+| 元数据获取 | BEP 9 并发获取；获取前先用 BEP 15 tracker scrape 按 seeder 数排序，热门优先；抓取队列按做种数/来源/新鲜度排优先级，死哈希经早筛窗口提前放弃、不占满超时；抓取器按哈希分片到多个客户端（`META_SHARDS`）摊薄单客户端全局锁；底座可切换（`META_FETCHER`：anacrolix 客户端 / 自研薄抓取器 native，二者统计口径一致、可 A/B 对比） |
+| 抓取管线防护 | 准入负缓存：已入库的哈希不再重抓，失败哈希指数退避（1 小时起翻倍、封顶可调）期内不占队列；DHT 侧顺手带回的 peer 地址（announce_peer / get_peers 应答）直达抓取器作热启动；停转看门狗在发现还在动、入库却停滞时打全量协程栈自诊断，持续无进展则退出由 systemd 拉起 |
+| 做种信息 | 每轮 scrape 的做种/下载/完成数落库（`swarm_stats`，多 tracker 取最大值、无数据不写 0），搜索结果带真实做种数与五级健康度（alive / no_seed / suspect / likely_dead / unknown），支持 `sort=seeders` 与「隐藏疑似死种」 |
 | 过滤与审核 | 入库前静态过滤（成人词表 + 垃圾启发式 + 体积下限），三类过滤各有开关、阈值可调；入库后可每小时用 LLM 二次审核，并顺带清理标题广告 |
 | 发布站 RSS | 定时拉动漫花园 / Nyaa 发布 RSS，发布页标题存为别名，罗马音种子也能按中文名搜到 |
 | 热门榜单 | 每小时拉豆瓣热门榜单，首页提供快捷搜索词；榜单落库持久化，重启不丢、抓取失败指数退避重试并在后台提示 |
-| 搜索前端 | Next.js 服务端渲染，匹配种子名、清理后标题与别名三列；支持分类筛选（视频/音频/图片/文档/软件/压缩包）、三种排序、关键词 RSS 订阅与访客举报 |
-| 管理端 | `/admin` 概览（管线漏斗、入库趋势、实时轮询）、种子管理、未审核队列、黑名单、举报队列、LLM 审核专页、API 令牌、账号管理；设置页可视化全部 65 项配置（优先级：数据库覆盖 > 环境变量 > 默认值）与主题（站点名、六种主色、三态外观）；登录支持用户名密码、GitHub、OIDC SSO 与 `ADMIN_TOKEN` 恢复令牌 |
+| 搜索前端 | Next.js 服务端渲染，匹配种子名、清理后标题与别名三列；支持分类筛选（视频/音频/图片/文档/软件/压缩包）、四种排序（相关性加权评分 / 最新 / 大小 / 做种数）、关键词高亮与搜索历史、关键词 RSS 订阅与访客举报 |
+| 管理端 | `/admin` 概览（真实增量驱动的五段管线动画、入库趋势、实时轮询）、种子管理、未审核队列、黑名单、举报队列、LLM 审核专页、API 令牌、账号管理；设置总览 + 分组子页可视化全部 73 项配置（13 组，优先级：数据库覆盖 > 环境变量 > 默认值）与主题（站点名、六种主色、三态外观）；面板可发起升级并显示真实进度，版本无更新时不走升级流程；登录支持用户名密码、GitHub、OIDC SSO 与 `ADMIN_TOKEN` 恢复令牌 |
 | 公开 API 令牌 | 可选的令牌鉴权：管理端签发 `dht_` 令牌（只存哈希、明文只显示一次），逐令牌每分钟配额，可要求公开接口强制带令牌 |
 | 双数据库 | 默认 SQLite 单文件零运维；可切 Postgres：安装时 `--db` 选库、装后菜单带数据切换，服务二进制自带 `migrate` 子命令双向迁移 |
 | 部署与发版 | 一键安装脚本（自定义端口、交互菜单、systemd 双服务）、合 main 自动发版、每小时备份到 Cloudflare R2（脚本自备） |
@@ -90,7 +92,7 @@ flowchart TB
     Blocked -.->|rejected on insert, no resurrection| DB
 ```
 
-- `server/` — Go 后端：DHT 爬虫（anacrolix/dht/v2）、BEP-9 元数据获取（anacrolix/torrent）、过滤引擎（中英文成人词表 + 垃圾启发式）、存储层（默认 SQLite / modernc.org/sqlite，无 cgo；可选 Postgres / pgx，见 `DATABASE_URL`）、REST API（标准库 net/http）
+- `server/` — Go 后端：DHT 爬虫（anacrolix/dht/v2，多身份 + 节点质量评分）、BEP-9 元数据获取（anacrolix/torrent 分片客户端，或自研薄抓取器 native——只做 tracker announce 取 peer + BEP 9 拼装 + SHA-1 校验，无全局锁；`META_FETCHER` 切换）、过滤引擎（中英文成人词表 + 垃圾启发式）、存储层（默认 SQLite / modernc.org/sqlite，无 cgo；可选 Postgres / pgx，见 `DATABASE_URL`）、REST API（标准库 net/http）
 - `web/` — Next.js 前端（App Router + Tailwind，服务端渲染搜索结果）
 
 ### 发现速度
@@ -100,6 +102,8 @@ infohash 来自两条路径，**主动的那条决定吞吐**：
 - **被动**：别的节点发来的 `get_peers` / `announce_peer`。只在公网可达时才有量，NAT/VPN 后面基本为零。
 - **主动（BEP-51）**：`DHT_SAMPLERS` 个 worker 并发对路由表里的节点发 `sample_infohashes`，每个节点一次能返回几十个 infohash。查询带随机 `target`，回包里的节点又会入队，于是采样本身就是一次 ID 空间游走；每个节点按它自己声明的 `interval`（钳在 1 分钟～2 小时）重采。
 - 路由表由 `TableMaintainer` 维护 + 定时随机 `find_node` 拓宽——**路由表空了发现就会停**，`/api/stats` 的 `crawler.nodes` 就是看这个的。
+- **多身份**：单个 DHT 身份只能采样到自己路由表邻域的 ID 空间。`DHT_IDENTITIES > 1` 时同进程起多个身份（各自随机 node ID、路由表与节点质量跟踪，监听 `DHT_PORT..DHT_PORT+N-1`），采样面按身份数拓宽；`DHT_SAMPLERS` 是每身份的 worker 数。节点质量（衰减加权成功率 + 延迟）决定回填优先序与重采间隔，连续失败的节点冷却禁用；优质节点快照落库（`dht_nodes`），重启时与公共路由节点一起作种子恢复。
+- **peer 顺手带回**：爬虫处理入站 `announce_peer` 与自己 `get_peers` 的应答时，把 (哈希, peer 地址) 记进有界提示缓存（每哈希 ≤8、TTL 30 分钟）；哈希入队抓取时提示一并带上，抓取器开局就直连这些 peer，不必全靠 tracker/DHT 找人。
 
 `crawler.harvested / crawler.sampled` 是每次采样的平均产出；`crawler.nodes` 归零就说明发现要停。
 
@@ -140,6 +144,41 @@ scrape），以及只作 peer 提示的 tracker1.itzmx.com、tracker.renfei.net�
 看 `/api/stats` 的 `scraper` 段：`seeded/scraped` 是命中率（有 seeder 的占比），
 `queue` 是排队深度，`evicted` 是被挤掉的低优先级 hash，`scrape_errors` 持续增长
 说明某个 tracker 挂了（自动重连，也可换 `TRACKERS`）。
+
+scrape 结果不只是排序依据：每轮的做种（seeders）/ 下载中（leechers）/ 已完成
+（completed）数按哈希落库（`swarm_stats`，同一哈希多 tracker 取各字段最大值；
+某轮全部 tracker 失败时**不写**——没数据和真 0 严格区分，搜索结果里无数据是
+`null`、真 0 是 `0`）。健康度在读取时由快照推导，五级：`alive`（做种 > 0）、
+`no_seed`（无人做种但有人在下）、`likely_dead`（0/0 且连续多轮跨度 ≥48 小时）、
+`suspect`（0/0 但证据还不够）、`unknown`（无数据）；前台文案带判定依据，
+`sort=seeders` 按做种数排（无数据垫底），`hide_dead=1` 可隐藏疑似死种。
+
+### 抓取管线：准入、底座与看门狗
+
+哈希进抓取队列前先过**准入闸**（`internal/admission`）：已在库里的直接跳过
+（此前重启或内存去重淘汰后，已入库哈希会被重新发现、重新抓一遍空转）；
+抓取失败过的按连续失败次数指数退避（1h → 2h → 4h…，上限
+`META_NEG_CACHE_MAX_BACKOFF_H`，默认 24h），退避期内跳过，一次成功清零。
+刮削刚报出做种数的哈希与订阅源哈希豁免退避（新鲜证据优先），但不豁免
+已入库检查。退避状态落库（`fetch_attempts`，随数据库迁移一起搬）。
+
+抓取底座由 `META_FETCHER` 选：`anacrolix`（默认，torrent 客户端按哈希首字节
+分片到 `META_SHARDS` 个客户端摊薄全局锁）或 `native`（自研薄抓取器：只做
+tracker announce 取 peer、TCP/uTP 直连、BEP 9 分片拼装，拼全后 SHA-1 必须
+等于目标 infohash 才算成功；没有客户端级全局锁，卡死的 peer 只损失自己
+的协程）。两底座同一队列、同一 45 秒预算与早筛、同一套
+fetched/超时/失败/早筛丢弃计数，翻设置重启即可用管线日志 A/B 对比；
+订阅源专用抓取器固定 anacrolix。
+
+**停转看门狗**（`CRAWLER_WATCHDOG_ENABLED`，默认开）：入库管线有两类坏法
+——全冻（抓取路径被锁焊死，`fetched` 纹丝不动）和爬行（没冻死但吞吐塌到
+基线的零头）。看门狗每分钟采样：发现还在动而入库 15 分钟零增长 → 打
+ERROR + 全量协程栈；30 分钟仍零增长 → 再打一份栈后退出进程，靠 systemd
+`Restart=on-failure` 拉起。爬行判据（发现动、队列不降、10 分钟 fetched
+增长在 1–29 之间）同样两窗触发。发现与入库同时冻结（断网形状）只警告
+不退出。每 10 分钟另有一行固定格式的管线汇总日志
+（`pipeline: +N seen +N fetched queue_depth N …`），是历次事故定位的
+主要依据。
 
 ### 发布站 RSS（`FEEDS_ENABLED`）
 
@@ -189,9 +228,15 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | `DATABASE_URL` | 无 | 设为 `postgres://` / `postgresql://` 连接串时改用 Postgres（pgx 驱动），见下文「Postgres」；不设则默认 SQLite |
 | `CRAWL_ENABLED` | `true` | 是否启动 DHT 爬虫 |
 | `DHT_PORT` | `0`（随机） | DHT UDP 端口 |
-| `DHT_SAMPLERS` | `8` | BEP-51 并发采样 worker 数（调大反而降低入库速度，见上） |
+| `DHT_SAMPLERS` | `8` | BEP-51 并发采样 worker 数（每身份，调大反而降低入库速度，见上） |
+| `DHT_IDENTITIES` | `1` | 单进程 DHT 身份数（各自 node ID/路由表，监听 `DHT_PORT..DHT_PORT+N-1`，钳 1–16，需重启） |
 | `META_WORKERS` | `128` | 元数据并发 worker 数（入库速度的主要旋钮） |
+| `META_SHARDS` | `8` | anacrolix 底座的客户端分片数（按哈希首字节路由，摊薄单客户端全局锁，需重启） |
+| `META_FETCHER` | `anacrolix` | 元数据抓取底座：`anacrolix` / `native`（自研薄抓取器），需重启；订阅源抓取器固定 anacrolix |
 | `META_TIMEOUT` | `45s` | 单个元数据获取超时 |
+| `META_NEG_CACHE_ENABLED` | `true` | 抓取准入负缓存：已入库跳过 + 失败退避（热生效） |
+| `META_NEG_CACHE_MAX_BACKOFF_H` | `24` | 失败退避上限小时数（1h 起翻倍，热生效） |
+| `CRAWLER_WATCHDOG_ENABLED` | `true` | 入库停转看门狗：停滞打栈、自愈退出（热生效，见「抓取管线」） |
 | `META_PRESCREEN_ENABLED` | `true` | 元数据早筛：窗口内无任何 peer 连上的 infohash 提前放弃，不占满 `META_TIMEOUT` |
 | `META_PRESCREEN_TIMEOUT` | `10s` | 早筛窗口（包含在 `META_TIMEOUT` 之内，不额外叠加） |
 | `META_PRIORITY_ENABLED` | `true` | 抓取优先级队列：做种数 > 来源 > 新鲜度（关 = 先进先出） |
@@ -251,8 +296,10 @@ DATABASE_URL='postgres://user:pass@127.0.0.1:5432/dhtsearch?sslmode=disable' go 
       --to postgres://user:password@127.0.0.1:5432/dhtsearch?sslmode=disable
   ```
 
-  按表批量拷贝 `torrents` / `stats` / `blocked`（表结构同构，字节原样
-  搬运）；目标里已有同 `info_hash`（或同 `key`）的行**跳过不覆盖**，所以
+  按表批量拷贝 `torrents` / `stats` / `blocked` / `swarm_stats` /
+  `fetch_attempts` 等表（表结构同构，字节原样搬运；`dht_nodes` 路由
+  快照是运行时状态，不迁移）；目标里已有同 `info_hash`（或同 `key`）
+  的行**跳过不覆盖**，所以
   重复执行安全，也能合并进一个已有数据的库；迁完逐表核对行数、并逐个
   校验源端主键在目标端存在，缺任何一行都报错且退出码非 0。迁移前请先
   停服务——迁移中源库新增的行不会被带走。一键部署的机器也可以直接用
@@ -321,7 +368,7 @@ npm run dev                  # 开发，访问 http://localhost:3000
 
 | 方法与路径 | 说明 |
 | --- | --- |
-| `GET /api/search?q=xx&page=1&page_size=20` | 搜索（q 为空返回最新收录），结果含拼好的 magnet 链接（带 tracker 参数）。可选 `category=video\|audio\|image\|doc\|software\|archive\|other` 按主文件扩展名分类筛选、`sort=relevance\|newest\|size` 排序；响应附各分类计数（`categories`）与 tracker 列表（`trackers`） |
+| `GET /api/search?q=xx&page=1&page_size=20` | 搜索（q 为空返回最新收录），结果含拼好的 magnet 链接（带 tracker 参数）与做种信息（`seeders`/`leechers`/`completed`/`scraped_at`，无数据为 null）及健康度（`health`）。可选 `category=video\|audio\|image\|doc\|software\|archive\|other` 按主文件扩展名分类筛选、`sort=relevance\|newest\|size\|seeders` 排序（relevance 为加权评分，seeders 无数据垫底）、`hide_dead=1` 隐藏疑似死种；响应附各分类计数（`categories`）与 tracker 列表（`trackers`） |
 | `GET /api/torrents/{hash}/similar` | 相似种子：名称关键词重叠 + 同分类优先的简单推荐（≤12 条） |
 | `GET /api/torrents/{hash}/files?page=1&page_size=100` | 文件列表分页（默认 100 条/页，上限 500），响应含 `total`（已收录条数）/`total_pages`。搜索结果与管理详情只内嵌/返回第一页，完整列表走此接口，避免大文件种子撑爆响应与页面 |
 | `GET /rss?q=xx&category=video` | 关键词订阅 RSS 2.0（最新在前，≤50 条，条目链接为磁力）；无 q 输出全站最新。前端同路径 `/rss` 为代理入口 |
@@ -381,11 +428,15 @@ npm run dev                  # 开发，访问 http://localhost:3000
 | `POST /api/admin/reports/{id}/dismiss` | 举报忽略 |
 | `POST /api/admin/reports/{id}/block` | 一键拉黑被举报种子（删除+黑名单）并标记已处理 |
 | `GET /api/admin/torrents` | 种子列表（分页 + 关键词 + 审核状态过滤） |
-| `GET /api/admin/torrents/{hash}` | 种子详情（含文件列表） |
+| `GET /api/admin/torrents/{hash}` | 种子详情（不含文件列表，文件走下一行分页接口，避免大文件种子撑爆响应） |
+| `GET /api/admin/torrents/{hash}/files?page=1&page_size=100` | 种子文件列表分页（默认 100 条/页，上限 500，支持 `q` 按文件名过滤；`total` 为过滤后条数、`total_all` 为全量） |
 | `POST /api/admin/torrents/{hash}/approve` | 标记已审核 |
 | `POST /api/admin/torrents/{hash}/block` | 拉黑（删除并记入黑名单，不再收录） |
 | `DELETE /api/admin/torrents/{hash}` | 只删记录（可被重新收录） |
-| `POST /api/admin/torrents/batch` | 批量通过/拉黑（单次 ≤100 条） |
+| `POST /api/admin/torrents/batch` | 批量通过/拉黑/删除（单次 ≤100 条） |
+| `GET /api/admin/update` | 系统更新状态：已装/最新版本、自动升级开关与上次结果、进行中升级的进度（`progress`/`phase`，无进度标记时为 null） |
+| `POST /api/admin/update/check` | 检查更新（只查 GitHub 最新 Release，1 小时缓存） |
+| `POST /api/admin/update/request` | 请求立即升级（写契约文件，由 root 侧升级代理执行；仅 admin 角色，已有升级进行中返回 409） |
 | `GET /api/admin/blocked` | 黑名单列表 |
 | `DELETE /api/admin/blocked/{hash}` | 取消拉黑 |
 | `GET /api/admin/settings` | 全量配置：分组、每项生效值、来源（数据库/环境变量/默认）、敏感项脱敏 |
@@ -403,16 +454,20 @@ npm run dev                  # 开发，访问 http://localhost:3000
 
 功能：
 
-- **概览**：按管线健康重排的仪表盘：种子总数 / 今日新增 / 未审核 /
-  已审核 / 已拉黑 / 待处理举报六卡（带占比）、入库趋势折线（24 小时 /
-  14 天）、过滤构成环图、收录管线漏斗（发现 → 元数据成功 → 通过过滤，
-  三类过滤分开计数，早筛丢弃与队列深度在明细里）、最新入库实时流、
-  爬虫 / 刮削 / LLM 审核 / 榜单与系统四个状态面板；8 秒轮询自动刷新，
-  数字滚动动画，榜单抓取失败时红字提示「正在展示上次榜单」。
-- **种子管理**：分页列表（关键词 + 审核状态过滤）、详情（文件列表），
+- **概览**：按管线健康重排的仪表盘：顶部是五段管线
+  （DHT 网络 → 采样发现 → 元数据抓取 → 内容过滤 → 入库）的实时动画，
+  由 8 秒轮询的真实增量驱动（无增量即静止、抓取停滞段变警告色并挂
+  徽标、轮询失败冻结并标过期；「入库」显示库内当前总数，与种子总数
+  同口径）；其下是种子总数 / 今日新增 / 未审核 / 已审核 / 已拉黑 /
+  待处理举报六卡（带占比）、入库趋势折线（24 小时 / 14 天）、过滤
+  构成环图、爬虫 / 刮削 / LLM 审核 / 榜单与系统四个状态面板、最新
+  入库实时流。榜单抓取失败时红字提示「正在展示上次榜单」。
+- **种子管理**：分页列表（关键词 + 审核状态过滤）、详情（文件列表分页），
   单条通过（标记已审核）/ 拉黑（删除并记入黑名单，不再收录）/ 删除
-  （只删记录，可被重新收录）。
-- **未审核队列**：只看未审核，支持多选批量通过 / 批量拉黑。
+  （只删记录，可被重新收录）。注意审核只是队列标记：**未审核的种子
+  照常在前台公开、可搜索**，只有拉黑才对访客隐藏、删除才移除记录。
+- **未审核队列**：只看未审核，支持多选批量通过 / 批量拉黑 / 批量删除
+  （操作浮动条）。
 - **黑名单**：查看 blocked 表，逐条取消拉黑。
 - **举报队列**：访客举报（成人/垃圾/侵权/其他 + 备注）逐条处理：
   标记已处理 / 忽略 / 一键拉黑被举报种子。
@@ -424,15 +479,18 @@ npm run dev                  # 开发，访问 http://localhost:3000
 - **API 令牌**：签发/禁用/删除公开 API 令牌、逐令牌改每分钟配额；
   明文只在创建时显示一次（见上文「公开 API 令牌」）。
 - **账号管理**：建号、改角色、禁用、重置密码、删号（见下文「登录方式」）。
-- **设置**：全部配置可视化。启动配置（监听地址、数据库路径/连接串、
-  管理令牌）只读展示，改 env 文件后重启生效；运行配置（爬虫、元数据、
-  刮削、审核与过滤、热门榜单、订阅源、限流、公开 API、登录与账号）
-  在线可改，存数据库覆盖层，优先级 **数据库 > 环境变量 > 默认值**，
-  多数即时热生效，结构性参数（worker 数、端口等）明确标注「需重启」。
-  密钥类脱敏展示、永不回显明文。同页含「外观 / 主题」分组：站点名称、
-  主色预设（六种，全站 CSS 变量切换）、默认外观；前台与管理端右上角
-  另有外观切换（浅 / 深 / 跟随系统），访客选择同步存 cookie 由服务端
-  直接渲染，刷新/换页不回滚、无闪烁。
+- **设置**：全部 73 项配置可视化（13 组：服务与数据库 / 系统更新 /
+  登录与账号 / 外观与主题 / 爬虫 / 元数据抓取 / 刮削排序 / 内容过滤 /
+  LLM 审核 / 趋势 / 订阅源 / 限流与搜索 / 公开 API）。设置首页是分组
+  索引（每组一张卡：说明、项数、只读/需重启/已自定义标记），每组一个
+  独立子页编辑。启动配置（监听地址、数据库路径/连接串、管理令牌）
+  只读展示，改 env 文件后重启生效；运行配置在线可改，存数据库覆盖层，
+  优先级 **数据库 > 环境变量 > 默认值**，多数即时热生效，结构性参数
+  （worker 数、端口等）明确标注「需重启」。密钥类脱敏展示、永不回显
+  明文。「外观与主题」组含站点名称、主色预设（六种，全站 CSS 变量
+  切换）、默认外观；前台与管理端右上角另有外观切换（浅 / 深 / 跟随
+  系统），访客选择同步存 cookie 由服务端直接渲染，刷新/换页不回滚、
+  无闪烁。「系统更新」子页顶部是升级卡（见下文一键部署的面板升级）。
 
 **登录方式**（登录页按已启用的方式动态组合）：
 
@@ -598,7 +656,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main
 | --- | --- |
 | `dhtsearch.service` / `dhtsearch-web.service` | API+爬虫 / 前端两个 systemd 单元，`enable --now` |
 | `/usr/local/bin/dhtsearch-server`、`/opt/dhtsearch/web/` | 二进制与前端产物 |
-| `/usr/local/bin/dhtsearch` | 管理脚本入口（install 时由 install.sh 自身复制），无参运行开交互菜单：安装 / 升级 / 状态 / 重启 / 日志 / 修改端口 / 数据库切换 / 卸载 / 启动 / 停止 / 开机自启 / 配置管理 / 备份与恢复 / 自检 / 检查更新 / 自动更新；与服务二进制 `dhtsearch-server` 是两个文件 |
+| `/usr/local/bin/dhtsearch` | 管理脚本入口（install 时由 install.sh 自身复制），无参运行开交互菜单：顶部多行状态头（版本/服务/数据库/自动更新状态，后台查到的新版本会直接提示），条目按任务域分组——服务（状态/日志/重启/启动/停止）、更新（检查更新/升级/自动更新设置）、配置（改端口/数据库切换/配置管理/开机自启）、数据（备份与恢复/自检）、系统（安装/卸载），选项标签带 `[开/关]` 状态；与服务二进制 `dhtsearch-server` 是两个文件 |
 | `/etc/dhtsearch/dhtsearch.env` | 配置（端口、数据库：默认 SQLite 的 `DB_PATH`，或 `--db` 写入的 `DATABASE_URL`），权限 600，重复 install / upgrade 不覆盖 |
 | `/var/lib/dhtsearch/` | 数据库、`VERSION`、自动更新状态文件 `autoupdate`、面板↔脚本的更新契约文件（`update-panel` / `update-request` / `update-status`)、备份（`backups/`：upgrade 的回滚备份 + `db-*` 数据库备份） |
 
@@ -606,7 +664,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/cuijianzhuang/dhtsearch/main
 
 自动更新默认关闭。在菜单「自动更新」或 `install.sh auto-update on daily|weekly` 开启后，会装一个 systemd 定时器 `dhtsearch-update.timer`（每天或每周一凌晨 03:37，带最多 30 分钟随机延迟，关机错过会在开机后补跑），到点执行 `dhtsearch upgrade --yes`——走的还是手动升级同一套流程（先备份、健康检查、失败自动回滚），没有第二套升级逻辑。开关状态、频率和上次检查结果存在 `/var/lib/dhtsearch/autoupdate`（脚本自己的状态文件，不进服务配置文件），`status` 里能看到；关闭或卸载时定时器会一并移除。
 
-也可以在管理面板里管升级：设置页顶部有「系统更新」卡（当前/最新版本、检查更新、立即升级、自动升级状态与上次结果），设置里有「系统更新」组（自动升级开关与时间）。面板进程以服务用户运行、无 root，绝不直接执行升级——它只把意图写进数据目录的契约文件（`update-panel` / `update-request`)，由 install.sh 安装的每分钟定时器 `dhtsearch-upgrade-request.timer`（升级代理）以 root 身份消费：同步自动升级定时器的开关与时间、执行面板请求的升级，并把结果写回 `update-status` 供面板展示。优先级：面板保存过更新设置后以面板为准（契约文件存在即生效），`install.sh auto-update` 命令会删掉该文件、把控制权收回 CLI；面板从未保存过时一直以 CLI 状态为准。注意：管理入口脚本本身随 Release 包更新——从菜单里发起的升级会用新包里的 install.sh 刷新 `/usr/local/bin/dhtsearch`，所以自动更新的定时器永远调到的是与已装版本配套的脚本。
+也可以在管理面板里管升级：「系统更新」子页顶部有升级卡（当前/最新版本、检查更新、立即升级、自动升级状态与上次结果），同页有自动升级开关与时间设置。升级执行时卡片显示真实进度条——脚本在下载 → 校验 → 备份 → 安装 → 重启各阶段把进度写进 `update-status`，面板 5 秒轮询呈现，失败时进度冻结在出事的阶段。面板进程以服务用户运行、无 root，绝不直接执行升级——它只把意图写进数据目录的契约文件（`update-panel` / `update-request`)，由 install.sh 安装的每分钟定时器 `dhtsearch-upgrade-request.timer`（升级代理）以 root 身份消费：同步自动升级定时器的开关与时间、执行面板请求的升级，并把结果写回 `update-status` 供面板展示。所有入口（菜单、CLI、自动更新、面板请求）的升级都先过版本闸：目标版本与已装相同直接报「已是最新版本」退出（不下载、不备份、不动服务），目标更旧则拒绝——没有新版时不会再白走一遍停服升级流程。升级备份用硬链接快照（`cp -al`，近乎瞬时；跨文件系统退化为 tar/全量拷贝），并自动轮转：升级快照保留最近 3 组、数据库备份保留最近 10 份。优先级：面板保存过更新设置后以面板为准（契约文件存在即生效），`install.sh auto-update` 命令会删掉该文件、把控制权收回 CLI；面板从未保存过时一直以 CLI 状态为准。注意：管理入口脚本本身随 Release 包更新——从菜单里发起的升级会用新包里的 install.sh 刷新 `/usr/local/bin/dhtsearch`，所以自动更新的定时器永远调到的是与已装版本配套的脚本。
 
 交互菜单里选「安装」会依次询问 API 端口和 Web 端口（带默认值、校验 1-65535），新装时还会问数据库（SQLite / PostgreSQL 本机自动装 / PostgreSQL 已有地址），打印汇总确认后才执行；「修改端口」显示当前端口、询问新端口，保存后重启两个服务并跑健康检查；「数据库切换」显示当前后端、选目标、二次确认并提示短暂停机后执行带数据迁移的切换；升级 / 重启 / 改端口 / 切库 / 卸载在菜单里执行前都要二次确认，卸载可选择保留数据或 `--purge` 全删。
 
@@ -616,7 +674,7 @@ Release 产物由 `.github/workflows/release.yml` 构建：`dhtsearch-<version>-
 
 发版分自动和手动两条路：
 
-- **自动发版**（`.github/workflows/auto-release.yml`）：push 到 `main` 时，只有改动包含业务代码才发版，版本号在现有最大 `vX.Y.Z` tag 基础上 patch +1（仓库还没有 tag 时首个版本为 `v0.1.0`）。业务代码白名单由 `scripts/release-scope.sh` 判定（后端 `server/` 的 Go 代码与 go.mod/go.sum、前端 `web/app|components|lib|public` 与 web 构建配置），只改文档、`scripts/`、`.github/` 不发版；业务代码与文档混在一起照常发。HEAD 已有版本 tag、或提交信息含 `[skip release]` 时跳过。连续多次 push 只发最新一次（旧的运行会被取消）。判断与版本号计算可用 `./scripts/test-release-tools.sh` 本地单测。
+- **自动发版**（`.github/workflows/auto-release.yml`）：push 到 `main` 时，只有改动包含业务代码才发版，版本号在现有最大 `vX.Y.Z` tag 基础上 patch +1（仓库还没有 tag 时首个版本为 `v0.1.0`）。业务代码白名单由 `scripts/release-scope.sh` 判定（后端 `server/` 的 Go 代码与 go.mod/go.sum、前端 `web/app|components|lib|public` 与 web 构建配置，外加 `scripts/install.sh`——它是用户每天在跑的出厂管理入口，改动算产品变更），只改文档、其他 `scripts/`、`.github/` 不发版；业务代码与文档混在一起照常发。HEAD 已有版本 tag、或提交信息含 `[skip release]` 时跳过。连续多次 push 只发最新一次（旧的运行会被取消）。判断与版本号计算可用 `./scripts/test-release-tools.sh` 本地单测。
 - **手动发版**：照旧——自己推 `v*` tag 走 `release.yml` 直接发版；或在 Actions 里手动 `workflow_dispatch` 跑 `release.yml`：默认只构建产物（`version` 不填时产物名为 `dev-<短 sha>`，不挂 Release），勾选 `publish` 后同时创建 GitHub Release（`version` 不填时自动取下一版本，即最大 `vX.Y.Z` tag 的 patch +1）。
 
 ### 每小时备份到 Cloudflare R2
@@ -680,9 +738,12 @@ macOS 上可用 launchd 常驻/定时（安装后本地爬虫 API 在 `127.0.0.1
 | 路径 | 内容 |
 | --- | --- |
 | `server/cmd/server/` | 服务入口（flag/env 解析、各模块装配） |
-| `server/internal/crawler/` | DHT 爬虫（被动监听 + BEP 51 采样） |
-| `server/internal/scraper/` | BEP 15 tracker scrape 排序 |
-| `server/internal/metadata/` | BEP 9 元数据获取 |
+| `server/internal/crawler/` | DHT 爬虫（被动监听 + BEP 51 采样、多身份、节点质量评分、peer 提示缓存） |
+| `server/internal/scraper/` | BEP 15 tracker scrape 排序 + swarm 快照落库 |
+| `server/internal/metadata/` | BEP 9 元数据获取（优先级队列、早筛、分片客户端） |
+| `server/internal/metadata/native/` | 自研薄抓取器底座（`META_FETCHER=native`） |
+| `server/internal/admission/` | 抓取准入闸（已入库跳过 + 失败退避负缓存） |
+| `server/internal/watchdog/` | 入库停转看门狗（停滞/爬行检测、打栈、自愈退出） |
 | `server/internal/filter/` | 入库前静态过滤（词表 + 启发式） |
 | `server/internal/moderator/` | LLM 二次审核与标题去广告 |
 | `server/internal/feeds/` | 发布站 RSS 拉取 |
