@@ -141,6 +141,11 @@ type Service struct {
 	// the lists (the RSS keyword search) can wait for a populated snapshot.
 	ready     chan struct{}
 	readyOnce sync.Once
+
+	// trigger carries a manual-refresh request from TriggerRefresh to
+	// the Run loop. Buffered 1: one queued request is enough, because
+	// the cycle it wakes reads the freshest upstream state anyway.
+	trigger chan struct{}
 }
 
 // New builds a Service; call Run to start refreshing.
@@ -162,6 +167,7 @@ func New(cfg Config) *Service {
 		client:    &http.Client{Timeout: fetchTimeout},
 		names:     make(map[string]string),
 		ready:     make(chan struct{}),
+		trigger:   make(chan struct{}, 1),
 		cfgFn:     cfg.ConfigFunc,
 		enabledFn: cfg.EnabledFunc,
 		store:     cfg.Store,
@@ -288,46 +294,73 @@ func retryDelay(failStreak int, interval time.Duration) time.Duration {
 	return d
 }
 
+// TriggerRefresh asks the Run loop to start a refresh cycle now
+// instead of waiting out the interval (the admin console's 立即刷新).
+// It reports false when a manual request is already queued — that
+// queued cycle fetches the same fresh state, so a second one adds
+// nothing. A request queued while a cycle is running simply starts
+// the next cycle as soon as the current one finishes. The enabled
+// gate still applies: with the feature off the woken cycle skips the
+// fetch like any other.
+func (s *Service) TriggerRefresh() bool {
+	select {
+	case s.trigger <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// cycle runs one refresh (unless the gate is off) and returns how
+// long the Run loop should wait before the next one.
+func (s *Service) cycle(ctx context.Context) time.Duration {
+	wait := s.cfgNow().Interval
+	if s.enabled() {
+		ok, failed := s.refresh(ctx)
+		s.mu.Lock()
+		prevStreak := s.failStreak
+		if failed == 0 {
+			s.failStreak = 0
+			s.lastSuccess = time.Now()
+		} else {
+			s.failStreak++
+		}
+		streak := s.failStreak
+		s.mu.Unlock()
+		wait = retryDelay(streak, wait)
+		switch {
+		case failed == 0 && prevStreak > 0:
+			s.cfg.Logger.Printf("trending: recovered after %d failed cycle(s)", prevStreak)
+		case failed > 0 && ok == 0:
+			s.cfg.Logger.Printf("trending: all %d charts failed (streak %d); serving last good snapshot, next retry in %s",
+				failed, streak, wait)
+		case failed > 0:
+			s.cfg.Logger.Printf("trending: %d of %d charts failed (streak %d); next retry in %s",
+				failed, ok+failed, streak, wait)
+		}
+	}
+	return wait
+}
+
 // Run refreshes immediately and then every Interval until ctx is
 // done. The interval is re-read each cycle, and a disabled gate skips
 // the fetch, so settings changes apply without a restart. A cycle in
 // which any chart failed is retried on the retryDelay backoff rather
 // than after a full interval, so a transient outage right after a
 // restart heals in minutes; the last good snapshot keeps serving
-// throughout either way.
+// throughout either way. A manual TriggerRefresh cuts the wait
+// short and starts the next cycle immediately.
 func (s *Service) Run(ctx context.Context) {
 	for {
-		wait := s.cfgNow().Interval
-		if s.enabled() {
-			ok, failed := s.refresh(ctx)
-			s.mu.Lock()
-			prevStreak := s.failStreak
-			if failed == 0 {
-				s.failStreak = 0
-				s.lastSuccess = time.Now()
-			} else {
-				s.failStreak++
-			}
-			streak := s.failStreak
-			s.mu.Unlock()
-			wait = retryDelay(streak, wait)
-			switch {
-			case failed == 0 && prevStreak > 0:
-				s.cfg.Logger.Printf("trending: recovered after %d failed cycle(s)", prevStreak)
-			case failed > 0 && ok == 0:
-				s.cfg.Logger.Printf("trending: all %d charts failed (streak %d); serving last good snapshot, next retry in %s",
-					failed, streak, wait)
-			case failed > 0:
-				s.cfg.Logger.Printf("trending: %d of %d charts failed (streak %d); next retry in %s",
-					failed, ok+failed, streak, wait)
-			}
-		}
+		wait := s.cycle(ctx)
 		s.readyOnce.Do(func() { close(s.ready) })
 		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			t.Stop()
 			return
+		case <-s.trigger:
+			t.Stop()
 		case <-t.C:
 		}
 	}

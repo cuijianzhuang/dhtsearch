@@ -137,6 +137,52 @@ export default function OverviewDashboard({
       .catch(() => setStale(true));
   };
 
+  // Manual trending refresh: queues one fetch cycle on the backend
+  // (the fetcher otherwise waits out its interval/backoff). The note
+  // is stamped with the freshness state at click time and hides
+  // itself as soon as a poll shows that state move — the refresh
+  // landed, one way or the other.
+  const [trendBusy, setTrendBusy] = useState(false);
+  const [trendNote, setTrendNote] = useState<{
+    text: string;
+    updatedAt: number;
+    failStreak: number;
+  } | null>(null);
+
+  async function onRefreshTrending() {
+    if (trendBusy) return;
+    setTrendBusy(true);
+    const stamp = {
+      updatedAt: overview.trending?.updated_at ?? 0,
+      failStreak: overview.trending?.fail_streak ?? 0,
+    };
+    try {
+      const res = await fetch("/api/admin-action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "refresh-trending" }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+      };
+      if (res.status === 202) {
+        setTrendNote({ text: "已触发刷新，完成后本页自动更新", ...stamp });
+        void refreshAll();
+      } else if (res.status === 409) {
+        setTrendNote({ text: "已有榜单刷新在排队，请稍候", ...stamp });
+      } else {
+        setTrendNote({
+          text: `触发刷新失败：${body.error ?? `HTTP ${res.status}`}`,
+          ...stamp,
+        });
+      }
+    } catch {
+      setTrendNote({ text: "触发刷新失败：无法连接到后端", ...stamp });
+    } finally {
+      setTrendBusy(false);
+    }
+  }
+
   const o = overview;
   const s = o.stats ?? {};
   const fetched = s.fetched ?? 0;
@@ -166,7 +212,7 @@ export default function OverviewDashboard({
         <button
           type="button"
           onClick={() => void refreshAll()}
-          className="ml-auto inline-flex min-h-8 items-center rounded-md border border-input bg-soft px-3 text-xs text-ink-2 transition-colors hover:border-accent hover:text-accent-ink"
+          className="ml-auto inline-flex min-h-11 items-center rounded-md border border-input bg-soft px-3 text-xs text-ink-2 transition-colors hover:border-accent hover:text-accent-ink"
         >
           立即刷新
         </button>
@@ -231,7 +277,7 @@ export default function OverviewDashboard({
                   type="button"
                   onClick={() => changeRange(r)}
                   aria-pressed={range === r}
-                  className={`inline-flex min-h-8 items-center rounded-md border px-3 text-xs transition-colors ${
+                  className={`inline-flex min-h-11 items-center rounded-md border px-3 text-xs transition-colors ${
                     range === r
                       ? "border-accent bg-accent-soft font-medium text-accent-ink"
                       : "border-input bg-soft text-ink-2 hover:border-accent hover:text-accent-ink"
@@ -437,7 +483,22 @@ export default function OverviewDashboard({
           />
         </Panel>
 
-        <Panel title="榜单与系统">
+        <Panel
+          title="榜单与系统"
+          action={
+            o.trending ? (
+              <button
+                type="button"
+                onClick={() => void onRefreshTrending()}
+                disabled={trendBusy}
+                title="立即向豆瓣刷新一轮榜单，不必等刷新周期"
+                className="inline-flex min-h-11 items-center rounded-lg border border-input bg-soft px-3 text-xs text-ink-2 transition-colors hover:border-accent hover:text-accent-ink disabled:opacity-50"
+              >
+                {trendBusy ? "触发中…" : "立即刷新"}
+              </button>
+            ) : undefined
+          }
+        >
           {o.trending ? (
             <>
               <div className="grid grid-cols-2 gap-x-4 gap-y-3">
@@ -452,6 +513,11 @@ export default function OverviewDashboard({
                   ? formatDate(o.trending.updated_at)
                   : "-"}
               </p>
+              {trendNote &&
+                trendNote.updatedAt === o.trending.updated_at &&
+                trendNote.failStreak === (o.trending.fail_streak ?? 0) && (
+                  <p className="mt-2 text-xs text-mute">{trendNote.text}</p>
+                )}
               {o.trending.failing && (
                 <p className="mt-2 rounded-lg border border-danger/50 bg-danger/10 px-3 py-2 text-xs leading-relaxed text-danger-ink">
                   抓取失败中（已连续 {o.trending.fail_streak ?? 0}{" "}

@@ -360,9 +360,11 @@ var Registry = []Item{
 	{Key: KeyTrendingEnabled, Group: "trending", Label: "启用豆瓣趋势", Type: TypeBool, Default: "true", Editable: true,
 		Desc: "关后首页不再显示热门影视快捷搜索"},
 	{Key: KeyTrendingInterval, Group: "trending", Label: "趋势刷新周期", Type: TypeDuration, Default: "1h0m0s", Editable: true,
-		Min: f64(60), Max: f64(7 * 24 * 3600)},
+		Min: f64(60), Max: f64(7 * 24 * 3600),
+		Desc: "向豆瓣刷新四个榜单的间隔，时长格式（如 30m、1h、6h），范围 1 分钟～7 天；保存后下一轮起生效，抓取失败会自动退避重试，也可在概览页手动立即刷新"},
 	{Key: KeyTrendingLimit, Group: "trending", Label: "每榜保留条数", Type: TypeInt, Default: "10", Editable: true,
-		Min: f64(1), Max: f64(50)},
+		Min: f64(1), Max: f64(50),
+		Desc: "每个榜单（电影 / 美剧 / 日剧 / 韩剧）保留的标题数，范围 1–50 条；保存后下一轮刷新起生效"},
 
 	// --- feeds ---
 	{Key: KeyFeedsEnabled, Group: "feeds", Label: "启用 RSS 订阅源", Type: TypeBool, Default: "true", Editable: true},
