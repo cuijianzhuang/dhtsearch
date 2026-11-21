@@ -641,6 +641,14 @@ func validateStringKey(key, v string) error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("must be an http(s) URL")
 		}
+	case KeyAlertWebhookURL:
+		if v == "" {
+			return nil
+		}
+		u, err := url.Parse(v)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("must be an http(s) URL")
+		}
 	case KeyOIDCAllowedDomain:
 		if v == "" {
 			return nil

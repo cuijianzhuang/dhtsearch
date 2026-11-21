@@ -26,6 +26,15 @@ const (
 	KeyRetentionEnabled    = "RETENTION_ENABLED"
 	KeyRetentionMinAgeDays = "RETENTION_MIN_AGE_DAYS"
 	KeyRetentionIntervalH  = "RETENTION_INTERVAL_H"
+	// stall alerts: the watchdog's episodes leave the machine
+	// (see internal/alerts). The channel knobs are live; the stall
+	// threshold is wired into the watchdog at startup, so it is a
+	// restart item like the other structural knobs.
+	KeyAlertEnabled          = "ALERT_ENABLED"
+	KeyAlertWebhookURL       = "ALERT_WEBHOOK_URL"
+	KeyAlertTelegramBotToken = "ALERT_TELEGRAM_BOT_TOKEN"
+	KeyAlertTelegramChatID   = "ALERT_TELEGRAM_CHAT_ID"
+	KeyAlertStallMinutes     = "ALERT_STALL_MINUTES"
 	// appearance
 	KeySiteName        = "SITE_NAME"
 	KeyThemeColor      = "THEME_COLOR"
@@ -116,6 +125,7 @@ var Groups = []Group{
 	{Key: "service", Label: "服务与数据库"},
 	{Key: "update", Label: "系统更新"},
 	{Key: "retention", Label: "数据保留"},
+	{Key: "alerts", Label: "告警通知"},
 	{Key: "auth", Label: "登录与账号"},
 	{Key: "appearance", Label: "外观与主题"},
 	{Key: "crawler", Label: "爬虫"},
@@ -186,6 +196,29 @@ var Registry = []Item{
 		Min: f64(1), Max: f64(3650), Desc: "入库未满该天数的种子永不清理，哪怕健康度已是疑似死亡。保存后立即生效"},
 	{Key: KeyRetentionIntervalH, Group: "retention", Label: "清理周期（小时）", Type: TypeInt, Default: "24", Editable: true,
 		Min: f64(1), Max: f64(720), Desc: "自动清理的执行间隔；服务启动后不久先跑一轮。保存后立即生效"},
+
+	// --- stall alerts: delivery only — detection stays with the
+	// watchdog (crawler group), whose episode transitions this
+	// group forwards. The channel knobs and the master switch are
+	// live: the notifier re-reads them at every event, so pasting a
+	// webhook and flipping the switch starts alerting on the next
+	// episode, and the admin API's test endpoint can verify a
+	// configuration before the switch is ever turned on. The stall
+	// threshold is the exception: it is the watchdog's WarnAfter,
+	// assembled once at startup (the exit threshold is twice it),
+	// so it carries Restart=true like the other structural knobs.
+	// Default off: a fresh deployment has no channel configured,
+	// and alerting at nobody is worse than a clear opt-in. ---
+	{Key: KeyAlertEnabled, Group: "alerts", Label: "启用停滞告警", Type: TypeBool, Default: "false", Editable: true,
+		Desc: "开 = 看门狗判定入库停滞（及爬行、冻结）时经下面配置的通道外发告警，恢复时再发一条；同一轮停滞只发一次。关 = 看门狗照常打栈、自愈，只是不外发。保存后立即生效"},
+	{Key: KeyAlertWebhookURL, Group: "alerts", Label: "Webhook 地址", Type: TypeSecret, Sensitive: true, Default: "", Editable: true, MaxLen: 1000,
+		Desc: "通用 Webhook：停滞/恢复时 POST JSON {title, text, ts}（ts 为 Unix 秒）。钉钉/飞书/企业微信/Slack 等群机器人或自建接收端地址填这里；地址常含密钥，故按密钥处理：只显示是否已设置，保存时留空表示不改"},
+	{Key: KeyAlertTelegramBotToken, Group: "alerts", Label: "Telegram 机器人 Token", Type: TypeSecret, Sensitive: true, Default: "", Editable: true,
+		Desc: "@BotFather 创建机器人得到的 token；与下面的会话 ID 都配好后 Telegram 通道生效。只显示是否已设置，保存时留空表示不改"},
+	{Key: KeyAlertTelegramChatID, Group: "alerts", Label: "Telegram 会话 ID", Type: TypeString, Default: "", Editable: true, MaxLen: 64,
+		Desc: "接收告警的会话 ID：个人会话为正数 ID，群为负数；先给机器人发一句话，再用 getUpdates 查到"},
+	{Key: KeyAlertStallMinutes, Group: "alerts", Label: "停滞判定（分钟）", Type: TypeInt, Default: "15", Editable: true, Restart: true,
+		Min: f64(5), Max: f64(120), Desc: "入库零增长持续该分钟数即判定停滞：看门狗打全量协程栈，告警开启时同时外发停滞告警；退出自愈阈值为其两倍（默认 15 → 30 分钟）。该值在启动时装配给看门狗，重启生效"},
 
 	// --- auth: admin login methods. All live: the login page asks the
 	// backend which methods are configured and renders only those. ---

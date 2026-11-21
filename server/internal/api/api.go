@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"dhtsearch/server/internal/alerts"
 	"dhtsearch/server/internal/feeds"
 	"dhtsearch/server/internal/retention"
 	"dhtsearch/server/internal/settings"
@@ -112,6 +113,16 @@ type Options struct {
 	// internal/retention). Nil (tests, settings-free wiring) makes
 	// both endpoints answer 503.
 	Retention RetentionService
+	// Alerts, when non-nil, backs POST /api/admin/alerts/test: the
+	// stall notifier's channel probe (see internal/alerts). Nil
+	// (tests, settings-free wiring) makes the endpoint answer 503.
+	Alerts AlertsService
+}
+
+// AlertsService is the slice of the stall notifier the admin API
+// needs. *alerts.Service satisfies it; tests substitute a stub.
+type AlertsService interface {
+	Test(ctx context.Context) alerts.TestResult
 }
 
 // RetentionService is the slice of the retention runner the admin
