@@ -7,8 +7,9 @@ import { usePathname } from "next/navigation";
 // page content. The public pages each carry their own small in-main
 // footer line (home: index stats; search: name + tagline), but none
 // of them linked anywhere — in particular there was no way to reach
-// the admin panel except by typing /admin. This bar is the operator
-// entry point: deliberately quiet (faint text, hairline top border,
+// the admin panel except by typing /admin. This bar carries the two
+// utility entries (API 文档 for integrators, 管理 for the operator):
+// deliberately quiet (faint text, hairline top border,
 // canvas background) because it serves the operator, not visitors.
 // The left side is the site name only — the search page's own footer
 // already prints name + tagline, and repeating the same line twice
@@ -27,16 +28,43 @@ export default function PublicFooter({ siteName }: { siteName: string }) {
     <footer className="border-t border-line">
       <div className="mx-auto flex w-full max-w-3xl items-center justify-between gap-4 px-4">
         <span className="py-3 text-xs text-faint">{siteName}</span>
-        <Link
-          href="/admin"
-          prefetch={false}
-          className="-mr-2 flex min-h-11 items-center gap-1.5 px-2 text-xs text-mute transition-colors hover:text-accent-ink"
-        >
-          <IconLock />
-          管理
-        </Link>
+        <span className="-mr-2 flex items-center">
+          <Link
+            href="/api-docs"
+            className="flex min-h-11 items-center gap-1.5 px-2 text-xs text-mute transition-colors hover:text-accent-ink"
+          >
+            <IconCode />
+            API 文档
+          </Link>
+          <Link
+            href="/admin"
+            prefetch={false}
+            className="flex min-h-11 items-center gap-1.5 px-2 text-xs text-mute transition-colors hover:text-accent-ink"
+          >
+            <IconLock />
+            管理
+          </Link>
+        </span>
       </div>
     </footer>
+  );
+}
+
+function IconCode() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-3.5 w-3.5"
+      aria-hidden
+    >
+      <path d="m8 6-6 6 6 6" />
+      <path d="m16 6 6 6-6 6" />
+    </svg>
   );
 }
 

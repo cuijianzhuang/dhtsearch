@@ -1,0 +1,518 @@
+openapi: 3.0.3
+info:
+  title: DHTSearch Public API
+  version: "1.0"
+  description: |
+    Public read API for a DHTSearch deployment: search the DHT-indexed
+    magnet collection, page a torrent's file list, fetch similar
+    torrents, read index statistics, subscribe via RSS and file visitor
+    reports.
+
+    Auth: whether a token is required is an operator setting
+    (PUBLIC_API_REQUIRE_TOKEN, default off). When on, /api/search,
+    /api/stats and /api/trending require a token — created by the
+    operator in the admin console ("dht_" + 64 hex chars) — presented
+    as `Authorization: Bearer <token>` or `X-API-Key: <token>`. Query
+    parameters are never accepted for tokens. All other endpoints are
+    never token-gated. A separate per-client-IP rate limit (default
+    3 req/s sustained, burst 30) applies to every public endpoint,
+    tokens included.
+
+    Every fact in this file was inventoried from the server
+    implementation (server/internal/api) and verified against a
+    running instance. The human-readable twin of this file is the
+    /api-docs page.
+servers:
+  - url: https://api.example.com
+    description: Replace with the deployment's API service origin.
+tags:
+  - name: search
+  - name: torrents
+  - name: meta
+  - name: feeds
+security: []
+paths:
+  /api/search:
+    get:
+      tags: [search]
+      summary: Keyword search over the index
+      description: |
+        With no query this browses the latest additions. There is no
+        standalone torrent-detail endpoint — a search result item is
+        the full record; use /api/torrents/{hash}/files and
+        /api/torrents/{hash}/similar to extend it.
+      security:
+        - bearerAuth: []
+        - apiKeyAuth: []
+        - {}
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 200 }
+          description: Keywords; truncated at 200 characters. Empty browses latest.
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+          description: Page number. Reachable depth is capped at an offset of 10000 rows; deeper pages are clamped.
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [video, audio, image, doc, software, archive, other]
+          description: Category filter. Any other value is a 400.
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [relevance, newest, size, seeders]
+            default: relevance
+          description: Any other value is a 400.
+        - name: hide_dead
+          in: query
+          schema: { type: string, enum: ["0", "1", "true", "false"], default: "0" }
+          description: "1/true hides results whose health is likely_dead. Any other value is a 400."
+      responses:
+        "200":
+          description: Search results.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/TokenDisabled" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/torrents/{hash}/files:
+    get:
+      tags: [torrents]
+      summary: One page of a torrent's file list
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[0-9a-f]{40}$" }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - name: q
+          in: query
+          schema: { type: string }
+          description: Path substring filter; `total` counts the filtered set.
+      responses:
+        "200":
+          description: One page of files.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FilesPageResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/torrents/{hash}/similar:
+    get:
+      tags: [torrents]
+      summary: Torrents similar to the given one (by name tokens)
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[0-9a-f]{40}$" }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 6 }
+          description: Clamped to 1..12.
+      responses:
+        "200":
+          description: Similar torrents; items carry files=null.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: "#/components/schemas/ResultItem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/stats:
+    get:
+      tags: [meta]
+      summary: Index and pipeline statistics (server-cached ~10s)
+      security:
+        - bearerAuth: []
+        - apiKeyAuth: []
+        - {}
+      responses:
+        "200":
+          description: Statistics snapshot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatsResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/TokenDisabled" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/trending:
+    get:
+      tags: [meta]
+      summary: Homepage trending titles (Douban hot movies/TV)
+      security:
+        - bearerAuth: []
+        - apiKeyAuth: []
+        - {}
+      responses:
+        "200":
+          description: Trending lists.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [movies, tv, tv_jp, tv_kr, updated_at]
+                properties:
+                  movies: { type: array, items: { type: string } }
+                  tv: { type: array, items: { type: string } }
+                  tv_jp: { type: array, items: { type: string } }
+                  tv_kr: { type: array, items: { type: string } }
+                  updated_at: { type: integer, format: int64, description: Unix seconds }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/TokenDisabled" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/site:
+    get:
+      tags: [meta]
+      summary: Site presentation configuration
+      responses:
+        "200":
+          description: Site config.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, theme_color, theme_appearance]
+                properties:
+                  name: { type: string }
+                  theme_color: { type: string }
+                  theme_appearance: { type: string }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/healthz:
+    get:
+      tags: [meta]
+      summary: Health check (never gated, never rate-limited)
+      responses:
+        "200":
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean, example: true }
+  /rss:
+    get:
+      tags: [feeds]
+      summary: RSS 2.0 feed of the newest matches (max 50 items)
+      description: |
+        Item links are the magnet URIs themselves; the guid is the
+        info_hash. Without q this is the firehose of latest additions.
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 200 }
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [video, audio, image, doc, software, archive, other]
+          description: Any other value is a 400 (JSON error body).
+      responses:
+        "200":
+          description: RSS document.
+          content:
+            application/rss+xml:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/report:
+    post:
+      tags: [feeds]
+      summary: File a visitor report about an indexed torrent
+      description: |
+        Reports land in the operator's review queue. A per
+        client+torrent limiter (~3/min) answers duplicates with 429.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [info_hash, reason]
+              properties:
+                info_hash:
+                  type: string
+                  pattern: "^[0-9a-f]{40}$"
+                reason:
+                  type: string
+                  enum: [adult, spam, infringement, other]
+                note:
+                  type: string
+                  maxLength: 500
+      responses:
+        "201":
+          description: Report accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean, example: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: API token ("dht_" + 64 hex chars) created in the admin console.
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: The same API token, presented as a header instead of Bearer.
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    FileEntry:
+      type: object
+      required: [path, size]
+      properties:
+        path: { type: string }
+        size: { type: integer, format: int64 }
+    ResultItem:
+      type: object
+      required: [info_hash, name, total_size, file_count, files, magnet,
+                 created_at, category, seeders, leechers, completed,
+                 scraped_at, zero_since, zero_count, health]
+      properties:
+        info_hash: { type: string, pattern: "^[0-9a-f]{40}$" }
+        name: { type: string }
+        alias:
+          type: string
+          description: Feed-published alias title; omitted when empty.
+        total_size: { type: integer, format: int64, description: Bytes }
+        file_count: { type: integer }
+        files:
+          description: |
+            First page (up to 100) of the file list as a preview; the
+            full list is at /api/torrents/{hash}/files. null in
+            /similar responses.
+          type: array
+          nullable: true
+          items: { $ref: "#/components/schemas/FileEntry" }
+        magnet: { type: string, description: Magnet URI with tr= trackers stamped }
+        created_at: { type: integer, format: int64, description: Unix seconds, when indexed }
+        category:
+          type: string
+          enum: [video, audio, image, doc, software, archive, other]
+        seeders: { type: integer, format: int64, nullable: true }
+        leechers: { type: integer, format: int64, nullable: true }
+        completed: { type: integer, format: int64, nullable: true }
+        scraped_at: { type: integer, format: int64, nullable: true }
+        zero_since: { type: integer, format: int64, nullable: true }
+        zero_count: { type: integer, format: int64, nullable: true }
+        health:
+          type: string
+          enum: [alive, no_seed, likely_dead, suspect, unknown]
+          description: |
+            Derived from the scrape snapshot. The swarm counters are
+            null exactly when health is unknown (never scraped); a
+            scraped true zero is 0, never null.
+    SearchResponse:
+      type: object
+      required: [total, page, page_size, results, category, sort,
+                 hide_dead, categories, trackers]
+      properties:
+        total: { type: integer }
+        page: { type: integer }
+        page_size: { type: integer }
+        category: { type: string, description: Echo of the filter ("" = all) }
+        sort: { type: string }
+        hide_dead: { type: boolean }
+        categories:
+          type: object
+          description: Per-category counts over the full keyword match set.
+          additionalProperties: { type: integer }
+        trackers:
+          type: array
+          items: { type: string }
+          description: Announce URLs stamped into magnets.
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/ResultItem" }
+    FilesPageResponse:
+      type: object
+      required: [info_hash, total, total_all, page, page_size, total_pages, files]
+      properties:
+        info_hash: { type: string }
+        total: { type: integer, description: Entries being paged (the filtered set when q is given) }
+        total_all: { type: integer, description: The torrent's full stored file count }
+        page: { type: integer }
+        page_size: { type: integer }
+        total_pages: { type: integer }
+        files:
+          type: array
+          items: { $ref: "#/components/schemas/FileEntry" }
+    StatsResponse:
+      type: object
+      description: |
+        Cumulative counters plus subsystem sections. `crawler`,
+        `scraper` and `feeds` appear only when the deployment runs
+        those subsystems; `fetch.backend` / `backend_warning` / `dht`
+        appear when a live metadata status is wired.
+      required: [torrents, seen, fetched, adult_filtered, spam_filtered,
+                 size_filtered, blocked_filtered, fetch, moderation]
+      properties:
+        torrents: { type: integer }
+        seen: { type: integer, format: int64 }
+        fetched: { type: integer, format: int64 }
+        adult_filtered: { type: integer, format: int64 }
+        spam_filtered: { type: integer, format: int64 }
+        size_filtered: { type: integer, format: int64 }
+        blocked_filtered: { type: integer, format: int64 }
+        fetch:
+          type: object
+          required: [fetched, timed_out, failed, prescreen_dropped,
+                     skipped_stored, skipped_backoff, peer_hint_items,
+                     peer_hint_fetched, by_source]
+          properties:
+            fetched: { type: integer, format: int64 }
+            timed_out: { type: integer, format: int64 }
+            failed: { type: integer, format: int64 }
+            prescreen_dropped: { type: integer, format: int64 }
+            skipped_stored: { type: integer, format: int64 }
+            skipped_backoff: { type: integer, format: int64 }
+            peer_hint_items: { type: integer, format: int64 }
+            peer_hint_fetched: { type: integer, format: int64 }
+            by_source:
+              type: array
+              items:
+                type: object
+                required: [source, attempts, fetched, timed_out, failed,
+                           prescreen_dropped, success_rate]
+                properties:
+                  source: { type: string, enum: [dht, scrape, feed] }
+                  attempts: { type: integer, format: int64 }
+                  fetched: { type: integer, format: int64 }
+                  timed_out: { type: integer, format: int64 }
+                  failed: { type: integer, format: int64 }
+                  prescreen_dropped: { type: integer, format: int64 }
+                  success_rate: { type: number }
+            queue_depth: { type: integer }
+            backend: { type: string }
+            backend_warning: { type: string }
+            dht:
+              type: object
+              properties:
+                running: { type: boolean }
+                nodes: { type: integer }
+        moderation:
+          type: object
+          required: [reviewed, adult_removed, spam_removed, errors, pending, blocked]
+          properties:
+            reviewed: { type: integer, format: int64 }
+            adult_removed: { type: integer, format: int64 }
+            spam_removed: { type: integer, format: int64 }
+            errors: { type: integer, format: int64 }
+            pending: { type: integer }
+            blocked: { type: integer }
+        crawler: { type: object, additionalProperties: true }
+        scraper: { type: object, additionalProperties: true }
+        feeds: { type: object, additionalProperties: true }
+  responses:
+    BadRequest:
+      description: Invalid parameter (see error message).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            invalidCategory:
+              value: { error: "invalid category" }
+            invalidSort:
+              value: { error: "invalid sort" }
+    Unauthorized:
+      description: Token required or invalid (WWW-Authenticate header is set).
+      headers:
+        WWW-Authenticate:
+          schema: { type: string }
+          description: 'Bearer realm="dhtsearch-api"'
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            required:
+              value: { error: "api token required" }
+            invalid:
+              value: { error: "invalid api token" }
+    TokenDisabled:
+      description: The presented token exists but is disabled.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: "api token disabled" }
+    NotFound:
+      description: No torrent with that hash.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: "not found" }
+    RateLimited:
+      description: Per-IP limit, per-token quota, or report limiter (Retry-After header is set).
+      headers:
+        Retry-After:
+          schema: { type: string }
+          description: Seconds to wait before retrying.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            perIp:
+              value: { error: "rate limit exceeded" }
+            perToken:
+              value: { error: "api token rate limit exceeded" }
+            report:
+              value: { error: "too many reports for this torrent" }
+    ServerError:
+      description: Internal error.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: "search failed" }
+    Unavailable:
+      description: Public API switched off, server saturated, or query timed out.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            disabled:
+              value: { error: "public api disabled" }
+            busy:
+              value: { error: "server busy" }
+            timeout:
+              value: { error: "search timed out" }
