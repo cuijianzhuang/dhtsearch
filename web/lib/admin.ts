@@ -618,6 +618,38 @@ export function fetchAdminRestart(token: string): Promise<AdminRestartState> {
   return adminFetch<AdminRestartState>(token, "/api/admin/restart");
 }
 
+// --- Data retention (mirror server/internal/retention) ---
+
+/** One finished cleanup pass, as persisted by the runner. */
+export interface AdminRetentionRun {
+  /** Unix seconds the pass finished. */
+  at: number;
+  deleted: number;
+  eligible_remaining: number;
+}
+
+/**
+ * The retention runner's status: the current settings, how many
+ * torrents are eligible for deletion under them right now (the
+ * blast radius to read before enabling), the cumulative deleted
+ * count and the last pass's record (null when no pass ever ran).
+ */
+export interface AdminRetentionStatus {
+  enabled: boolean;
+  min_age_days: number;
+  interval_h: number;
+  running: boolean;
+  eligible_now: number;
+  deleted_total: number;
+  last_run: AdminRetentionRun | null;
+}
+
+export function fetchAdminRetention(
+  token: string,
+): Promise<AdminRetentionStatus> {
+  return adminFetch<AdminRetentionStatus>(token, "/api/admin/retention");
+}
+
 // --- Public API tokens (mirror server/internal/store/apitokens.go) ---
 
 /**

@@ -95,6 +95,9 @@ export async function POST(request: Request) {
     case "restart-service":
       path = `/api/admin/restart`;
       break;
+    case "run-retention":
+      path = `/api/admin/retention/run`;
+      break;
     case "create-api-token":
       path = `/api/admin/api-tokens`;
       payload = {
@@ -188,6 +191,7 @@ export async function POST(request: Request) {
     body.kind !== "check-update" &&
     body.kind !== "request-upgrade" &&
     body.kind !== "restart-service" &&
+    body.kind !== "run-retention" &&
     body.kind !== "test-llm" &&
     body.kind !== "create-user" &&
     body.kind !== "update-user" &&

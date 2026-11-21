@@ -334,6 +334,14 @@ func (d dialect) incrStat() string {
 		 ON CONFLICT(key) DO UPDATE SET value = value + excluded.value`
 }
 
+// setStat writes a stats key's absolute value (as opposed to
+// incrStat's delta). The right-hand side references only
+// excluded.value, which both backends accept unambiguously.
+func (d dialect) setStat() string {
+	return `INSERT INTO stats (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+}
+
 // insertOrIgnore builds a bulk-copy insert for Migrate: rows whose
 // primary key already exists in the target are skipped, never
 // overwritten. Table and column names come from a fixed list in

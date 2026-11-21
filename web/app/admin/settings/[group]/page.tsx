@@ -9,9 +9,11 @@ import SettingsGroupForm from "@/components/admin/SettingsGroupForm";
 import { SettingsNavRail } from "@/components/admin/SettingsNav";
 import SettingsNavChips from "@/components/admin/SettingsNavChips";
 import RestartCard from "@/components/admin/RestartCard";
+import RetentionCard from "@/components/admin/RetentionCard";
 import UpdateCard from "@/components/admin/UpdateCard";
 import {
   fetchAdminRestart,
+  fetchAdminRetention,
   fetchAdminSettings,
   fetchAdminUpdate,
 } from "@/lib/admin";
@@ -68,6 +70,14 @@ export default async function AdminSettingsGroupPage({
       ? await adminPageFetch((token) => fetchAdminRestart(token))
       : null;
 
+  // The retention card belongs to the 数据保留 group: it shows the
+  // eligible-for-deletion count under the group's settings before
+  // the operator enables them, and degrades the same way.
+  const retentionOutcome =
+    slug === "retention"
+      ? await adminPageFetch((token) => fetchAdminRetention(token))
+      : null;
+
   const navGroups = groups.map((g) => ({
     key: g.key,
     label: g.label,
@@ -115,6 +125,11 @@ export default async function AdminSettingsGroupPage({
             {restartOutcome && (
               <RestartCard
                 initial={restartOutcome.ok ? restartOutcome.data : null}
+              />
+            )}
+            {retentionOutcome && (
+              <RetentionCard
+                initial={retentionOutcome.ok ? retentionOutcome.data : null}
               />
             )}
             <SettingsGroupForm group={group} />

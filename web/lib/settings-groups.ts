@@ -10,6 +10,7 @@
 export const SETTINGS_GROUP_DESCRIPTIONS: Record<string, string> = {
   service: "监听地址、数据库与管理令牌等启动配置，只读",
   update: "面板自动升级的开关与执行时间",
+  retention: "疑似死亡种子的自动清理开关、保留天数与周期",
   auth: "GitHub 与 OIDC 单点登录的接入配置",
   appearance: "站点名称、主色与默认外观",
   crawler: "DHT 爬虫开关、监听端口与采样并发",
@@ -26,6 +27,7 @@ export const SETTINGS_GROUP_DESCRIPTIONS: Record<string, string> = {
 export const SETTINGS_GROUP_LABELS: Record<string, string> = {
   service: "服务与数据库",
   update: "系统更新",
+  retention: "数据保留",
   auth: "登录与账号",
   appearance: "外观与主题",
   crawler: "爬虫",
