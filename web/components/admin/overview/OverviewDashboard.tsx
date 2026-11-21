@@ -243,7 +243,11 @@ export default function OverviewDashboard({
             </div>
           }
         >
-          <TrendLine buckets={trends.buckets} range={trends.range} />
+          <TrendLine
+            buckets={trends.buckets}
+            range={trends.range}
+            bucketSeconds={trends.bucket_seconds}
+          />
         </Panel>
 
         <Panel title="过滤构成">
@@ -253,28 +257,48 @@ export default function OverviewDashboard({
               { label: "成人过滤", value: adult, color: CHART.danger },
               { label: "垃圾过滤", value: spam, color: CHART.warn },
               { label: "自定义屏蔽", value: blocked, color: CHART.neutral },
-              { label: "体积过滤", value: size, color: CHART.priFaint },
+              { label: "体积过滤", value: size, color: CHART.priSoft },
             ]}
           />
-          <p className="mt-3 text-xs leading-relaxed text-faint">
+          <p className="mt-3 mb-3 text-xs leading-relaxed text-faint">
             过滤率 {pct(filtered, fetched)}（按元数据抓取成功数计）；体积过滤是
             小于最小体积的种子，不属于内容问题。
           </p>
           {o.filter && (
-            <p className="mt-2 border-t border-line-2 pt-2 text-xs leading-relaxed text-faint">
-              过滤开关：总开关 {o.filter.enabled ? "开" : "关"} · 成人{" "}
-              {o.filter.adult_enabled ? "开" : "关"} · 垃圾{" "}
-              {o.filter.spam_enabled ? "开" : "关"} · 太小{" "}
-              {o.filter.too_small_enabled ? "开" : "关"}
-              （在
-              <Link
-                href="/admin/settings"
-                className="text-accent-ink underline decoration-accent-line underline-offset-2"
-              >
-                设置
-              </Link>
-              中调整；关掉的类别计数随之冻结）
-            </p>
+            <div className="mt-auto border-t border-line-2 pt-2.5">
+              {/* Each switch is one unbreakable item, so the row wraps
+                  between switches at any card width — the old single
+                  sentence could strand a lone fragment ("结）") on a
+                  last line at the card's bottom edge. */}
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
+                <span className="text-faint">过滤开关</span>
+                {(
+                  [
+                    ["总开关", o.filter.enabled],
+                    ["成人", o.filter.adult_enabled],
+                    ["垃圾", o.filter.spam_enabled],
+                    ["太小", o.filter.too_small_enabled],
+                  ] as [string, boolean][]
+                ).map(([label, on]) => (
+                  <span key={label} className="whitespace-nowrap text-mute">
+                    {label}{" "}
+                    <span className="font-medium text-ink-2">
+                      {on ? "开" : "关"}
+                    </span>
+                  </span>
+                ))}
+              </div>
+              <p className="mt-1.5 text-xs leading-relaxed text-faint">
+                在
+                <Link
+                  href="/admin/settings"
+                  className="text-accent-ink underline decoration-accent-line underline-offset-2"
+                >
+                  设置
+                </Link>
+                中调整；关掉的类别计数随之冻结。
+              </p>
+            </div>
           )}
         </Panel>
       </div>
@@ -530,13 +554,13 @@ function Panel({
 }) {
   return (
     <section
-      className={`rounded-xl border border-line bg-surface p-4 shadow-card ${className ?? ""}`}
+      className={`flex flex-col rounded-xl border border-line bg-surface p-4 shadow-card ${className ?? ""}`}
     >
       <div className="flex min-h-8 items-center justify-between gap-3">
         <h2 className="text-sm font-semibold text-ink">{title}</h2>
         {action}
       </div>
-      <div className="mt-2">{children}</div>
+      <div className="mt-2 flex min-h-0 flex-1 flex-col">{children}</div>
     </section>
   );
 }
