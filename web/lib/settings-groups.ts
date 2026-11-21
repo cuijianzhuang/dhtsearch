@@ -16,7 +16,7 @@ export const SETTINGS_GROUP_DESCRIPTIONS: Record<string, string> = {
   appearance: "站点名称、主色与默认外观",
   crawler: "DHT 爬虫开关、监听端口与采样并发",
   metadata: "元数据抓取的并发、超时、早筛与优先级队列",
-  scrape: "Tracker 刮削开关与 Tracker 列表",
+  scrape: "Tracker 刮削、已入库种子定期复查与 Tracker 列表",
   filter: "成人、垃圾与体积的静态过滤规则",
   moderation: "LLM 审核在专页统一编辑",
   trending: "豆瓣趋势榜的开关、刷新周期与保留条数",

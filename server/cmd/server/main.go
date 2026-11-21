@@ -27,6 +27,7 @@ import (
 	"dhtsearch/server/internal/metadata/libtorrent"
 	"dhtsearch/server/internal/metadata/native"
 	"dhtsearch/server/internal/moderator"
+	"dhtsearch/server/internal/rescrape"
 	"dhtsearch/server/internal/retention"
 	"dhtsearch/server/internal/scraper"
 	"dhtsearch/server/internal/settings"
@@ -607,6 +608,29 @@ func main() {
 
 	trackerList := mgr.List(settings.KeyTrackers)
 
+	// swarmSink is THE swarm write path: every scrape round's
+	// aggregated snapshots — the ingest pipeline's and the
+	// background re-scraper's alike — land through it, so both
+	// produce identical swarm_stats rows (per-field max across
+	// answering trackers, uncovered hashes absent; see
+	// internal/scraper).
+	swarmSink := func(stats []scraper.SwarmStat) {
+		rows := make([]store.SwarmStats, 0, len(stats))
+		now := time.Now().Unix()
+		for _, sw := range stats {
+			rows = append(rows, store.SwarmStats{
+				InfoHash:  sw.Hash,
+				Seeders:   int64(sw.Seeders),
+				Leechers:  int64(sw.Leechers),
+				Completed: int64(sw.Completed),
+				ScrapedAt: now,
+			})
+		}
+		if err := st.UpsertSwarmStats(ctx, rows); err != nil {
+			logger.Printf("swarm stats: %v", err)
+		}
+	}
+
 	// Trending runs in dynamic mode: the enable gate and the
 	// interval/limit are re-read from the settings registry each
 	// cycle, so the settings page controls it live.
@@ -693,22 +717,7 @@ func main() {
 				// health), and the zero-seeder streaks behind the
 				// health derivation only exist if rounds land in the
 				// store as they happen.
-				Sink: func(stats []scraper.SwarmStat) {
-					rows := make([]store.SwarmStats, 0, len(stats))
-					now := time.Now().Unix()
-					for _, sw := range stats {
-						rows = append(rows, store.SwarmStats{
-							InfoHash:  sw.Hash,
-							Seeders:   int64(sw.Seeders),
-							Leechers:  int64(sw.Leechers),
-							Completed: int64(sw.Completed),
-							ScrapedAt: now,
-						})
-					}
-					if err := st.UpsertSwarmStats(ctx, rows); err != nil {
-						logger.Printf("swarm stats: %v", err)
-					}
-				},
+				Sink: swarmSink,
 			})
 			if err != nil {
 				logger.Printf("scraper: disabled: %v", err)
@@ -951,6 +960,46 @@ func main() {
 		},
 	})
 	go retSvc.Run(ctx)
+
+	// Periodic swarm re-scrape: re-checks the stalest stored
+	// torrents against the trackers so swarm snapshots (and the
+	// health evidence the retention cleanup above consumes) keep
+	// refreshing after ingest. It runs whenever trackers are
+	// configured — independent of the ingest scraper, which only
+	// exists while metadata fetching is on — and gates itself per
+	// round on RESCRAPE_ENABLED and the fetch queue's depth. Its
+	// snapshots land through swarmSink, the same write path as
+	// ingest rounds.
+	if len(trackerList) > 0 {
+		rs, err := scraper.NewRescraper(scraper.Config{
+			Trackers: trackerList,
+			Logger:   logger,
+		})
+		if err != nil {
+			logger.Printf("rescrape: disabled: %v", err)
+		} else {
+			defer rs.Close()
+			rescrapeSvc := rescrape.New(st, rs, rescrape.Config{
+				Logger: logger,
+				Sink:   swarmSink,
+				QueueDepth: func() int {
+					if metaQueue != nil {
+						return metaQueue.Len()
+					}
+					return 0
+				},
+				ConfigFunc: func() rescrape.Config {
+					return rescrape.Config{
+						Enabled: mgr.Bool(settings.KeyRescrapeEnabled),
+						MinAge:  time.Duration(mgr.Int(settings.KeyRescrapeMinAgeH)) * time.Hour,
+						PerMin:  mgr.Int(settings.KeyRescrapePerMin),
+						Logger:  logger,
+					}
+				},
+			})
+			go rescrapeSvc.Run(ctx)
+		}
+	}
 
 	// Douban trending fetcher for the homepage quick-search chips.
 	// The enable gate is consulted per request: disabled means the

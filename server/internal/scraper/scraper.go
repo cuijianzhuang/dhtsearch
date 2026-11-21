@@ -117,6 +117,95 @@ type trackerConn struct {
 	cc   *udp.ConnClient
 }
 
+// scrapeFunc performs one BEP 15 scrape against one tracker. It is
+// the real network call in production and a stub in tests.
+type scrapeFunc func(ctx context.Context, tc *trackerConn, ihs [][20]byte) ([]SwarmSample, error)
+
+// buildTrackers parses the configured announce URLs into tracker
+// connections, skipping (and logging) the unusable ones.
+func buildTrackers(raw []string, logger *log.Logger) []*trackerConn {
+	var out []*trackerConn
+	for _, u := range raw {
+		host, err := trackerHost(u)
+		if err != nil {
+			logger.Printf("scraper: skipping tracker %q: %v", u, err)
+			continue
+		}
+		out = append(out, &trackerConn{host: host})
+	}
+	return out
+}
+
+// queryTrackers scrapes ihs against every tracker in parallel and
+// merges the answers: best[i] is the per-field maximum across the
+// trackers that answered for hash i, and covered[i] records whether
+// any tracker answered for it at all. A short response (fewer
+// entries than requested) only covers its prefix. The returned
+// count is the number of failed tracker requests. This merge is the
+// one aggregation both the ingest pipeline and the background
+// re-scraper use, so their snapshots are built identically.
+func queryTrackers(ctx context.Context, trackers []*trackerConn, scrapeFn scrapeFunc, timeout time.Duration, ihs [][20]byte) (best []SwarmSample, covered []bool, errs int64) {
+	best = make([]SwarmSample, len(ihs))
+	covered = make([]bool, len(ihs))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var errCount atomic.Int64
+	for _, tc := range trackers {
+		wg.Add(1)
+		go func(tc *trackerConn) {
+			defer wg.Done()
+			sctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			res, err := scrapeFn(sctx, tc, ihs)
+			if err != nil {
+				errCount.Add(1)
+				return
+			}
+			mu.Lock()
+			for i, n := range res {
+				if i >= len(best) {
+					break
+				}
+				covered[i] = true
+				if n.Seeders > best[i].Seeders {
+					best[i].Seeders = n.Seeders
+				}
+				if n.Leechers > best[i].Leechers {
+					best[i].Leechers = n.Leechers
+				}
+				if n.Completed > best[i].Completed {
+					best[i].Completed = n.Completed
+				}
+			}
+			mu.Unlock()
+		}(tc)
+	}
+	wg.Wait()
+	return best, covered, errCount.Load()
+}
+
+// coveredStats builds a round's sink payload from its merged
+// answers: only covered hashes appear. A hash no tracker answered
+// for is absent — nothing was learned about it, and persisting an
+// invented zero would corrupt the zero-seeder streak evidence —
+// while a covered all-zero hash is present with zeros, a real
+// observation.
+func coveredStats(kept []string, best []SwarmSample, covered []bool) []SwarmStat {
+	stats := make([]SwarmStat, 0, len(kept))
+	for i, h := range kept {
+		if !covered[i] {
+			continue
+		}
+		stats = append(stats, SwarmStat{
+			Hash:      h,
+			Seeders:   best[i].Seeders,
+			Leechers:  best[i].Leechers,
+			Completed: best[i].Completed,
+		})
+	}
+	return stats
+}
+
 // Scraper consumes discovered infohashes, scrapes them and re-emits them in
 // descending seeder order.
 type Scraper struct {
@@ -141,7 +230,7 @@ type Scraper struct {
 	evicted    atomic.Int64
 
 	// scrapeTracker is swapped in tests to avoid network I/O.
-	scrapeTracker func(ctx context.Context, tc *trackerConn, ihs [][20]byte) ([]SwarmSample, error)
+	scrapeTracker scrapeFunc
 }
 
 // New validates the tracker list and builds a scraper. At least one valid
@@ -171,14 +260,7 @@ func New(cfg Config) (*Scraper, error) {
 		feedDone:      make(chan struct{}),
 		scrapeTracker: realScrape,
 	}
-	for _, raw := range cfg.Trackers {
-		host, err := trackerHost(raw)
-		if err != nil {
-			logger.Printf("scraper: skipping tracker %q: %v", raw, err)
-			continue
-		}
-		s.trackers = append(s.trackers, &trackerConn{host: host})
-	}
+	s.trackers = buildTrackers(cfg.Trackers, logger)
 	if len(s.trackers) == 0 {
 		return nil, fmt.Errorf("no scrapeable udp trackers in %v", cfg.Trackers)
 	}
@@ -250,6 +332,139 @@ func (s *Scraper) Close() {
 	}
 	s.wg.Wait()
 	for _, tc := range s.trackers {
+		tc.mu.Lock()
+		if tc.cc != nil {
+			tc.cc.Close()
+			tc.cc = nil
+		}
+		tc.mu.Unlock()
+	}
+}
+
+// rescrapeBatchWorkers bounds how many batches of one Rescraper
+// round are in flight at once. Each batch already fans out to every
+// tracker in parallel, so a handful of batches saturates the round;
+// the bound exists so a large re-scrape selection cannot burst
+// tracker traffic the way the ingest pipeline's eight workers do.
+const rescrapeBatchWorkers = 3
+
+// Rescraper runs standalone scrape rounds over arbitrary hash
+// lists — the background re-scraper's engine (see
+// internal/rescrape). It shares the ingest pipeline's trackers,
+// per-field-max merge and coverage rules (queryTrackers /
+// coveredStats) but none of its queue machinery: the caller picks
+// the hashes, and the round's snapshots come back in the same
+// SwarmStat shape the ingest Sink persists, so both write paths
+// land identical rows. Hashes no tracker answered for are absent
+// from the result — a fully failed round returns nothing at all,
+// never invented zeros.
+type Rescraper struct {
+	trackers []*trackerConn
+	batchMax int
+	timeout  time.Duration
+	logger   *log.Logger
+
+	// scrapeTracker is swapped in tests to avoid network I/O.
+	scrapeTracker scrapeFunc
+}
+
+// NewRescraper validates the tracker list and builds a Rescraper.
+// At least one valid udp:// tracker is required.
+func NewRescraper(cfg Config) (*Rescraper, error) {
+	batchMax := cfg.BatchMax
+	if batchMax <= 0 || batchMax > defaultBatchMax {
+		batchMax = defaultBatchMax
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = log.Default()
+	}
+	r := &Rescraper{
+		batchMax:      batchMax,
+		timeout:       timeout,
+		logger:        logger,
+		scrapeTracker: realScrape,
+	}
+	r.trackers = buildTrackers(cfg.Trackers, logger)
+	if len(r.trackers) == 0 {
+		return nil, fmt.Errorf("no scrapeable udp trackers in %v", cfg.Trackers)
+	}
+	return r, nil
+}
+
+// Scrape runs one re-scrape round over hashes and returns the
+// round's aggregated snapshots (see the type comment for the
+// coverage contract). Invalid hashes are skipped. Batches run a
+// few at a time; a cancelled context returns whatever finished.
+func (r *Rescraper) Scrape(ctx context.Context, hashes []string) []SwarmStat {
+	type batch struct {
+		ihs  [][20]byte
+		kept []string
+	}
+	var batches []batch
+	var cur batch
+	flush := func() {
+		if len(cur.ihs) > 0 {
+			batches = append(batches, cur)
+			cur = batch{}
+		}
+	}
+	for _, h := range hashes {
+		b, err := hex.DecodeString(h)
+		if err != nil || len(b) != 20 {
+			continue
+		}
+		var ih [20]byte
+		copy(ih[:], b)
+		cur.ihs = append(cur.ihs, ih)
+		cur.kept = append(cur.kept, h)
+		if len(cur.ihs) >= r.batchMax {
+			flush()
+		}
+	}
+	flush()
+	if len(batches) == 0 {
+		return nil
+	}
+
+	results := make([][]SwarmStat, len(batches))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < rescrapeBatchWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				best, covered, _ := queryTrackers(ctx, r.trackers, r.scrapeTracker, r.timeout, batches[i].ihs)
+				results[i] = coveredStats(batches[i].kept, best, covered)
+			}
+		}()
+	}
+send:
+	for i := range batches {
+		select {
+		case <-ctx.Done():
+			break send
+		case jobs <- i:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	var out []SwarmStat
+	for _, res := range results {
+		out = append(out, res...)
+	}
+	return out
+}
+
+// Close drops the tracker connections.
+func (r *Rescraper) Close() {
+	for _, tc := range r.trackers {
 		tc.mu.Lock()
 		if tc.cc != nil {
 			tc.cc.Close()
@@ -345,45 +560,10 @@ func (s *Scraper) scrapeBatch(ctx context.Context, hexes []string) {
 	if len(ihs) == 0 {
 		return
 	}
-	best := make([]SwarmSample, len(ihs))
 	// covered[i] records whether any tracker actually answered for
-	// hash i. A short response (fewer entries than requested) only
-	// covers its prefix; the sink must not persist invented zeros
-	// for the tail.
-	covered := make([]bool, len(ihs))
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	for _, tc := range s.trackers {
-		wg.Add(1)
-		go func(tc *trackerConn) {
-			defer wg.Done()
-			sctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
-			defer cancel()
-			res, err := s.scrapeTracker(sctx, tc, ihs)
-			if err != nil {
-				s.scrapeErrs.Add(1)
-				return
-			}
-			mu.Lock()
-			for i, n := range res {
-				if i >= len(best) {
-					break
-				}
-				covered[i] = true
-				if n.Seeders > best[i].Seeders {
-					best[i].Seeders = n.Seeders
-				}
-				if n.Leechers > best[i].Leechers {
-					best[i].Leechers = n.Leechers
-				}
-				if n.Completed > best[i].Completed {
-					best[i].Completed = n.Completed
-				}
-			}
-			mu.Unlock()
-		}(tc)
-	}
-	wg.Wait()
+	// hash i; the sink must not persist invented zeros for the rest.
+	best, covered, errs := queryTrackers(ctx, s.trackers, s.scrapeTracker, s.cfg.Timeout, ihs)
+	s.scrapeErrs.Add(errs)
 
 	items := make([]Item, len(kept))
 	var seededN int64
@@ -398,19 +578,7 @@ func (s *Scraper) scrapeBatch(ctx context.Context, hexes []string) {
 	s.enqueue(items)
 
 	if s.cfg.Sink != nil {
-		stats := make([]SwarmStat, 0, len(kept))
-		for i, h := range kept {
-			if !covered[i] {
-				continue
-			}
-			stats = append(stats, SwarmStat{
-				Hash:      h,
-				Seeders:   best[i].Seeders,
-				Leechers:  best[i].Leechers,
-				Completed: best[i].Completed,
-			})
-		}
-		if len(stats) > 0 {
+		if stats := coveredStats(kept, best, covered); len(stats) > 0 {
 			s.cfg.Sink(stats)
 		}
 	}
