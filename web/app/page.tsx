@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { fetchStats, fetchTrending } from "@/lib/api";
+import { fetchStats, fetchTrending, fetchTrendingTerms } from "@/lib/api";
 import { fetchSiteConfig } from "@/lib/site";
 import { formatCount } from "@/lib/format";
 import SearchBox from "@/components/SearchBox";
@@ -33,11 +33,16 @@ function TrendingRow({ label, titles }: { label: string; titles: string[] }) {
 }
 
 export default async function Home() {
-  const [stats, trending, site] = await Promise.all([
+  const [stats, trending, trendingTerms, site] = await Promise.all([
     fetchStats(),
     fetchTrending(),
+    fetchTrendingTerms(),
     fetchSiteConfig(),
   ]);
+  // The site's own hot searches (anonymous aggregate counts from
+  // /api/trending-terms), capped so the row stays one tidy block.
+  // Empty on a fresh install — the row then simply does not render.
+  const hotTerms = (trendingTerms?.terms ?? []).slice(0, 12).map((t) => t.term);
   const rows = [
     { label: "热门电影", titles: trending?.movies ?? [] },
     { label: "热门美剧", titles: trending?.tv ?? [] },
@@ -96,14 +101,19 @@ export default async function Home() {
           )}
         </p>
 
-        {rows.length > 0 && (
+        {(hotTerms.length > 0 || rows.length > 0) && (
           <div id="trending" className="mt-6 scroll-mt-6 xl:mt-8">
+            {hotTerms.length > 0 && (
+              <TrendingRow label="热门搜索" titles={hotTerms} />
+            )}
             {rows.map((r) => (
               <TrendingRow key={r.label} label={r.label} titles={r.titles} />
             ))}
-            <p className="mt-3 text-center text-xs text-faint">
-              热门影视数据来自豆瓣
-            </p>
+            {rows.length > 0 && (
+              <p className="mt-3 text-center text-xs text-faint">
+                热门影视数据来自豆瓣
+              </p>
+            )}
           </div>
         )}
       </div>

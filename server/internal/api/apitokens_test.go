@@ -252,8 +252,8 @@ func TestPublicGateFirstParty(t *testing.T) {
 	if code := doSearch(t, base, testInternalToken, ""); code != 401 {
 		t.Fatalf("internal token as bearer: %d, want 401", code)
 	}
-	// Correct internal token: all three gated endpoints pass.
-	for _, path := range []string{"/api/search?q=Big", "/api/stats", "/api/trending"} {
+	// Correct internal token: all gated endpoints pass.
+	for _, path := range []string{"/api/search?q=Big", "/api/stats", "/api/trending", "/api/trending-terms"} {
 		if code := doInternal(t, base, path, testInternalToken); code != 200 {
 			t.Fatalf("first-party %s: %d, want 200", path, code)
 		}

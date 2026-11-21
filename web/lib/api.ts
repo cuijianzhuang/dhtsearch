@@ -214,6 +214,34 @@ export interface TrendingResponse {
   updated_at?: number;
 }
 
+export interface TrendingTerm {
+  term: string;
+  count: number;
+}
+
+export interface TrendingTermsResponse {
+  window: string;
+  terms: TrendingTerm[];
+}
+
+export async function fetchTrendingTerms(): Promise<TrendingTermsResponse | null> {
+  try {
+    // The site's own hot searches over the last 7 days. Counts move
+    // slowly, so this rides the same revalidate cache as trending:
+    // the homepage must not hit the API per request. Null (backend
+    // down, public API disabled, fresh install with no history)
+    // degrades to no 热门搜索 row.
+    const res = await fetch(`${API_BASE}/api/trending-terms?window=7d`, {
+      next: { revalidate: 300 },
+      headers: internalTokenHeaders(),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as TrendingTermsResponse;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchTrending(): Promise<TrendingResponse | null> {
   try {
     // The backend refreshes hourly; revalidate keeps the homepage from

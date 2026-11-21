@@ -17,8 +17,8 @@ import (
 )
 
 // Public API tokens: optional bearer credentials for the public
-// endpoints (/api/search, /api/stats, /api/trending), managed from
-// the admin console. Two settings (see internal/settings) steer the
+// endpoints (/api/search, /api/stats, /api/trending,
+// /api/trending-terms), managed from the admin console. Two settings (see internal/settings) steer the
 // gate, both read live per request:
 //
 //   - PUBLIC_API_ENABLED (default on): off answers the three public
@@ -176,7 +176,7 @@ func (s *Server) isFirstParty(r *http.Request) bool {
 // ADMIN_TOKEN auth) are deliberately outside it.
 func isPublicAPIPath(path string) bool {
 	switch path {
-	case "/api/search", "/api/stats", "/api/trending":
+	case "/api/search", "/api/stats", "/api/trending", "/api/trending-terms":
 		return true
 	}
 	return false

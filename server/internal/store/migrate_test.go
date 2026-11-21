@@ -55,6 +55,19 @@ func seedMigrateSource(t *testing.T, s *Store) {
 		"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", 3, 1700003600, "timeout", 1700000000); err != nil {
 		t.Fatalf("seed fetch_attempts: %v", err)
 	}
+	// Search-term history: weeks of hot-search counts are operator
+	// data too (see migrate.go); the bucket_key carries the
+	// (day, term) identity the keyset copy paginates on.
+	for _, r := range []SearchTermDelta{
+		{Term: "ubuntu", Display: "Ubuntu", Count: 7},
+		{Term: "shawshank", Display: "Shawshank", Count: 3},
+	} {
+		if _, err := s.exec(`INSERT INTO search_terms
+			(bucket_key, term, display, day, count) VALUES (?, ?, ?, ?, ?)`,
+			searchTermBucketKey(20388, r.Term), r.Term, r.Display, 20388, r.Count); err != nil {
+			t.Fatalf("seed search_terms %s: %v", r.Term, err)
+		}
+	}
 	// Swarm snapshots, streak columns included: user-visible data
 	// that must cross backends like everything else in the copy set.
 	for _, r := range []SwarmStats{
@@ -115,7 +128,7 @@ func TestMigrateSQLiteToSQLite(t *testing.T) {
 	if rep.From != "sqlite" || rep.To != "sqlite" {
 		t.Fatalf("report dialects: %s -> %s", rep.From, rep.To)
 	}
-	for table, want := range map[string]int64{"torrents": 3, "stats": 2, "blocked": 1, "swarm_stats": 2, "fetch_attempts": 1} {
+	for table, want := range map[string]int64{"torrents": 3, "stats": 2, "blocked": 1, "swarm_stats": 2, "fetch_attempts": 1, "search_terms": 2} {
 		tr := tableReport(t, rep, table)
 		if tr.Source != want || tr.Inserted != want || tr.Skipped != 0 || tr.Dest != want || tr.Missing != 0 {
 			t.Fatalf("%s report = %+v, want source/inserted/dest=%d skipped/missing=0", table, tr, want)
@@ -155,6 +168,14 @@ func TestMigrateSQLiteToSQLite(t *testing.T) {
 	}
 	if stats["seen"] != 42 || stats["fetched"] != 7 {
 		t.Fatalf("migrated stats: %v", stats)
+	}
+	terms, err := dst.TopSearchTerms(context.Background(), 20388, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(terms) != 2 || terms[0] != (SearchTermStat{Term: "Ubuntu", Count: 7}) ||
+		terms[1] != (SearchTermStat{Term: "Shawshank", Count: 3}) {
+		t.Fatalf("migrated search_terms: %+v", terms)
 	}
 	att, found, err := dst.FetchAttemptRow(context.Background(),
 		"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
