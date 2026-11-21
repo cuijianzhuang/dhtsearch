@@ -352,6 +352,26 @@ func (d dialect) incrStat() string {
 		 ON CONFLICT(key) DO UPDATE SET value = value + excluded.value`
 }
 
+// recordSearchTerm upserts one search_terms day bucket. Like incrStat
+// it adds to the existing row's count, so the Postgres form must
+// qualify the existing value with the table name — an unqualified
+// `count + excluded.count` is ambiguous there (SQLSTATE 42702);
+// SQLite accepts the unqualified form.
+func (d dialect) recordSearchTerm() string {
+	if d.isPostgres() {
+		return `INSERT INTO search_terms (bucket_key, term, display, day, count)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(bucket_key) DO UPDATE SET
+			count = search_terms.count + excluded.count,
+			display = excluded.display`
+	}
+	return `INSERT INTO search_terms (bucket_key, term, display, day, count)
+	 VALUES (?, ?, ?, ?, ?)
+	 ON CONFLICT(bucket_key) DO UPDATE SET
+		count = count + excluded.count,
+		display = excluded.display`
+}
+
 // setStat writes a stats key's absolute value (as opposed to
 // incrStat's delta). The right-hand side references only
 // excluded.value, which both backends accept unambiguously.

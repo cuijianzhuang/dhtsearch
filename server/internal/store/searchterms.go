@@ -119,12 +119,7 @@ func (s *Store) RecordSearchTerms(ctx context.Context, day int64, deltas []Searc
 		return err
 	}
 	defer tx.Rollback()
-	stmt, err := tx.Prepare(s.d.rebind(
-		`INSERT INTO search_terms (bucket_key, term, display, day, count)
-		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(bucket_key) DO UPDATE SET
-			count = count + excluded.count,
-			display = excluded.display`))
+	stmt, err := tx.Prepare(s.d.rebind(s.d.recordSearchTerm()))
 	if err != nil {
 		return err
 	}
