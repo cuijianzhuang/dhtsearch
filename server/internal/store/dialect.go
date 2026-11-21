@@ -190,6 +190,24 @@ func (d dialect) schemaStatements() []string {
 			updated_at    ` + intType + ` NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_fetch_attempts_retry ON fetch_attempts(next_retry_at)`,
+		// Anonymous search-term statistics (see searchterms.go):
+		// one row per (normalized term, UTC day) with a count and
+		// the latest display casing. Aggregate-only by schema —
+		// there is no column for a client address, a timestamp
+		// finer than the day, or anything else per-visitor.
+		// bucket_key is the (day, term) pair encoded into a single
+		// TEXT primary key so the cross-backend Migrate's keyset
+		// copy can paginate it like every other table; the table
+		// IS migrated — a hot-search history takes weeks to
+		// accumulate (see searchterms.go).
+		`CREATE TABLE IF NOT EXISTS search_terms (
+			bucket_key TEXT PRIMARY KEY,
+			term       TEXT NOT NULL,
+			display    TEXT NOT NULL,
+			day        ` + intType + ` NOT NULL,
+			count      ` + intType + ` NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_search_terms_day ON search_terms(day)`,
 		// Tracker-scrape swarm snapshots (see swarm.go): the latest
 		// BEP 15 answer per infohash — seeders/leechers/completed as
 		// the per-field maximum across the trackers that answered,

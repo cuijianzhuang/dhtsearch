@@ -30,6 +30,7 @@ import (
 	"dhtsearch/server/internal/rescrape"
 	"dhtsearch/server/internal/retention"
 	"dhtsearch/server/internal/scraper"
+	"dhtsearch/server/internal/searchstats"
 	"dhtsearch/server/internal/settings"
 	"dhtsearch/server/internal/store"
 	"dhtsearch/server/internal/trending"
@@ -1000,6 +1001,13 @@ func main() {
 			go rescrapeSvc.Run(ctx)
 		}
 	}
+	// Anonymous search-term statistics (internal/searchstats):
+	// the API counts every successful public search into this
+	// service's in-memory aggregator; it flushes day-bucketed
+	// counts to the store every few seconds. Aggregate-only —
+	// nothing per-visitor is ever recorded.
+	searchStatsSvc := searchstats.New(st, logger)
+	go searchStatsSvc.Run(ctx)
 
 	// Douban trending fetcher for the homepage quick-search chips.
 	// The enable gate is consulted per request: disabled means the
@@ -1083,6 +1091,13 @@ func main() {
 					lastPrune = time.Now()
 					if _, err := st.PruneFetchAttempts(wctx, time.Now().Add(-7*24*time.Hour).Unix()); err != nil {
 						logger.Printf("fetch attempts prune: %v", err)
+					}
+					// Search-term buckets live 90 days: the API
+					// serves today and 7-day windows, so older
+					// buckets are dead weight. Same hourly
+					// piggyback as the negative-cache sweep.
+					if _, err := st.PruneSearchTerms(wctx, store.SearchTermDay(time.Now())-89); err != nil {
+						logger.Printf("search terms prune: %v", err)
 					}
 				}
 				wcancel()
@@ -1244,6 +1259,7 @@ func main() {
 			Settings:        mgr,
 			Retention:       retSvc,
 			Alerts:          alertsSvc,
+			SearchTerms:     searchStatsSvc,
 			Trackers:        func() []string { return mgr.List(settings.KeyTrackers) },
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,

@@ -122,12 +122,29 @@ type Options struct {
 	// stall notifier's channel probe (see internal/alerts). Nil
 	// (tests, settings-free wiring) makes the endpoint answer 503.
 	Alerts AlertsService
+	// SearchTerms, when non-nil, receives the normalized query of
+	// every successful public search for the anonymous hot-search
+	// statistics (see internal/searchstats). The recorder is
+	// in-memory and non-blocking by contract: counting must never
+	// slow or fail a search. Nil disables counting; the
+	// /api/trending-terms endpoint still serves whatever history
+	// the store holds.
+	SearchTerms SearchTermRecorder
 }
 
 // AlertsService is the slice of the stall notifier the admin API
 // needs. *alerts.Service satisfies it; tests substitute a stub.
 type AlertsService interface {
 	Test(ctx context.Context) alerts.TestResult
+}
+
+// SearchTermRecorder is the counting sink for public searches:
+// one call per successful search with a non-empty query, carrying
+// the merge key and the display casing from
+// store.NormalizeSearchTerm. *searchstats.Service satisfies it;
+// tests substitute a stub.
+type SearchTermRecorder interface {
+	Record(term, display string)
 }
 
 // RetentionService is the slice of the retention runner the admin
@@ -432,6 +449,7 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 	mux.HandleFunc("GET /api/search", s.handleSearch)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
 	mux.HandleFunc("GET /api/trending", s.handleTrending)
+	mux.HandleFunc("GET /api/trending-terms", s.handleTrendingTerms)
 	mux.HandleFunc("GET /api/healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/site", s.handleSite)
 	mux.HandleFunc("GET /api/torrents/{hash}/similar", s.handleSimilar)
@@ -723,6 +741,15 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.searchError(w, ctx, err, "search")
 		return
+	}
+	// Count the search for the anonymous hot-search statistics.
+	// Only successful searches with a query that normalizes to
+	// something countable land here; the recorder is a non-blocking
+	// in-memory sink, so this cannot slow or fail the response.
+	if s.opts.SearchTerms != nil {
+		if term, display, ok := store.NormalizeSearchTerm(q); ok {
+			s.opts.SearchTerms.Record(term, display)
+		}
 	}
 	results := make([]resultItem, 0, len(items))
 	for _, t := range items {

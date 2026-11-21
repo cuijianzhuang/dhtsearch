@@ -75,6 +75,18 @@ var migrateTables = []migrateTable{
 		kind: []colKind{colText, colInt, colInt, colText, colInt},
 	},
 	{
+		// search_terms is copied for the same reason as
+		// fetch_attempts: the hot-search history is operator data
+		// that takes weeks to accumulate, and dropping it in a
+		// switch would blank the homepage's 热门搜索 row. The
+		// (day, term) identity travels in the single bucket_key
+		// column (see searchterms.go).
+		name: "search_terms",
+		pk:   "bucket_key",
+		cols: []string{"bucket_key", "term", "display", "day", "count"},
+		kind: []colKind{colText, colText, colText, colInt, colInt},
+	},
+	{
 		// swarm_stats is copied, unlike the dht_nodes snapshot and
 		// the trending cache (both absent from this list): those are
 		// runtime state a fresh process rebuilds, while swarm rows
