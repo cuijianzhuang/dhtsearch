@@ -3,20 +3,31 @@
 // The overview hero: the ingest pipeline as a live flow diagram —
 //   DHT 网络 → 采样发现 → 元数据抓取 → 内容过滤 → 入库
 // It replaces the old static funnel bars. Every moving element is
-// driven by the deltas between the last two /api/admin-data polls
-// (the dashboard polls every 8s and passes the previous payload in):
-// no delta, no comets — the only motion left on a still segment is
-// the rail's slow idle dash drift. The mapping is deliberately
-// monotonic — a bigger delta never renders slower or sparser than
-// a smaller one:
+// driven by the deltas between /api/admin-data polls (the dashboard
+// polls every 8s and passes the previous payload in) — but not by
+// the latest interval alone. The counters' rhythms are
+// heterogeneous: discoveries land in sample_infohashes bursts while
+// the fetch queue drains steadily, so a single 8s window regularly
+// catches +0 upstream while work flows downstream, and raw deltas
+// lit the stages out of sync with the physical flow (a gray
+// discovery ring feeding a streaming fetch segment). Each stage's
+// activity is therefore the trailing mean of its last three poll
+// deltas (≈24s; the mean keeps the tier thresholds below, which
+// are calibrated to per-poll rates, meaningful), and each
+// segment's rate obeys flow conservation: the minimum of the two
+// stages it connects, so a segment never streams into an
+// idle-looking stage. No activity, no comets — the only motion
+// left on a still segment is the rail's slow idle dash drift. The
+// mapping is deliberately monotonic — a bigger rate never renders
+// slower or sparser than a smaller one:
 //
-//   segment            rate source (per-poll delta)
-//   DHT → 采样发现     Δ seen            (discoveries arriving)
-//   采样 → 元数据抓取  Δ attempts        (fetched + prescreen_dropped
+//   stage activity     source (per-poll delta, smoothed as above)
+//   DHT 网络 / 采样发现  Δ seen            (discoveries arriving)
+//   元数据抓取          Δ attempts        (fetched + prescreen_dropped
 //                                         + timed_out + failed: work
 //                                         leaving the fetch queue)
-//   抓取 → 内容过滤    Δ fetched         (metadata successes)
-//   过滤 → 入库        Δ stored          (net new rows landing in the
+//   内容过滤            Δ fetched         (metadata successes)
+//   入库                Δ stored          (net new rows landing in the
 //                                         library: the stored_total
 //                                         poll delta — 入库 displays
 //                                         the library's actual current
@@ -58,8 +69,10 @@
 // The track also reads as what it is — a spider crawling a network:
 // each stage is itself a node (the ring described below), and one
 // spider — the crawler itself — rides the track at the position
-// the data says work currently reaches:
-//   Δstored > 0            it travels the whole track, one anchor per
+// the data says work currently reaches. It reads the same smoothed
+// segment rates as the rings and comets, so its position never
+// contradicts them:
+//   入库 segment rate > 0  it travels the whole track, one anchor per
 //                          quarter poll (a full traverse per poll
 //                          interval), looping while items keep
 //                          landing in the DB;
@@ -67,7 +80,7 @@
 //                          nothing (frontier + 1), in warn colors
 //                          when that stage is the diagnosed fetch
 //                          stall, plain accent otherwise;
-//   all deltas 0/disabled  it rests at the first node, muted.
+//   all rates 0/disabled   it rests at the first node, muted.
 // A stale poll freezes it mid-glide (its computed transform is
 // pinned in place); reduced motion drops the leg gait and the
 // transitions and steps it once per poll — the position is data, so
@@ -168,6 +181,16 @@ interface Tier {
 /** How a network node (a stage glyph, or the spider) is lit. */
 type NodeTone = "accent" | "warn" | "faint";
 
+/** One poll's raw deltas for the four activity counters, kept in a
+ *  short trailing window (see the smoothing block in PipelineFlow):
+ *  stage activity is the window's mean, not the latest sample. */
+interface DeltaSample {
+  seen: number;
+  attempts: number;
+  fetched: number;
+  stored: number;
+}
+
 /** Mirrors POLL_MS in OverviewDashboard: the dashboard's poll
  *  interval, which the spider's traverse is paced against. */
 const POLL_MS = 8000;
@@ -263,6 +286,64 @@ export default function PipelineFlow({
         (delta(cur.timedOut, before.timedOut) ?? 0) +
         (delta(cur.failed, before.failed) ?? 0);
 
+  // --- Activity smoothing ---------------------------------------
+  // Stage activity = the trailing mean of the last three polls'
+  // deltas (≈24s at the dashboard's cadence), for the reasons in
+  // the file header: raw single-window deltas flicker the stages
+  // out of sync with the physical flow. Samples accumulate keyed
+  // on the overview object's identity — one per landed poll; a
+  // failed poll swaps nothing in, so the window simply persists —
+  // using the same adjust-during-render pattern as the spider
+  // settle below. Until the first real delta lands there are no
+  // samples and every activity is null: tiers stay zero and only
+  // the idle drift moves, exactly as before.
+  const [sampleBox, setSampleBox] = useState<{
+    key: AdminOverview;
+    samples: DeltaSample[];
+  } | null>(null);
+  let samples = sampleBox?.samples ?? [];
+  if (overview !== sampleBox?.key) {
+    if (
+      dSeen !== null &&
+      dAttempts !== null &&
+      dFetched !== null &&
+      dStored !== null
+    ) {
+      samples = [
+        ...samples,
+        {
+          seen: dSeen,
+          attempts: dAttempts,
+          fetched: dFetched,
+          stored: dStored,
+        },
+      ].slice(-3);
+    }
+    setSampleBox({ key: overview, samples });
+  }
+  const smooth = (pick: (s: DeltaSample) => number): number | null =>
+    samples.length === 0
+      ? null
+      : samples.reduce((a, s) => a + pick(s), 0) / samples.length;
+  const aSeen = smooth((s) => s.seen);
+  const aAttempts = smooth((s) => s.attempts);
+  const aFetched = smooth((s) => s.fetched);
+  const aStored = smooth((s) => s.stored);
+
+  // Segment rates, one per connector, named for their downstream
+  // counter. Flow conservation: a segment's rate is the minimum of
+  // the two stages it connects (a stage's activity is its smoothed
+  // inbound rate; the DHT stage's is the discovery rate itself), so
+  // a segment never streams into an idle-looking stage. The first
+  // segment connects two stages whose activity is the discovery
+  // rate, so its rate is that rate unchanged.
+  const segRate = (a: number | null, b: number | null): number | null =>
+    a === null || b === null ? null : Math.min(a, b);
+  const rateSeen = aSeen;
+  const rateAttempts = segRate(aSeen, aAttempts);
+  const rateFetched = segRate(aAttempts, aFetched);
+  const rateStored = segRate(aFetched, aStored);
+
   const queueDepth = overview.fetch?.queue_depth ?? 0;
   const nodes = overview.crawler?.nodes ?? 0;
   const queuedNodes = overview.crawler?.queued_nodes ?? 0;
@@ -279,19 +360,28 @@ export default function PipelineFlow({
   const seg = (d: number | null): Tier =>
     disabled ? { dots: 0, seconds: 0, comets: 0 } : flowTier(d);
 
+  // Segment tiers from the smoothed, conserved rates — the single
+  // source every visual below (mesh, web, rings, connectors,
+  // spider) reads, so they can never disagree with each other.
+  const tSeen = seg(rateSeen);
+  const tAttempts = seg(rateAttempts);
+  const tFetched = seg(rateFetched);
+  const tStored = seg(rateStored);
+
   // --- Spider layer -------------------------------------------------
   // The frontier is the run of consecutive segments, from segment 1,
-  // whose delta is positive: work is currently getting that far. The
+  // whose rate is positive: work is currently getting that far. The
   // spider's anchor and color follow the position rule documented at
   // the top of this file; its stepping is state at poll cadence.
-  const segDeltas = [dSeen, dAttempts, dFetched, dStored];
+  const segRates = [rateSeen, rateAttempts, rateFetched, rateStored];
   let frontier = 0;
-  for (const d of segDeltas) {
+  for (const d of segRates) {
     if (d !== null && d > 0) frontier += 1;
     else break;
   }
-  const allStill = segDeltas.every((d) => d === null || d <= 0);
-  const traveling = !disabled && !allStill && dStored !== null && dStored > 0;
+  const allStill = segRates.every((d) => d === null || d <= 0);
+  const traveling =
+    !disabled && !allStill && rateStored !== null && rateStored > 0;
   const waiting = !disabled && !allStill && !traveling;
 
   const reducedMotion = useSyncExternalStore(
@@ -417,20 +507,20 @@ export default function PipelineFlow({
         className={`relative mt-1 overflow-hidden sm:mt-2 lg:mt-1.5 ${stale ? "flow-paused" : ""}`}
       >
         <div aria-hidden className="ambience-glow pointer-events-none absolute inset-0 z-0" />
-        <MeshBackdrop tier={seg(dSeen)} />
+        <MeshBackdrop tier={tSeen} />
         <ConnectorLayer
           segs={[
-            { tier: seg(dSeen) },
-            { tier: seg(dAttempts), warn: fetchStalled },
-            { tier: seg(dFetched) },
-            { tier: seg(dStored) },
+            { tier: tSeen },
+            { tier: tAttempts, warn: fetchStalled },
+            { tier: tFetched },
+            { tier: tStored },
           ]}
           dim={disabled}
         />
         <div className="relative z-10 flex flex-row items-start">
-          <Stage label="DHT 网络" value={nodes} sub={`排队节点 ${formatCount(queuedNodes)}`} dim={disabled} nodeTone={disabled ? "faint" : "accent"} backdropTier={seg(dSeen)} breatheTier={seg(dSeen)} />
+          <Stage label="DHT 网络" value={nodes} sub={`排队节点 ${formatCount(queuedNodes)}`} dim={disabled} nodeTone={disabled ? "faint" : "accent"} backdropTier={tSeen} breatheTier={tSeen} />
           <Segment />
-          <Stage label="采样发现" value={cur.seen} delta={dSeen} dim={disabled} nodeTone={toneOf(dSeen)} breatheTier={seg(dSeen)} />
+          <Stage label="采样发现" value={cur.seen} delta={dSeen} dim={disabled} nodeTone={toneOf(aSeen)} breatheTier={tSeen} />
           <Segment />
           <Stage
             label="元数据抓取"
@@ -439,13 +529,13 @@ export default function PipelineFlow({
             sub={`队列深度 ${formatCount(queueDepth)}`}
             warn={fetchStalled}
             dim={disabled}
-            nodeTone={fetchStalled ? "warn" : toneOf(dAttempts)}
-            breatheTier={seg(dAttempts)}
+            nodeTone={fetchStalled ? "warn" : toneOf(aAttempts)}
+            breatheTier={tAttempts}
           />
           <Segment />
-          <Stage label="内容过滤" value={cur.filtered} delta={dFiltered} dim={disabled} nodeTone={toneOf(dFetched)} breatheTier={seg(dFetched)} />
+          <Stage label="内容过滤" value={cur.filtered} delta={dFiltered} dim={disabled} nodeTone={toneOf(aFetched)} breatheTier={tFetched} />
           <Segment />
-          <Stage label="入库" value={cur.stored} delta={dStored} dim={disabled} nodeTone={toneOf(dStored)} breatheTier={seg(dStored)} />
+          <Stage label="入库" value={cur.stored} delta={dStored} dim={disabled} nodeTone={toneOf(aStored)} breatheTier={tStored} />
         </div>
         <SpiderLayer
           anchor={spider.anchor}
@@ -696,7 +786,10 @@ function ConnectorLayer({
       }`}
     >
       {segs.map((s, i) => {
-        const active = s.tier.comets > 0;
+        // A warning segment (the diagnosed fetch stall) never
+        // streams, even while the smoothing window still holds
+        // earlier flow — frozen is what a stall looks like.
+        const active = s.tier.comets > 0 && !s.warn;
         // Idle is a live state, not an absence of one: the pipe
         // is pressurised. Only a warning segment (the diagnosed
         // stall) and the disabled layer are truly frozen.

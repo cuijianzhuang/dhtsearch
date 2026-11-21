@@ -22,6 +22,13 @@ import { CHART, DonutChart, MeterBar, TrendLine } from "./charts";
 
 const POLL_MS = 8000;
 
+/** The first re-poll after mount comes early: the SSR snapshot has
+ *  no predecessor, so until one poll lands the pipeline hero can
+ *  only show its idle state (no deltas exist yet). One refresh ~2s
+ *  in gives it a real first interval and lights the flow up; the
+ *  cadence then settles back to POLL_MS. */
+const FIRST_POLL_MS = 2000;
+
 /** Display labels for the fetch section's by_source rows, keyed by
  *  the API's source names. */
 const FETCH_SOURCE_LABELS: Record<string, string> = {
@@ -116,7 +123,7 @@ export default function OverviewDashboard({
       if (!document.hidden) await refreshAll();
       timer = window.setTimeout(tick, POLL_MS);
     };
-    timer = window.setTimeout(tick, POLL_MS);
+    timer = window.setTimeout(tick, FIRST_POLL_MS);
     const onVis = () => {
       setHidden(document.hidden);
       if (!document.hidden) void refreshAll();
