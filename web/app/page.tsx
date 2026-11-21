@@ -8,28 +8,26 @@ import AppearanceSwitcher from "@/components/AppearanceSwitcher";
 
 function TrendingRow({ label, titles }: { label: string; titles: string[] }) {
   return (
-    <div className="mt-3 flex items-center gap-2 first:mt-0">
+    // Wrapped and centered, label inline at the start of the group:
+    // every title the API returns is on the page — no sideways
+    // scrolling, no fade mask, no hidden tail. The cost, accepted
+    // deliberately: the section's height is data-dependent again, so
+    // the old one-viewport guarantee no longer holds on small
+    // screens (the page may scroll at phone heights; desktop sizes
+    // still fit). max-w-full + min-w-0 on a chip lets an over-long
+    // title wrap inside its own pill instead of pushing the page
+    // wider than the screen.
+    <div className="mt-3 flex flex-wrap items-center justify-center gap-2 first:mt-0">
       <span className="shrink-0 text-xs text-mute">{label}</span>
-      {/* One line per category, always: the row's height must not
-          depend on how many titles Douban returned or how long they
-          are, or the homepage's total height becomes data-dependent
-          and the one-viewport fit is lost. Overflow scrolls sideways
-          inside the row (fade at the right edge hints at it); every
-          title stays reachable. min-w-0 on the wrapper is what lets
-          the rail shrink instead of pushing the page wider. */}
-      <div className="min-w-0 flex-1">
-        <div className="flex gap-2 overflow-x-auto [scrollbar-width:none] [mask-image:linear-gradient(to_right,black_calc(100%-2rem),transparent)] [&::-webkit-scrollbar]:hidden">
-          {titles.map((title) => (
-            <Link
-              key={title}
-              href={`/search?q=${encodeURIComponent(title)}`}
-              className="inline-flex min-h-11 flex-none items-center rounded-full border border-line bg-surface px-3 text-xs text-ink-2 transition-colors hover:border-accent hover:text-accent-ink"
-            >
-              {title}
-            </Link>
-          ))}
-        </div>
-      </div>
+      {titles.map((title) => (
+        <Link
+          key={title}
+          href={`/search?q=${encodeURIComponent(title)}`}
+          className="inline-flex min-h-11 min-w-0 max-w-full items-center rounded-full border border-line bg-surface px-3 text-center text-xs text-ink-2 transition-colors hover:border-accent hover:text-accent-ink"
+        >
+          {title}
+        </Link>
+      ))}
     </div>
   );
 }
@@ -53,11 +51,11 @@ export default async function Home() {
         <AppearanceSwitcher defaultAppearance={site.themeAppearance} />
       </div>
       {/* The measure widens at xl: at 672px the block was a pinched
-          island on wide monitors (rails faded mid-title despite the
-          empty screen around them). 54rem gives the search box and
-          rails room to breathe; below xl the geometry is exactly
-          what the one-viewport layout was tuned with. The hero type
-          steps up with it (the logo is em-sized, so it follows). */}
+          island on wide monitors. 54rem gives the search box and the
+          trending rows room to breathe; below xl the geometry is
+          exactly what the compact layout was tuned with. The hero
+          type steps up with it (the logo is em-sized, so it
+          follows). */}
       <div className="w-full max-w-2xl xl:max-w-[54rem]">
         <h1 className="text-center text-4xl font-bold tracking-tight sm:text-5xl xl:text-6xl">
           <SiteLogo name={site.name} />
