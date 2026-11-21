@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -118,6 +119,39 @@ func newTokenLimiter() *tokenLimiter {
 	return &tokenLimiter{buckets: make(map[int64]*tokenBucket), now: time.Now}
 }
 
+// evictToFit is ipLimiter.evictToFit for token buckets: when the
+// map is at the hard cap and the idle sweep cannot shrink it (all
+// buckets recently active), evict least-recently-used buckets down
+// to 7/8 of the cap so the map stays bounded. Token IDs come from
+// the database, so reaching the cap needs an operator-created token
+// population — this is a backstop, not an expected path.
+func (l *tokenLimiter) evictToFit(now time.Time) {
+	if len(l.buckets) < maxBuckets {
+		return
+	}
+	for k, b := range l.buckets {
+		if now.Sub(b.last) > bucketIdleTTL {
+			delete(l.buckets, k)
+		}
+	}
+	if len(l.buckets) < maxBuckets {
+		return
+	}
+	type aged struct {
+		id   int64
+		last time.Time
+	}
+	all := make([]aged, 0, len(l.buckets))
+	for k, b := range l.buckets {
+		all = append(all, aged{k, b.last})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].last.Before(all[j].last) })
+	target := maxBuckets * 7 / 8
+	for i := 0; i < len(all) && len(l.buckets) > target; i++ {
+		delete(l.buckets, all[i].id)
+	}
+}
+
 // allow consumes one unit of token id's quota. ratePerMin <= 0 means
 // unlimited and never touches the map.
 func (l *tokenLimiter) allow(id int64, ratePerMin int) bool {
@@ -137,6 +171,9 @@ func (l *tokenLimiter) allow(id int64, ratePerMin int) bool {
 	}
 	b, ok := l.buckets[id]
 	if !ok || b.ratePerMin != ratePerMin {
+		if !ok {
+			l.evictToFit(now)
+		}
 		b = &tokenBucket{tokens: float64(ratePerMin), last: now, ratePerMin: ratePerMin}
 		l.buckets[id] = b
 	} else {

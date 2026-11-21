@@ -255,6 +255,16 @@ export interface AdminOverview {
   reports_pending?: number;
   dialect: string;
   stats: Record<string, number>;
+  /** The API process's own memory footprint, for long-run memory
+   *  observation. Optional so a page built against an older server
+   *  simply hides the rows; rss is 0 where the platform cannot
+   *  report it. */
+  runtime?: {
+    heap_alloc: number;
+    heap_sys: number;
+    rss: number;
+    goroutines: number;
+  };
   fetch: {
     fetched: number;
     timed_out: number;

@@ -155,6 +155,13 @@ func (s *Service) Flush(ctx context.Context) error {
 }
 
 // restore merges a failed flush's batch back into the pending set.
+// The merge respects the same maxPendingTerms cap as Record: while a
+// flush is in flight the pending set restarts empty and can fill
+// with a whole cap's worth of NEW terms, so an uncapped restore
+// would stack the failed batch on top — and under a persistent
+// store outage each retry cycle would add another cap's worth,
+// growing the map without bound. Keys that no longer fit are
+// dropped and counted in Dropped, exactly as Record drops them.
 func (s *Service) restore(batch map[pendingKey]*pendingTerm) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -163,6 +170,10 @@ func (s *Service) restore(batch map[pendingKey]*pendingTerm) {
 			cur.count += p.count
 			// The batch's casing is older than anything recorded
 			// since; keep the pending (fresher) display.
+			continue
+		}
+		if len(s.pending) >= maxPendingTerms {
+			s.dropped++
 			continue
 		}
 		s.pending[key] = p

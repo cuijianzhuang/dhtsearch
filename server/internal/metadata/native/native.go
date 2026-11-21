@@ -66,6 +66,24 @@ import (
 // are dead, a later one serves).
 const maxPeerFanout = 4
 
+// maxAttemptPeers bounds the distinct candidate addresses one fetch
+// attempt remembers (pool + queued + tried). Tracker rounds are
+// implicitly small (numwant=200), but a connected peer can keep
+// feeding PEX additions for the attempt's whole life, and without a
+// cap those sets grew with whatever a peer chose to send — one
+// malicious or buggy peer could inflate an attempt's memory for its
+// full timeout, times every worker. Past the cap, new addresses are
+// dropped: the attempt already holds far more candidates than its
+// fan-out of 4 can ever dial through.
+const maxAttemptPeers = 512
+
+// maxCompletedBlobs bounds the finished metadata blobs an attempt
+// queues for verification. The manager drains them FIFO and returns
+// on the first valid one, and at most maxPeerFanout sessions can
+// complete at once — the cap only refuses pathological pile-ups
+// (each blob can be up to maxMetadataSize).
+const maxCompletedBlobs = 8
+
 // Fetcher is the native foundation's metadata.Backend.
 type Fetcher struct {
 	cfg    metadata.Config
@@ -481,7 +499,8 @@ func (a *attempt) signal() {
 
 // addPeers offers candidate addresses (tracker results, PEX
 // additions) to the pool. Addresses already tried or queued are
-// dropped.
+// dropped, as are all addresses once the attempt remembers
+// maxAttemptPeers distinct candidates (see the constant).
 func (a *attempt) addPeers(addrs []string) {
 	a.mu.Lock()
 	changed := false
@@ -491,6 +510,9 @@ func (a *attempt) addPeers(addrs []string) {
 		}
 		if _, ok := a.queued[addr]; ok {
 			continue
+		}
+		if len(a.tried)+len(a.queued) >= maxAttemptPeers {
+			break
 		}
 		a.queued[addr] = struct{}{}
 		a.pool = append(a.pool, addr)
@@ -553,6 +575,10 @@ func (a *attempt) hintWasConnected() bool {
 // to the manager.
 func (a *attempt) complete(raw []byte) {
 	a.mu.Lock()
+	if len(a.completed) >= maxCompletedBlobs {
+		a.mu.Unlock()
+		return
+	}
 	a.completed = append(a.completed, raw)
 	a.mu.Unlock()
 	a.signal()

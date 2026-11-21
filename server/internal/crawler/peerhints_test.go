@@ -223,3 +223,44 @@ func TestPeerHintCacheBoundedUnderFlood(t *testing.T) {
 		t.Fatalf("cache holds %d entries under flood, cap is 128", c.len())
 	}
 }
+
+// TestPeerHintCacheRingBounded: the eviction ring used to grow by
+// one slot per distinct inserted hash and was only drained when
+// the map hit its entry cap. In the consume-as-you-go regime (the
+// production norm: hints are taken by the queue bridge almost
+// immediately) the map stays far below the cap, so the ring grew
+// without bound — a slow leak under a bounded map. Churn far past
+// the cap with immediate takes and assert the ring stays bounded,
+// live hints still work, and cap eviction still removes the oldest.
+func TestPeerHintCacheRingBounded(t *testing.T) {
+	c := &peerHintCache{maxEntries: 8, maxPeers: 2, ttl: time.Hour}
+	hash := func(i int) [20]byte {
+		var ih [20]byte
+		ih[0] = byte(i >> 8)
+		ih[1] = byte(i)
+		ih[19] = 0xCD
+		return ih
+	}
+	for i := 0; i < 5000; i++ {
+		ih := hash(i)
+		c.add(ih, hintAddr(6881))
+		if got := c.take(ih); len(got) != 1 {
+			t.Fatalf("take after add #%d = %v, want 1 hint", i, got)
+		}
+		if len(c.ring) > 2*c.maxEntries+1 {
+			t.Fatalf("ring len = %d at insert %d, want <= %d", len(c.ring), i, 2*c.maxEntries+1)
+		}
+	}
+	// Eviction still works after compaction: fill past the cap
+	// without taking, the oldest live entry is evicted.
+	for i := 0; i < c.maxEntries; i++ {
+		c.add(hash(10000+i), hintAddr(6881))
+	}
+	c.add(hash(20000), hintAddr(6881))
+	if got := c.take(hash(10000)); got != nil {
+		t.Fatalf("oldest entry survived cap eviction: %v", got)
+	}
+	if got := c.take(hash(20000)); len(got) != 1 {
+		t.Fatalf("newest entry = %v, want 1 hint", got)
+	}
+}

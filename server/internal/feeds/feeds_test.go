@@ -2,6 +2,7 @@ package feeds
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -238,5 +239,36 @@ func TestKeywordSearch(t *testing.T) {
 	}
 	if got := drain(s.Out()); len(got) != 1 {
 		t.Fatalf("same hash from two searches must queue once: %v", got)
+	}
+}
+
+// TestEntriesHardCapEvictsStalest: forgetAfter bounds the entries
+// map by time only — a firehose inside the 7-day window could grow
+// it without limit. At maxEntries the stalest entries are evicted
+// early and the map never exceeds the cap.
+func TestEntriesHardCapEvictsStalest(t *testing.T) {
+	st := &fakeStore{indexed: map[string]string{}, blocked: map[string]bool{}}
+	s, now := newTestService(t, st)
+	s.mu.Lock()
+	for i := 0; i < maxEntries; i++ {
+		// All inside the forget window (max ~5.8 days old), stalest
+		// = highest i.
+		s.entries[fmt.Sprintf("%040x", i)] = &entry{lastSeen: now.Add(-time.Duration(i) * 5 * time.Second)}
+	}
+	s.mu.Unlock()
+
+	fresh := fmt.Sprintf("%040x", maxEntries+1)
+	s.handle(Item{InfoHash: fresh, Title: "Fresh"})
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.entries) > maxEntries {
+		t.Fatalf("entries = %d, want <= %d", len(s.entries), maxEntries)
+	}
+	if _, ok := s.entries[fresh]; !ok {
+		t.Fatal("fresh entry missing after eviction")
+	}
+	if _, ok := s.entries[fmt.Sprintf("%040x", maxEntries-1)]; ok {
+		t.Fatal("stalest entry survived; want eviction")
 	}
 }
