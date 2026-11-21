@@ -261,6 +261,7 @@ func (f *Fetcher) fetchFull(ctx context.Context, hexHash string, src metadata.So
 		if len(peers) > 0 && a.hintWasConnected() {
 			f.count(&f.hintFetched)
 		}
+		outRec.Source = src
 		f.finish(src, hexHash, metadata.OutcomeFetched)
 		return outRec, true
 	case outcomePrescreened:

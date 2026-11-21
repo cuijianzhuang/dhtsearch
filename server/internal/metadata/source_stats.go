@@ -24,6 +24,21 @@ func AllSources() []Source {
 	return []Source{SourceDHT, SourceScrape, SourceFeed}
 }
 
+// ParseSource maps a Name() label back to its Source. Unknown
+// labels fold into SourceDHT, matching normalizeSource: a record
+// whose source tag was lost in transit is a main-pipeline record,
+// and its attribution must land somewhere truthful.
+func ParseSource(name string) Source {
+	switch name {
+	case "scrape":
+		return SourceScrape
+	case "feed":
+		return SourceFeed
+	default:
+		return SourceDHT
+	}
+}
+
 // normalizeSource folds an out-of-range Source into SourceDHT. The
 // tag rides on the queue Item from the discovery bridge to the
 // fetch worker; a fetch whose tag was somehow lost is a

@@ -27,6 +27,7 @@ import (
 	"dhtsearch/server/internal/metadata/libtorrent"
 	"dhtsearch/server/internal/metadata/native"
 	"dhtsearch/server/internal/moderator"
+	"dhtsearch/server/internal/nodepush"
 	"dhtsearch/server/internal/rescrape"
 	"dhtsearch/server/internal/retention"
 	"dhtsearch/server/internal/scraper"
@@ -265,6 +266,86 @@ func queueItem(cr *crawler.Crawler, hash string, seeders int32, src metadata.Sou
 	}
 }
 
+// defaultNodeName is the worker node name when NODE_NAME is unset:
+// the machine's hostname, falling back to "node".
+func defaultNodeName() string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "node"
+}
+
+// runsHousekeeping reports whether the store-index services
+// (retention, re-scrape) should run. They operate on the local
+// index; a crawler worker node holds no index (its records live at
+// the center), so both stay off there — the center runs its own
+// copies against the merged index.
+func runsHousekeeping(worker bool) bool { return !worker }
+
+// gatedHashes runs a worker node's harvested-hash stream through
+// the center admission check (see nodepush.Checker.GateChannel):
+// hashes the center already stores, or holds in failure backoff,
+// never reach the fetch queue. The conversion mirrors the item the
+// bridge would have built for the hash, so the center's exemption
+// rules see the same evidence.
+func gatedHashes(ctx context.Context, c *nodepush.Checker, in <-chan string) <-chan string {
+	items := make(chan metadata.Item)
+	go func() {
+		defer close(items)
+		for h := range in {
+			it := metadata.Item{Hash: h, Seeders: -1, Source: metadata.SourceDHT, At: time.Now()}
+			select {
+			case items <- it:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	out := make(chan string)
+	go func() {
+		defer close(out)
+		for it := range c.GateChannel(ctx, items) {
+			select {
+			case out <- it.Hash:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
+
+// gatedProbes is gatedHashes for the scraper's ranked probe stream:
+// the seeder count rides through the check so a probe with fresh
+// seeders keeps its backoff exemption at the center, exactly as the
+// local gate would grant it.
+func gatedProbes(ctx context.Context, c *nodepush.Checker, in <-chan scraper.Item) <-chan scraper.Item {
+	items := make(chan metadata.Item)
+	go func() {
+		defer close(items)
+		for p := range in {
+			it := metadata.Item{Hash: p.Hash, Seeders: p.Seeders, Source: metadata.SourceScrape, At: time.Now()}
+			select {
+			case items <- it:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	out := make(chan scraper.Item)
+	go func() {
+		defer close(out)
+		for it := range c.GateChannel(ctx, items) {
+			select {
+			case out <- scraper.Item{Hash: it.Hash, Seeders: it.Seeders}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
+
 // feedItems adapts the feeds service's hash channel to the fetch
 // workers' item channel, tagging every item with the feed source.
 // The feeds service speaks plain hashes (it predates the item
@@ -370,6 +451,19 @@ func main() {
 		"bearer token for the /api/admin/* console API (empty = admin API disabled; the token is read from the environment only and never logged)")
 	internalToken := flag.String("internal-token", envDefault("INTERNAL_API_TOKEN", ""),
 		"first-party token the bundled web frontend presents (X-Internal-Token) so PUBLIC_API_REQUIRE_TOKEN does not lock the site itself out (empty = channel disabled; environment only, never logged)")
+	// Crawler worker mode (internal/nodepush): with CENTER_URL set
+	// this process is a worker node — it crawls, scrapes and fetches
+	// as usual but pushes records to the center instead of filtering
+	// and storing them locally. Worker configuration is PURE
+	// ENVIRONMENT (these flags are env-seeded and the settings
+	// registry is never consulted for them): a worker's database is
+	// its own local one, so a DB override must never be able to
+	// repoint or re-token a worker. NODE_TOKEN is read with
+	// os.Getenv only, like the other machine secrets.
+	centerURL := flag.String("center-url", envDefault("CENTER_URL", ""),
+		"crawler worker mode: push fetched records to this center node (empty = standalone / center mode)")
+	nodeName := flag.String("node-name", envDefault("NODE_NAME", defaultNodeName()),
+		"worker node name reported to the center in ingest batches (default: hostname)")
 	minSize := flag.Int64("min-size", envInt64("MIN_TORRENT_SIZE", 100<<20),
 		"skip torrents whose total size is below this many bytes")
 
@@ -532,6 +626,12 @@ func main() {
 	reg(settings.KeyAlertTelegramBotToken, os.Getenv("ALERT_TELEGRAM_BOT_TOKEN"))
 	reg(settings.KeyAlertTelegramChatID, envDefault("ALERT_TELEGRAM_CHAT_ID", ""))
 	reg(settings.KeyAlertStallMinutes, strconv.Itoa(envInt("ALERT_STALL_MINUTES", 15)))
+	// Crawler worker nodes, center side: the ingest switch and the
+	// shared token workers are checked against. The token is read
+	// with os.Getenv like the other secrets (on a worker the same
+	// variable is its credential; there it is env-only by design).
+	reg(settings.KeyNodeIngestEnabled, strconv.FormatBool(envBool("NODE_INGEST_ENABLED", false)))
+	reg(settings.KeyNodeToken, os.Getenv("NODE_TOKEN"))
 
 	mgr, err := settings.New(base, fromEnv, st, logger)
 	if err != nil {
@@ -565,6 +665,33 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Crawler worker mode (internal/nodepush): with CENTER_URL set,
+	// this node keeps no index — fetched records are pushed to the
+	// center (which filters and stores them), admission decisions
+	// are checked against the center's state, and the store-bound
+	// housekeeping services below (retention, re-scrape) stay off:
+	// they operate on an index this process does not hold. The
+	// watchdog stays on — a worker that stops fetching is exactly
+	// the stall it exists to catch, and its progress signal becomes
+	// the pusher's delivered count.
+	worker := *centerURL != ""
+	var pusher *nodepush.Pusher
+	var checker *nodepush.Checker
+	if worker {
+		nodeClient := nodepush.NewClient(*centerURL, os.Getenv("NODE_TOKEN"), *nodeName, nil)
+		pusher = nodepush.NewPusher(nodeClient, logger)
+		go pusher.Run(ctx)
+		checker = nodepush.NewChecker(nodeClient, logger)
+		checker.EnabledFunc = func() bool { return mgr.Bool(settings.KeyMetaNegCacheEnabled) }
+		logger.Printf("node: worker mode — pushing fetched records to center %s as node %q; local store keeps settings/stats only", *centerURL, *nodeName)
+		if os.Getenv("NODE_TOKEN") == "" {
+			logger.Printf("node: WARNING: NODE_TOKEN is not set — the center will reject every push (401) and fetched records will be dropped once the buffer fills")
+		}
+		if !fetchMeta {
+			logger.Printf("node: WARNING: FETCH_METADATA is off — bare-infohash mode stores locally and does not push; worker mode only covers the metadata pipeline")
+		}
+	}
 
 	// Crawler. The node-persistence hooks adapt the store's DHTNode
 	// rows to the crawler's PersistedNode shape (the same adapter
@@ -710,6 +837,14 @@ func main() {
 		feed := cr.Infohashes()
 		var scraped <-chan scraper.Item
 		if mgr.Bool(settings.KeyScrapeEnabled) && len(trackerList) > 0 && feed != nil {
+			scrapeSink := swarmSink
+			if pusher != nil {
+				// Worker mode: scrape observations describe the
+				// center's index, not this node's empty local one,
+				// so they ride the ingest batches instead of
+				// landing in the local store.
+				scrapeSink = pusher.PushSwarm
+			}
 			scr, err = scraper.New(scraper.Config{
 				Trackers: trackerList,
 				Logger:   logger,
@@ -718,7 +853,7 @@ func main() {
 				// health), and the zero-seeder streaks behind the
 				// health derivation only exist if rounds land in the
 				// store as they happen.
-				Sink: swarmSink,
+				Sink: scrapeSink,
 			})
 			if err != nil {
 				logger.Printf("scraper: disabled: %v", err)
@@ -786,6 +921,16 @@ func main() {
 		}
 		defer feedFetcher.Close()
 		onRecord := func(rec metadata.Record) {
+			if pusher != nil {
+				// Worker mode: no local filter, no local store —
+				// the record (with this node's feed alias for it)
+				// is buffered for the next ingest batch, and the
+				// center applies its own policy to it. Push never
+				// blocks, so the fetch worker is never parked on
+				// the network path to the center.
+				pusher.Push(rec, feedAlias(feedSvc, rec.InfoHash))
+				return
+			}
 			// onRecord runs synchronously in a metadata worker's loop,
 			// so its store writes get a hard timeout: an unbounded
 			// write over a half-dead database connection would park
@@ -823,6 +968,21 @@ func main() {
 			}
 			st.IncrStatContext(wctx, "fetched", 1)
 		}
+		// admit is the bridges' admission decision. Standalone it is
+		// the local gate. A worker node instead defers to the CENTER:
+		// its bridges' inputs are batch-checked against the center's
+		// stored/backoff state (gated channels below), and the local
+		// gate is bypassed rather than allowed to second-guess that
+		// state with an empty local store — policy stays coherent at
+		// exactly one point.
+		admit := admGate.Admit
+		if checker != nil {
+			admit = func(metadata.Item) bool { return true }
+			if scraped != nil {
+				scraped = gatedProbes(ctx, checker, scraped)
+			}
+			feed = gatedHashes(ctx, checker, feed)
+		}
 		if mgr.Bool(settings.KeyMetaPriorityEnabled) {
 			// Workers pop from a priority queue (seeders > source >
 			// freshness). The scraper's seeder counts ride along on its
@@ -838,7 +998,7 @@ func main() {
 						// taking hints consumes them, and a refused
 						// hash must not burn its hints.
 						probe := metadata.Item{Hash: it.Hash, Seeders: it.Seeders, Source: metadata.SourceScrape, At: time.Now()}
-						if admGate.Admit(probe) {
+						if admit(probe) {
 							q.Push(queueItem(cr, it.Hash, it.Seeders, metadata.SourceScrape))
 						}
 					}
@@ -847,7 +1007,7 @@ func main() {
 				go func() {
 					for h := range feed {
 						probe := metadata.Item{Hash: h, Seeders: -1, Source: metadata.SourceDHT, At: time.Now()}
-						if admGate.Admit(probe) {
+						if admit(probe) {
 							q.Push(queueItem(cr, h, -1, metadata.SourceDHT))
 						}
 					}
@@ -860,7 +1020,7 @@ func main() {
 				defer close(items)
 				for it := range scraped {
 					item := metadata.Item{Hash: it.Hash, Seeders: it.Seeders, Source: metadata.SourceScrape, At: time.Now()}
-					if !admGate.Admit(item) {
+					if !admit(item) {
 						continue
 					}
 					select {
@@ -877,7 +1037,7 @@ func main() {
 				defer close(items)
 				for h := range feed {
 					item := metadata.Item{Hash: h, Seeders: -1, Source: metadata.SourceDHT, At: time.Now()}
-					if !admGate.Admit(item) {
+					if !admit(item) {
 						continue
 					}
 					select {
@@ -960,7 +1120,16 @@ func main() {
 			}
 		},
 	})
-	go retSvc.Run(ctx)
+	if runsHousekeeping(worker) {
+		go retSvc.Run(ctx)
+	} else {
+		// Worker node: the local index is empty by design, so the
+		// cleanup has nothing to clean; the center runs its own
+		// retention against the merged index. The service still
+		// exists (the admin API reports its status), it just never
+		// starts its loop.
+		logger.Printf("node: retention disabled on worker nodes (the center retains the merged index)")
+	}
 
 	// Periodic swarm re-scrape: re-checks the stalest stored
 	// torrents against the trackers so swarm snapshots (and the
@@ -970,8 +1139,9 @@ func main() {
 	// exists while metadata fetching is on — and gates itself per
 	// round on RESCRAPE_ENABLED and the fetch queue's depth. Its
 	// snapshots land through swarmSink, the same write path as
-	// ingest rounds.
-	if len(trackerList) > 0 {
+	// ingest rounds. Worker nodes skip it for the retention reason:
+	// there are no local stored torrents to re-check.
+	if len(trackerList) > 0 && runsHousekeeping(worker) {
 		rs, err := scraper.NewRescraper(scraper.Config{
 			Trackers: trackerList,
 			Logger:   logger,
@@ -1066,6 +1236,29 @@ func main() {
 					skStored, skBackoff := admGate.Skipped()
 					st.IncrStatContext(wctx, "admission_skipped_stored", skStored-prevAdmStored(&skStored))
 					st.IncrStatContext(wctx, "admission_skipped_backoff", skBackoff-prevAdmBackoff(&skBackoff))
+				}
+				if pusher != nil {
+					// Worker mode: records are stored at the
+					// center, so onRecord never moves the local
+					// "fetched" stat. The pusher's delivered
+					// count is this node's real ingest progress —
+					// mirroring it under the same key keeps
+					// /api/stats and the stall watchdog (which
+					// probes "fetched") meaningful on a worker.
+					pushed := pusher.Pushed()
+					st.IncrStatContext(wctx, "fetched", pushed-prevPushed(&pushed))
+					dropped := pusher.Dropped()
+					st.IncrStatContext(wctx, "node_dropped", dropped-prevNodeDropped(&dropped))
+				}
+				if checker != nil {
+					// The center checker's refusals land in the
+					// same admission_skipped_* keys the local
+					// gate feeds standalone (the local gate's own
+					// counters stay zero in worker mode — the
+					// bridges bypass it — so nothing double-counts).
+					ckStored, ckBackoff := checker.Skipped()
+					st.IncrStatContext(wctx, "admission_skipped_stored", ckStored-prevCheckStored(&ckStored))
+					st.IncrStatContext(wctx, "admission_skipped_backoff", ckBackoff-prevCheckBackoff(&ckBackoff))
 				}
 				// Per-source fetch attribution: the same delta
 				// mirror, keyed per discovery source (see
@@ -1314,6 +1507,13 @@ var (
 	lastAdmBackoff  int64
 	lastHintItems   int64
 	lastHintFetched int64
+	// Worker-node mirrors: the pusher's delivered/dropped counts
+	// and the center checker's refusal counters (worker mode only;
+	// the variables simply stay zero elsewhere).
+	lastPushed      int64
+	lastNodeDropped int64
+	lastCheckStored int64
+	lastCheckBack   int64
 )
 
 // The per-source mirrors keep their own delta state (one per
@@ -1382,6 +1582,33 @@ func prevFailed(cur *int64) int64 {
 func prevPrescreen(cur *int64) int64 {
 	prev := lastPrescreen
 	lastPrescreen = *cur
+	return prev
+}
+
+// prevPushed and prevNodeDropped do the same for the worker
+// pusher's delivered/dropped counters; prevCheckStored and
+// prevCheckBackoff for the center checker's refusal counters.
+func prevPushed(cur *int64) int64 {
+	prev := lastPushed
+	lastPushed = *cur
+	return prev
+}
+
+func prevNodeDropped(cur *int64) int64 {
+	prev := lastNodeDropped
+	lastNodeDropped = *cur
+	return prev
+}
+
+func prevCheckStored(cur *int64) int64 {
+	prev := lastCheckStored
+	lastCheckStored = *cur
+	return prev
+}
+
+func prevCheckBackoff(cur *int64) int64 {
+	prev := lastCheckBack
+	lastCheckBack = *cur
 	return prev
 }
 

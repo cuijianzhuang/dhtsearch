@@ -47,6 +47,14 @@ type Record struct {
 	TotalSize int64
 	FileCount int
 	Files     []filter.File
+	// Source is the discovery source of the item this record was
+	// fetched for, copied from the Item by the fetching backend.
+	// The fetch counters attribute outcomes by it inside the
+	// process; carrying it on the Record lets the attribution
+	// survive a hand-off — a crawler worker node pushes records to
+	// its center, and the center counts them under the same source
+	// (see internal/nodepush).
+	Source Source
 }
 
 // Config controls the fetcher.
@@ -390,6 +398,7 @@ func (f *Fetcher) fetchPeers(ctx context.Context, hexHash string, peers []netip.
 		return rec, false
 	}
 	rec = RecordFromInfo(info, hexHash, f.cfg.MaxFiles)
+	rec.Source = src
 	if len(peers) > 0 && hintPeerConnected(t, peers) {
 		f.count(&f.hintFetched)
 	}

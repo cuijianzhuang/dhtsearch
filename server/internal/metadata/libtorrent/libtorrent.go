@@ -291,6 +291,7 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string, peers []netip.AddrP
 		for _, wf := range files {
 			rec.Files = append(rec.Files, filter.File{Path: wf.Path, Size: wf.Size})
 		}
+		rec.Source = src
 		f.finish(src, hexHash, metadata.OutcomeFetched)
 		return rec, true
 	case waitPrescreened:

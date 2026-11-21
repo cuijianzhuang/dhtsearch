@@ -112,6 +112,14 @@ func (g *Gate) Admit(it metadata.Item) bool {
 	return true
 }
 
+// BackoffExempt is backoffExempt for the crawler worker node's
+// gate (internal/nodepush): it applies this package's exemption
+// rules to backoff state reported by the center node, so a worker
+// makes exactly the admission decisions a standalone node would.
+func BackoffExempt(it metadata.Item) bool {
+	return backoffExempt(it)
+}
+
 // backoffExempt reports whether an item's source carries evidence
 // strong enough to override a failure backoff: a scrape that just
 // observed seeders means the swarm was alive moments ago, and a

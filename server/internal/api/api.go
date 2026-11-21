@@ -457,6 +457,7 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 	mux.HandleFunc("GET /rss", s.handleRSS)
 	mux.HandleFunc("POST /api/report", s.handleReport)
 	s.registerAdminRoutes(mux)
+	s.registerNodeRoutes(mux)
 	s.mux = mux
 	return s
 }
@@ -522,9 +523,13 @@ func (s *Server) searchTimeout() time.Duration {
 // an operator lock themselves out by saving an extreme RATE_LIMIT_*
 // value, because the settings write that would undo it was itself
 // rejected with 429 (and the value persists in the DB across restarts).
+// The node surface (/api/node/) is exempt for the admin reason: it is
+// token-authenticated machine-to-machine traffic, and a busy worker
+// legitimately bursts admission checks past any sane per-IP rate.
 func rateLimitExempt(path string) bool {
 	return path == "/api/healthz" || path == "/api/admin" ||
-		strings.HasPrefix(path, "/api/admin/")
+		strings.HasPrefix(path, "/api/admin/") ||
+		strings.HasPrefix(path, "/api/node/")
 }
 
 // Handler returns the root handler with CORS/OPTIONS support and per-client
