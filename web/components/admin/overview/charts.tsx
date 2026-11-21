@@ -118,10 +118,18 @@ export interface TrendBucket {
  *  the SVG so the plot itself can stretch without distorting text.
  *
  *  The last bucket is normally still filling (the current hour, or
- *  today in the 14d view): plotted as a solid point it drags the tail
- *  to near zero and reads as an ingest collapse. It therefore renders
- *  as a dashed ghost segment with a hollow end dot, is excluded from
- *  the peak and the y scale, and the header names it as in-progress. */
+ *  today in the 14d view). Plotting its raw partial count — as a
+ *  solid point OR as the ghost endpoint — makes the tail plunge
+ *  toward zero and reads as an ingest collapse, so the ghost
+ *  endpoint is the bucket's run-rate projection instead: partial
+ *  count ÷ the elapsed fraction of the bucket. The projection is
+ *  capped at 1.5× the peak full bucket (early in a bucket the
+ *  division explodes; in the first 2% the ghost simply extends
+ *  flat from the last full point), it counts toward the y scale
+ *  so it never clips, and it stays out of the 峰值 label. The
+ *  hover readout keeps showing the actual partial count, labelled
+ *  as such. With zero elapsed time there is no ghost at all — the
+ *  unfinished bucket is simply not plotted yet. */
 export function TrendLine({
   buckets,
   range,
@@ -153,13 +161,27 @@ export function TrendLine({
   const span = bucketSeconds ?? (range === "24h" ? 3600 : 86400);
   const partialLast = n > 1 && nowSec < buckets[n - 1].start + span;
   const solid = partialLast ? buckets.slice(0, -1) : buckets;
-  const max = Math.max(1, ...solid.map((b) => b.count));
+  const peak = Math.max(1, ...solid.map((b) => b.count));
+  // Run-rate projection of the in-progress bucket (see the header
+  // comment): null when the bucket has not started (zero elapsed —
+  // no ghost), flat from the last full point in its first 2%, and
+  // clamped to 1.5× the peak full bucket everywhere else.
+  const elapsed = partialLast ? nowSec - buckets[n - 1].start : 0;
+  const frac = span > 0 ? elapsed / span : 0;
+  const ghostValue =
+    partialLast && elapsed > 0
+      ? frac < 0.02
+        ? (solid[solid.length - 1]?.count ?? 0)
+        : Math.min(buckets[n - 1].count / Math.max(frac, 0.001), peak * 1.5)
+      : null;
+  // The y scale must contain the projection so it never clips;
+  // the 峰值 label below keeps reporting the full-bucket peak.
+  const max = ghostValue !== null ? Math.max(peak, ghostValue) : peak;
   const x = (i: number) => PAD.l + (n <= 1 ? iw / 2 : (i * iw) / (n - 1));
   const y = (v: number) => Math.max(PAD.t, PAD.t + ih - (v / max) * ih);
   const solidPts = solid.map((b, i) => [x(i), y(b.count)] as const);
-  const ghostPt = partialLast
-    ? ([x(n - 1), y(buckets[n - 1].count)] as const)
-    : null;
+  const ghostPt =
+    ghostValue !== null ? ([x(n - 1), y(ghostValue)] as const) : null;
   const lastSolid = solidPts[solidPts.length - 1];
   const lineOf = (pts: readonly (readonly [number, number])[]) =>
     pts
@@ -215,14 +237,16 @@ export function TrendLine({
         <span>
           峰值{" "}
           <span className="font-medium tabular-nums text-ink-2">
-            {formatCount(max)}
+            {formatCount(peak)}
           </span>
           {range === "24h" ? " / 小时" : " / 天"}
         </span>
         {allZero ? (
           <span>该时段暂无入库</span>
         ) : partialLast ? (
-          <span>虚线为{range === "24h" ? "当前小时" : "今日"}，进行中</span>
+          <span>
+            虚线为{range === "24h" ? "当前小时" : "今日"}，进行中·按进度预估
+          </span>
         ) : null}
       </div>
       <div className="mt-1 flex">
@@ -350,7 +374,11 @@ export function TrendLine({
                   className="pointer-events-none absolute h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[var(--pri)] bg-[var(--card)]"
                   style={{
                     left: `${(x(hover) / W) * 100}%`,
-                    top: `${(y(hoverBucket.count) / H) * 100}%`,
+                    top: `${(y(
+                      partialLast && hover === n - 1 && ghostValue !== null
+                        ? ghostValue
+                        : hoverBucket.count
+                    ) / H) * 100}%`,
                   }}
                 />
                 <div
@@ -361,8 +389,11 @@ export function TrendLine({
                 >
                   <span className="text-[11px] tabular-nums text-ink-2">
                     {fmtFull(hoverBucket.start)} ·{" "}
-                    {formatCount(hoverBucket.count)}
-                    {partialLast && hover === n - 1 ? "（进行中）" : ""}
+                    {partialLast && hover === n - 1
+                      ? ghostValue !== null
+                        ? `当前实际 ${formatCount(hoverBucket.count)} · 预估 ${formatCount(Math.round(ghostValue))}`
+                        : `${formatCount(hoverBucket.count)}（进行中）`
+                      : formatCount(hoverBucket.count)}
                   </span>
                 </div>
               </>
