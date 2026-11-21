@@ -681,12 +681,26 @@ func main() {
 	if worker {
 		nodeClient := nodepush.NewClient(*centerURL, os.Getenv("NODE_TOKEN"), *nodeName, nil)
 		pusher = nodepush.NewPusher(nodeClient, logger)
+		// Disk spool: batches the center cannot take are kept
+		// under <data dir>/spool/ and replayed after the outage
+		// (or a restart), up to NODE_SPOOL_MAX_MB in total. A
+		// spool that cannot be opened degrades the worker to the
+		// memory buffer alone — loudly, but not fatally: crawling
+		// with a drop counter beats not crawling.
+		spoolMaxMB := envInt("NODE_SPOOL_MAX_MB", 1024)
+		if spoolDir := filepath.Join(dataDirOf(*dbPath), "spool"); spoolMaxMB > 0 {
+			if err := pusher.EnableSpool(spoolDir, int64(spoolMaxMB)<<20); err != nil {
+				logger.Printf("node: WARNING: disk spool at %s unavailable (%v) — undelivered batches will only live in the memory buffer and drop past its cap", spoolDir, err)
+			} else {
+				logger.Printf("node: disk spool at %s (cap %d MB) — undelivered batches survive center outages and restarts up to the cap", spoolDir, spoolMaxMB)
+			}
+		}
 		go pusher.Run(ctx)
 		checker = nodepush.NewChecker(nodeClient, logger)
 		checker.EnabledFunc = func() bool { return mgr.Bool(settings.KeyMetaNegCacheEnabled) }
 		logger.Printf("node: worker mode — pushing fetched records to center %s as node %q; local store keeps settings/stats only", *centerURL, *nodeName)
 		if os.Getenv("NODE_TOKEN") == "" {
-			logger.Printf("node: WARNING: NODE_TOKEN is not set — the center will reject every push (401) and fetched records will be dropped once the buffer fills")
+			logger.Printf("node: WARNING: NODE_TOKEN is not set — the center will reject every push (401); fetched records will spool to disk and drop once the spool cap is reached")
 		}
 		if !fetchMeta {
 			logger.Printf("node: WARNING: FETCH_METADATA is off — bare-infohash mode stores locally and does not push; worker mode only covers the metadata pipeline")
@@ -1249,6 +1263,19 @@ func main() {
 					st.IncrStatContext(wctx, "fetched", pushed-prevPushed(&pushed))
 					dropped := pusher.Dropped()
 					st.IncrStatContext(wctx, "node_dropped", dropped-prevNodeDropped(&dropped))
+					// Spool flow (cumulative, delta-mirrored
+					// like the rest) and occupancy (a gauge,
+					// set absolutely): how much went to disk,
+					// how much of it the center has since
+					// taken, and how much is still waiting.
+					spooled := pusher.Spooled()
+					st.IncrStatContext(wctx, "node_spooled", spooled-prevSpooled(&spooled))
+					replayed := pusher.Replayed()
+					st.IncrStatContext(wctx, "node_replayed", replayed-prevReplayed(&replayed))
+					if segs, sbytes, _, ok := pusher.SpoolDepth(); ok {
+						st.SetStatContext(wctx, "node_spool_segments", int64(segs))
+						st.SetStatContext(wctx, "node_spool_bytes", sbytes)
+					}
 				}
 				if checker != nil {
 					// The center checker's refusals land in the
@@ -1512,6 +1539,8 @@ var (
 	// the variables simply stay zero elsewhere).
 	lastPushed      int64
 	lastNodeDropped int64
+	lastSpooled     int64
+	lastReplayed    int64
 	lastCheckStored int64
 	lastCheckBack   int64
 )
@@ -1597,6 +1626,20 @@ func prevPushed(cur *int64) int64 {
 func prevNodeDropped(cur *int64) int64 {
 	prev := lastNodeDropped
 	lastNodeDropped = *cur
+	return prev
+}
+
+// prevSpooled and prevReplayed do the same for the pusher's disk
+// spool flow counters.
+func prevSpooled(cur *int64) int64 {
+	prev := lastSpooled
+	lastSpooled = *cur
+	return prev
+}
+
+func prevReplayed(cur *int64) int64 {
+	prev := lastReplayed
+	lastReplayed = *cur
 	return prev
 }
 
