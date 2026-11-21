@@ -35,6 +35,7 @@ const (
 	KeyDHTPort                = "DHT_PORT"
 	KeyDHTSamplers            = "DHT_SAMPLERS"
 	KeyDHTIdentities          = "DHT_IDENTITIES"
+	KeyDHTIPv6Enabled         = "DHT_IPV6_ENABLED"
 	KeyFetchMetadata          = "FETCH_METADATA"
 	KeyCrawlerWatchdogEnabled = "CRAWLER_WATCHDOG_ENABLED"
 	// metadata
@@ -222,6 +223,8 @@ var Registry = []Item{
 		Min: f64(1), Max: f64(256), Desc: "BEP 51 并发采样数（每个 DHT 身份各一份）；实测 8 已远超抓取池消耗速度，调大只会抢带宽"},
 	{Key: KeyDHTIdentities, Group: "crawler", Label: "DHT 身份数", Type: TypeInt, Default: "1", Editable: true, Restart: true,
 		Min: f64(1), Max: f64(16), Desc: "同一进程内运行的 DHT 节点身份数：每个身份有独立的节点 ID、路由表与节点质量跟踪。单个身份只能采到自身路由表邻域的哈希，身份多了 BEP 51 覆盖的 ID 空间才变宽。身份 i 监听 DHT_PORT+i（DHT_PORT=0 时各自随机端口），请确保 DHT_PORT..DHT_PORT+身份数-1 未被占用；采样 worker 数按身份计，总采样量 = 采样 worker 数 × 身份数。1 = 与旧行为完全一致"},
+	{Key: KeyDHTIPv6Enabled, Group: "crawler", Label: "IPv6 DHT（BEP 32）", Type: TypeBool, Default: "true", Editable: true, Restart: true,
+		Desc: "开 = 每个 DHT 身份在同一端口号上再起一个 IPv6 DHT 服务（独立的 udp6 socket、路由表与采样队列，与 IPv4 服务共用节点 ID），IPv6 独占的种子群落也能被发现，采到的 IPv6 peer 提示与 IPv4 一样喂给元数据抓取。主机没有可用 IPv6 时自动退化为纯 IPv4 运行（日志打一行说明），不会启动失败；关 = 只跑 IPv4。改动需重启生效"},
 	{Key: KeyFetchMetadata, Group: "crawler", Label: "抓取元数据", Type: TypeBool, Default: "true", Editable: true, Restart: true,
 		Desc: "关 = 只收集裸 infohash，不抓元数据、不做过滤"},
 	{Key: KeyCrawlerWatchdogEnabled, Group: "crawler", Label: "停转看门狗", Type: TypeBool, Default: "true", Editable: true,

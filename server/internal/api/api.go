@@ -165,6 +165,16 @@ type CrawlerStatus struct {
 	// (1 = the historical single node). The sampler and node-quality
 	// fields above aggregate across all identities.
 	Identities int `json:"identities"`
+	// IPv6 (BEP 32): IPv6Enabled is the configured DHT_IPV6_ENABLED,
+	// IPv6Bound whether at least one identity actually bound its
+	// udp6 socket (false on hosts without IPv6 — the crawler then
+	// runs IPv4-only by design), IPv6Nodes the summed routing size
+	// of the IPv6 servers (already included in Nodes), SeenV6 how
+	// many infohashes were first discovered through an IPv6 source.
+	IPv6Enabled bool  `json:"ipv6_enabled"`
+	IPv6Bound   bool  `json:"ipv6_bound"`
+	IPv6Nodes   int   `json:"ipv6_nodes"`
+	SeenV6      int64 `json:"seen_v6"`
 	// Stall watchdog (internal/watchdog): Watchdog is ok, stalled
 	// (discovery moving, ingest frozen), frozen (both frozen) or
 	// disabled; WatchdogSince is the unix time the current non-ok
