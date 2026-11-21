@@ -35,6 +35,16 @@ const (
 	KeyAlertTelegramBotToken = "ALERT_TELEGRAM_BOT_TOKEN"
 	KeyAlertTelegramChatID   = "ALERT_TELEGRAM_CHAT_ID"
 	KeyAlertStallMinutes     = "ALERT_STALL_MINUTES"
+	// crawler worker nodes (see internal/nodepush): the CENTER side
+	// of the node ingest surface. The worker side is configured by
+	// pure environment (CENTER_URL / NODE_TOKEN / NODE_NAME) and is
+	// deliberately NOT in this registry — a worker's settings
+	// database is its own local one, and the token it presents is
+	// the one from its environment, never a DB override. The
+	// NODE_TOKEN registered here is the CENTER's copy of the shared
+	// secret: what worker requests are checked against.
+	KeyNodeIngestEnabled = "NODE_INGEST_ENABLED"
+	KeyNodeToken         = "NODE_TOKEN"
 	// appearance
 	KeySiteName        = "SITE_NAME"
 	KeyThemeColor      = "THEME_COLOR"
@@ -129,6 +139,7 @@ var Groups = []Group{
 	{Key: "update", Label: "系统更新"},
 	{Key: "retention", Label: "数据保留"},
 	{Key: "alerts", Label: "告警通知"},
+	{Key: "nodes", Label: "节点接入"},
 	{Key: "auth", Label: "登录与账号"},
 	{Key: "appearance", Label: "外观与主题"},
 	{Key: "crawler", Label: "爬虫"},
@@ -222,6 +233,22 @@ var Registry = []Item{
 		Desc: "接收告警的会话 ID：个人会话为正数 ID，群为负数；先给机器人发一句话，再用 getUpdates 查到"},
 	{Key: KeyAlertStallMinutes, Group: "alerts", Label: "停滞判定（分钟）", Type: TypeInt, Default: "15", Editable: true, Restart: true,
 		Min: f64(5), Max: f64(120), Desc: "入库零增长持续该分钟数即判定停滞：看门狗打全量协程栈，告警开启时同时外发停滞告警；退出自愈阈值为其两倍（默认 15 → 30 分钟）。该值在启动时装配给看门狗，重启生效"},
+
+	// --- crawler worker nodes: the center side. Default off: a
+	// standalone deployment has no workers, and an ingest surface
+	// that accepts torrent records from the network must be a
+	// deliberate opt-in. Both items are live — the node handlers
+	// read them per request, so flipping the switch (or rotating
+	// the token) applies to the next worker call without a restart.
+	// The token is the shared secret every worker presents; it is
+	// a machine credential like the admin token, hence secret
+	// handling. Workers configure their side purely by environment
+	// (CENTER_URL / NODE_TOKEN / NODE_NAME) — those are not
+	// registry items, because a worker's database is its own. ---
+	{Key: KeyNodeIngestEnabled, Group: "nodes", Label: "接受爬虫节点入库", Type: TypeBool, Default: "false", Editable: true,
+		Desc: "开 = 本机作为中心节点，接受爬虫节点（设置了 CENTER_URL 的同版本服务）经 /api/node/ 推来的抓取结果：入库前先过本机的内容过滤，按来源计数，并按节点名累计 node_ingest_* 计数。关 = 节点接口一律 503。保存后立即生效"},
+	{Key: KeyNodeToken, Group: "nodes", Label: "节点共享令牌", Type: TypeSecret, Sensitive: true, Default: "", Editable: true,
+		Desc: "中心与所有爬虫节点共享的密钥：节点请求以 Authorization: Bearer 呈现，与此处配置一致才放行。在节点的环境里填同名 NODE_TOKEN（节点侧只认环境变量，不入库）。只显示是否已设置，保存时留空表示不改"},
 
 	// --- auth: admin login methods. All live: the login page asks the
 	// backend which methods are configured and renders only those. ---
