@@ -330,6 +330,8 @@ func main() {
 	samplers := flag.Int("dht-samplers", envInt("DHT_SAMPLERS", 8), "concurrent BEP 51 sampling workers per DHT identity")
 	dhtIdentities := flag.Int("dht-identities", envInt("DHT_IDENTITIES", 1),
 		"DHT node identities in one process (each with its own node ID, routing table and quality tracker; identity i listens on DHT_PORT+i)")
+	dhtIPv6 := flag.Bool("dht-ipv6", envBool("DHT_IPV6_ENABLED", true),
+		"also run an IPv6 DHT server (BEP 32) per identity on the same port number; hosts without IPv6 degrade to IPv4-only")
 	metaWorkers := flag.Int("meta-workers", envInt("META_WORKERS", 128), "metadata fetch worker count")
 	metaShards := flag.Int("meta-shards", envInt("META_SHARDS", 8), "metadata torrent client shards (hashes are spread across clients to split the per-client lock contention)")
 	metaFetcher := flag.String("meta-fetcher", envDefault("META_FETCHER", "anacrolix"),
@@ -448,6 +450,7 @@ func main() {
 	reg(settings.KeyDHTPort, strconv.Itoa(*dhtPort))
 	reg(settings.KeyDHTSamplers, strconv.Itoa(*samplers))
 	reg(settings.KeyDHTIdentities, strconv.Itoa(*dhtIdentities))
+	reg(settings.KeyDHTIPv6Enabled, strconv.FormatBool(*dhtIPv6))
 	reg(settings.KeyFetchMetadata, strconv.FormatBool(*fetchMetadata))
 	reg(settings.KeyMetaWorkers, strconv.Itoa(*metaWorkers))
 	reg(settings.KeyMetaShards, strconv.Itoa(*metaShards))
@@ -556,11 +559,12 @@ func main() {
 	// pattern as scraperStatus below); the crawler itself stays
 	// store-free.
 	cr, err := crawler.Start(crawler.Config{
-		Port:       mgr.Int(settings.KeyDHTPort),
-		Enabled:    crawlOn,
-		Samplers:   mgr.Int(settings.KeyDHTSamplers),
-		Identities: mgr.Int(settings.KeyDHTIdentities),
-		Logger:     logger,
+		Port:        mgr.Int(settings.KeyDHTPort),
+		Enabled:     crawlOn,
+		Samplers:    mgr.Int(settings.KeyDHTSamplers),
+		Identities:  mgr.Int(settings.KeyDHTIdentities),
+		IPv6Enabled: mgr.Bool(settings.KeyDHTIPv6Enabled),
+		Logger:      logger,
 		LoadSeedNodes: func(ctx context.Context) ([]crawler.PersistedNode, error) {
 			rows, err := st.LoadDHTNodes(ctx, 512)
 			if err != nil {
@@ -1091,6 +1095,10 @@ func main() {
 				BannedNodes:   cs.BannedNodes,
 				RestoredNodes: cs.RestoredNodes,
 				Identities:    cs.Identities,
+				IPv6Enabled:   cs.IPv6Enabled,
+				IPv6Bound:     cs.IPv6Bound > 0,
+				IPv6Nodes:     cs.IPv6Nodes,
+				SeenV6:        cs.SeenV6,
 				Watchdog:      string(ws.State),
 				WatchdogSince: wSince,
 			}
