@@ -60,8 +60,11 @@ const (
 	KeyMetaNegCacheMaxBackoffH = "META_NEG_CACHE_MAX_BACKOFF_H"
 	KeyMinTorrentSize          = "MIN_TORRENT_SIZE"
 	// scrape
-	KeyScrapeEnabled = "SCRAPE_ENABLED"
-	KeyTrackers      = "TRACKERS"
+	KeyScrapeEnabled   = "SCRAPE_ENABLED"
+	KeyTrackers        = "TRACKERS"
+	KeyRescrapeEnabled = "RESCRAPE_ENABLED"
+	KeyRescrapeMinAgeH = "RESCRAPE_MIN_AGE_H"
+	KeyRescrapePerMin  = "RESCRAPE_PER_MIN"
 	// static content filtering
 	KeyFilterEnabled            = "FILTER_ENABLED"
 	KeyFilterAdultEnabled       = "FILTER_ADULT_ENABLED"
@@ -292,6 +295,19 @@ var Registry = []Item{
 		Desc: "按 tracker 报告的做种数给待抓队列排序，热门内容优先入库"},
 	{Key: KeyTrackers, Group: "scrape", Label: "Tracker 列表", Type: TypeList, Default: "", Editable: true, Restart: true,
 		MaxItems: 64, Desc: "逗号分隔的 announce URL；同时用于刮削与磁力链接的 peer 提示"},
+	// --- swarm re-scrape: all live. The runner re-reads these
+	// before every round. It only ever queries trackers for
+	// torrents already in the index — never a metadata fetch — and
+	// writes through the same swarm write path as ingest, so the
+	// snapshots behind seeder sorting and the health derivation
+	// stay fresh and dead torrents keep accumulating the all-zero
+	// rounds the retention cleanup needs as evidence. ---
+	{Key: KeyRescrapeEnabled, Group: "scrape", Label: "已入库种子定期复查", Type: TypeBool, Default: "true", Editable: true,
+		Desc: "开 = 后台每分钟挑快照最陈旧的已入库种子重新向 tracker 刮削一次（从未刮过的最优先），刷新做种/下载数与健康度证据。只查 tracker，不触发元数据抓取；元数据队列满时整轮跳过，不与入库抢资源。保存后立即生效"},
+	{Key: KeyRescrapeMinAgeH, Group: "scrape", Label: "复查最小间隔（小时）", Type: TypeInt, Default: "48", Editable: true,
+		Min: f64(1), Max: f64(8760), Desc: "快照比该时长新的一律不复查；从未刮过的种子不受此限、永远可入选。保存后立即生效"},
+	{Key: KeyRescrapePerMin, Group: "scrape", Label: "复查速率（个/分钟）", Type: TypeInt, Default: "60", Editable: true,
+		Min: f64(1), Max: f64(10000), Desc: "每分钟最多复查的种子数，一轮一扣，绝不突发。保存后立即生效"},
 
 	// --- static content filtering: all live (next fetch) ---
 	{Key: KeyFilterEnabled, Group: "filter", Label: "启用静态过滤", Type: TypeBool, Default: "true", Editable: true,
