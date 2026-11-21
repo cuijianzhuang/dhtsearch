@@ -17,6 +17,7 @@ const KINDS: Record<string, (q: URLSearchParams) => string> = {
   latest: () => "/api/admin/torrents?page=1&page_size=10",
   update: () => "/api/admin/update",
   restart: () => "/api/admin/restart",
+  retention: () => "/api/admin/retention",
 };
 
 export async function GET(request: Request) {

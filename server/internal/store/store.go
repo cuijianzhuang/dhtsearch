@@ -633,6 +633,14 @@ func (s *Store) IncrStatContext(ctx context.Context, key string, delta int64) er
 	return err
 }
 
+// SetStatContext writes a stats key's absolute value, for state
+// that is a level rather than a counter (e.g. the retention
+// runner's last-run record). Counters proper use IncrStatContext.
+func (s *Store) SetStatContext(ctx context.Context, key string, value int64) error {
+	_, err := s.execContext(ctx, s.d.setStat(), key, value)
+	return err
+}
+
 // Stats returns all pipeline counters.
 func (s *Store) Stats(ctx context.Context) (map[string]int64, error) {
 	rows, err := s.queryContext(ctx, `SELECT key, value FROM stats`)

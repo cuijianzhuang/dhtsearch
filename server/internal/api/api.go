@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"dhtsearch/server/internal/feeds"
+	"dhtsearch/server/internal/retention"
 	"dhtsearch/server/internal/settings"
 	"dhtsearch/server/internal/store"
 )
@@ -106,6 +107,19 @@ type Options struct {
 	// without a restart. The static fields remain the fallback for
 	// tests and settings-free wiring.
 	Settings *settings.Manager
+	// Retention, when non-nil, backs /api/admin/retention: the
+	// data-retention runner's status and manual trigger (see
+	// internal/retention). Nil (tests, settings-free wiring) makes
+	// both endpoints answer 503.
+	Retention RetentionService
+}
+
+// RetentionService is the slice of the retention runner the admin
+// API needs. *retention.Service satisfies it; tests substitute a
+// stub so the in-flight 409 is deterministic.
+type RetentionService interface {
+	Status(ctx context.Context) (retention.Status, error)
+	Trigger() bool
 }
 
 // Trending is the payload for /api/trending: Douban's current hot movie and

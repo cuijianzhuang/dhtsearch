@@ -19,6 +19,13 @@ const (
 	// upgrade agent in scripts/install.sh).
 	KeyAutoUpdateEnabled = "AUTO_UPDATE_ENABLED"
 	KeyAutoUpdateTime    = "AUTO_UPDATE_TIME"
+	// data retention: periodic deletion of provably-dead torrents
+	// (see internal/retention). Off by default — deletion is
+	// irreversible, so the operator turns it on deliberately after
+	// reading the eligible count on the settings page.
+	KeyRetentionEnabled    = "RETENTION_ENABLED"
+	KeyRetentionMinAgeDays = "RETENTION_MIN_AGE_DAYS"
+	KeyRetentionIntervalH  = "RETENTION_INTERVAL_H"
 	// appearance
 	KeySiteName        = "SITE_NAME"
 	KeyThemeColor      = "THEME_COLOR"
@@ -107,6 +114,7 @@ const (
 var Groups = []Group{
 	{Key: "service", Label: "服务与数据库"},
 	{Key: "update", Label: "系统更新"},
+	{Key: "retention", Label: "数据保留"},
 	{Key: "auth", Label: "登录与账号"},
 	{Key: "appearance", Label: "外观与主题"},
 	{Key: "crawler", Label: "爬虫"},
@@ -159,6 +167,24 @@ var Registry = []Item{
 		Desc: "开 = root 侧的 systemd 定时器按下面的时间自动执行 upgrade（带备份、健康检查与失败回滚）。面板只记录开关与时间并同步到数据目录的状态文件，脚本侧的升级代理约 1 分钟内据此启停定时器；从未在面板保存过时以脚本 CLI（dhtsearch auto-update）的状态为准"},
 	{Key: KeyAutoUpdateTime, Group: "update", Label: "自动升级时间", Type: TypeString, Default: "03:37", Editable: true, MaxLen: 5,
 		Desc: "每天执行自动升级的时间，HH:MM 格式（服务器本地时间），另有最多 30 分钟随机延迟；仅在自动升级开启时有意义"},
+
+	// --- data retention: all live. The runner re-reads these before
+	// every pass, so saving applies to the next scheduled run (and the
+	// settings page's status card always shows the blast radius under
+	// the current values). Default off: deleting a torrent row is
+	// irreversible — its files blob goes with it — so the operator
+	// opts in deliberately. Only the health derivation's likely_dead
+	// tier is ever eligible (zero seeders AND zero leechers across at
+	// least 3 consecutive scrapes spanning at least 48 hours), and
+	// only past the minimum age; the blocked table is never touched,
+	// so a blacklisted hash stays blacklisted even after its row is
+	// cleaned. ---
+	{Key: KeyRetentionEnabled, Group: "retention", Label: "自动清理死种", Type: TypeBool, Default: "false", Editable: true,
+		Desc: "开 = 按下面的周期自动删除「疑似死亡」且入库超过最短保留天数的种子（连同文件列表、刮削快照与抓取退避记录；黑名单不受影响，拉黑过的哈希不会因为清理而解禁）。删除不可恢复，默认关。保存后立即生效"},
+	{Key: KeyRetentionMinAgeDays, Group: "retention", Label: "最短保留天数", Type: TypeInt, Default: "30", Editable: true,
+		Min: f64(1), Max: f64(3650), Desc: "入库未满该天数的种子永不清理，哪怕健康度已是疑似死亡。保存后立即生效"},
+	{Key: KeyRetentionIntervalH, Group: "retention", Label: "清理周期（小时）", Type: TypeInt, Default: "24", Editable: true,
+		Min: f64(1), Max: f64(720), Desc: "自动清理的执行间隔；服务启动后不久先跑一轮。保存后立即生效"},
 
 	// --- auth: admin login methods. All live: the login page asks the
 	// backend which methods are configured and renders only those. ---

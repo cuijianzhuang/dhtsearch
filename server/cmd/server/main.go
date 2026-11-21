@@ -26,6 +26,7 @@ import (
 	"dhtsearch/server/internal/metadata/libtorrent"
 	"dhtsearch/server/internal/metadata/native"
 	"dhtsearch/server/internal/moderator"
+	"dhtsearch/server/internal/retention"
 	"dhtsearch/server/internal/scraper"
 	"dhtsearch/server/internal/settings"
 	"dhtsearch/server/internal/store"
@@ -513,6 +514,9 @@ func main() {
 	// installer script reads, never by this process acting on them.
 	reg(settings.KeyAutoUpdateEnabled, strconv.FormatBool(envBool("AUTO_UPDATE_ENABLED", false)))
 	reg(settings.KeyAutoUpdateTime, envDefault("AUTO_UPDATE_TIME", "03:37"))
+	reg(settings.KeyRetentionEnabled, strconv.FormatBool(envBool("RETENTION_ENABLED", false)))
+	reg(settings.KeyRetentionMinAgeDays, strconv.Itoa(envInt("RETENTION_MIN_AGE_DAYS", 30)))
+	reg(settings.KeyRetentionIntervalH, strconv.Itoa(envInt("RETENTION_INTERVAL_H", 24)))
 
 	mgr, err := settings.New(base, fromEnv, st, logger)
 	if err != nil {
@@ -914,6 +918,26 @@ func main() {
 	}
 	go mod.Run(ctx)
 
+	// Data-retention cleanup: periodically deletes torrents whose
+	// swarm health has derived to likely_dead and that are older
+	// than the configured minimum age. Always running in dynamic
+	// mode: it idles while RETENTION_ENABLED is off (the default —
+	// deletion is irreversible, the operator opts in) and picks up
+	// settings changes without a restart. The admin API also
+	// exposes its status and a manual trigger.
+	retSvc := retention.New(st, retention.Config{
+		Logger: logger,
+		ConfigFunc: func() retention.Config {
+			return retention.Config{
+				Enabled:    mgr.Bool(settings.KeyRetentionEnabled),
+				MinAgeDays: mgr.Int(settings.KeyRetentionMinAgeDays),
+				Interval:   time.Duration(mgr.Int(settings.KeyRetentionIntervalH)) * time.Hour,
+				Logger:     logger,
+			}
+		},
+	})
+	go retSvc.Run(ctx)
+
 	// Douban trending fetcher for the homepage quick-search chips.
 	// The enable gate is consulted per request: disabled means the
 	// endpoint serves empty lists even though the service keeps its
@@ -1119,6 +1143,7 @@ func main() {
 			InternalToken: *internalToken,
 			DataDir:       dataDirOf(*dbPath),
 			Settings:      mgr,
+			Retention:     retSvc,
 			Trackers:      func() []string { return mgr.List(settings.KeyTrackers) },
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,

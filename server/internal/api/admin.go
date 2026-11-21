@@ -62,6 +62,8 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/update/request", s.handleAdminUpdateRequest)
 	mux.HandleFunc("GET /api/admin/restart", s.handleAdminRestartGet)
 	mux.HandleFunc("POST /api/admin/restart", s.handleAdminRestartRequest)
+	mux.HandleFunc("GET /api/admin/retention", s.handleAdminRetentionGet)
+	mux.HandleFunc("POST /api/admin/retention/run", s.handleAdminRetentionRun)
 	mux.HandleFunc("GET /api/admin/api-tokens", s.handleAdminAPITokenList)
 	mux.HandleFunc("POST /api/admin/api-tokens", s.handleAdminAPITokenCreate)
 	mux.HandleFunc("POST /api/admin/api-tokens/{id}/enable", s.handleAdminAPITokenEnable)
