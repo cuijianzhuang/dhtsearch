@@ -81,12 +81,52 @@ const STATE_LABELS: Record<string, string> = {
   failed: "升级失败",
 };
 
+// The backend's check_error is the raw upstream failure — a Go error
+// string like a dial error or "github API returned 403 Forbidden".
+// As the primary message that is noise, so map the shapes the
+// checker can produce to short Chinese summaries. Anything
+// unrecognized falls back to a generic summary and keeps the raw
+// text as a subdued detail line, so nothing is hidden either.
+function describeCheckError(raw: string): {
+  summary: string;
+  detail: string | null;
+} {
+  const s = raw.trim();
+  if (!s) return { summary: "未知错误", detail: null };
+  if (/\b429\b/.test(s) || /rate limit/i.test(s)) {
+    return { summary: "GitHub 接口被限流，请稍后再试", detail: null };
+  }
+  if (/\b403\b/.test(s)) {
+    return {
+      summary: "GitHub 接口拒绝访问（403，多为限流），请稍后再试",
+      detail: null,
+    };
+  }
+  if (/\b404\b/.test(s)) {
+    return { summary: "未找到发布信息（404）", detail: null };
+  }
+  if (
+    /dial|lookup|no such host|i\/o timeout|deadline|timed out|connection|network|unreachable|TLS|handshake|EOF|reset by peer/i.test(
+      s,
+    )
+  ) {
+    return { summary: "无法连接 GitHub（网络不可达）", detail: null };
+  }
+  if (/parse|decode|tag_name/i.test(s)) {
+    return { summary: "GitHub 返回内容异常", detail: null };
+  }
+  return { summary: "检查更新失败", detail: s };
+}
+
 export default function UpdateCard({ initial }: { initial: AdminUpdate | null }) {
   const [data, setData] = useState<AdminUpdateWithProgress | null>(
     initial as AdminUpdateWithProgress | null,
   );
   const [busy, setBusy] = useState<"" | "check" | "request">("");
   const [notice, setNotice] = useState<string | null>(null);
+  // Raw upstream text behind the notice's mapped summary (unknown
+  // check failures only), rendered as a subdued secondary line.
+  const [noticeDetail, setNoticeDetail] = useState<string | null>(null);
   const dataRef = useRef(data);
   useEffect(() => {
     dataRef.current = data;
@@ -128,12 +168,23 @@ export default function UpdateCard({ initial }: { initial: AdminUpdate | null })
     if (busy) return;
     setBusy("check");
     setNotice(null);
+    setNoticeDetail(null);
     try {
       const { status, body } = await postAction("check-update");
       if (status === 200) {
         setData(body);
+        // A 200 can still carry a failed upstream check (reported
+        // as check_error in the payload); give the click visible
+        // feedback with the mapped summary, not just a changed row.
+        if (body.check_error) {
+          const d = describeCheckError(body.check_error);
+          setNotice(`检查更新失败：${d.summary}，显示的是上次结果`);
+          setNoticeDetail(d.detail);
+        }
       } else {
-        setNotice(`检查更新失败：${body.error ?? `HTTP ${status}`}`);
+        const d = describeCheckError(body.error ?? `HTTP ${status}`);
+        setNotice(`检查更新失败：${d.summary}`);
+        setNoticeDetail(d.detail);
       }
     } catch {
       setNotice("检查更新失败：无法连接到后端。");
@@ -146,6 +197,7 @@ export default function UpdateCard({ initial }: { initial: AdminUpdate | null })
     if (busy || inFlight) return;
     setBusy("request");
     setNotice(null);
+    setNoticeDetail(null);
     try {
       const { status, body } = await postAction("request-upgrade");
       if (status === 202) {
@@ -183,6 +235,9 @@ export default function UpdateCard({ initial }: { initial: AdminUpdate | null })
   const au = data.auto_update;
   const up = data.upgrade;
   const showUpgrade = up.state !== "idle" || up.pending;
+  const checkErr = data.check_error
+    ? describeCheckError(data.check_error)
+    : null;
 
   return (
     <section className="rounded-xl border border-line bg-surface p-4 shadow-card">
@@ -242,10 +297,17 @@ export default function UpdateCard({ initial }: { initial: AdminUpdate | null })
           <dt className="shrink-0 text-faint">上次检查</dt>
           <dd>
             {fmtUnix(data.checked_at)}
-            {data.check_error && (
-              <span className="ml-2 text-warn-ink">
-                最近一次检查失败（{data.check_error}），显示的是上次结果
-              </span>
+            {checkErr && (
+              <>
+                <span className="ml-2 text-warn-ink">
+                  最近一次检查失败：{checkErr.summary}，显示的是上次结果
+                </span>
+                {checkErr.detail && (
+                  <span className="mt-0.5 block text-xs break-words text-faint">
+                    原始信息：{checkErr.detail}
+                  </span>
+                )}
+              </>
             )}
           </dd>
         </div>
@@ -320,7 +382,16 @@ export default function UpdateCard({ initial }: { initial: AdminUpdate | null })
         </div>
       )}
 
-      {notice && <p className="mt-3 text-sm text-warn-ink">{notice}</p>}
+      {notice && (
+        <p className="mt-3 text-sm text-warn-ink">
+          {notice}
+          {noticeDetail && (
+            <span className="mt-0.5 block text-xs break-words text-faint">
+              原始信息：{noticeDetail}
+            </span>
+          )}
+        </p>
+      )}
       {!data.contract_ready && (
         <p className="mt-3 text-sm text-warn-ink">
           当前部署的数据目录契约不可用：面板无法与升级脚本通信，「立即升级」与自动升级设置同步不可用（多见于未用 install.sh 部署的环境）。

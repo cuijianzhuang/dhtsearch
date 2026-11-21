@@ -325,7 +325,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
                         key={term}
                         href={`/search?q=${encodeURIComponent(term)}`}
                         prefetch={false}
-                        className="inline-flex min-h-9 items-center rounded-full border border-line bg-surface px-3 text-xs text-ink-2 transition-colors hover:border-accent hover:text-accent-ink"
+                        className="inline-flex min-h-11 items-center rounded-full border border-line bg-surface px-3 text-xs text-ink-2 transition-colors hover:border-accent hover:text-accent-ink"
                       >
                         {term}
                       </Link>

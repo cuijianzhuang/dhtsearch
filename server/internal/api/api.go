@@ -71,6 +71,11 @@ type Options struct {
 	// failing (e.g. Douban unreachable since a restart) is visible
 	// instead of silently serving stale or empty lists.
 	TrendingStatus func() TrendingStatus
+	// TrendingRefresh, when non-nil, backs
+	// POST /api/admin/trending/refresh: the console's manual
+	// "refresh now" for the trending fetcher. Nil (tests, settings-
+	// free wiring) makes the endpoint answer 503.
+	TrendingRefresh TrendingRefresher
 	// AdminToken is the bearer token guarding /api/admin/*. Empty (the
 	// default) disables the admin API entirely: every admin route answers
 	// 503 and the startup log says so. The token comes from the
@@ -149,6 +154,14 @@ type TrendingStatus struct {
 	Failing     bool  `json:"failing"`      // latest refresh cycles are failing
 	FailStreak  int   `json:"fail_streak"`  // consecutive failed cycles
 	LastSuccess int64 `json:"last_success"` // unix time of last fully successful cycle, 0 if none this run
+}
+
+// TrendingRefresher is the slice of the trending service the admin
+// API needs for a manual refresh: queue one refresh cycle now.
+// *trending.Service satisfies it; tests substitute a stub so the
+// already-queued 409 is deterministic.
+type TrendingRefresher interface {
+	TriggerRefresh() bool
 }
 
 // CrawlerStatus describes the crawler for the stats endpoint. The sampler

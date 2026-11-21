@@ -10,8 +10,10 @@ import { SettingsNavRail } from "@/components/admin/SettingsNav";
 import SettingsNavChips from "@/components/admin/SettingsNavChips";
 import RestartCard from "@/components/admin/RestartCard";
 import RetentionCard from "@/components/admin/RetentionCard";
+import TrendingStatusCard from "@/components/admin/TrendingStatusCard";
 import UpdateCard from "@/components/admin/UpdateCard";
 import {
+  fetchAdminOverview,
   fetchAdminRestart,
   fetchAdminRetention,
   fetchAdminSettings,
@@ -78,6 +80,15 @@ export default async function AdminSettingsGroupPage({
       ? await adminPageFetch((token) => fetchAdminRetention(token))
       : null;
 
+  // The trending status card belongs to the 趋势 group: it shows the
+  // fetcher's freshness (last change, last full success, failure
+  // streak) from the overview payload, so a stuck fetcher is visible
+  // where its settings live. Degrades the same way.
+  const trendingOutcome =
+    slug === "trending"
+      ? await adminPageFetch((token) => fetchAdminOverview(token))
+      : null;
+
   const navGroups = groups.map((g) => ({
     key: g.key,
     label: g.label,
@@ -130,6 +141,15 @@ export default async function AdminSettingsGroupPage({
             {retentionOutcome && (
               <RetentionCard
                 initial={retentionOutcome.ok ? retentionOutcome.data : null}
+              />
+            )}
+            {trendingOutcome && (
+              <TrendingStatusCard
+                initial={
+                  trendingOutcome.ok
+                    ? (trendingOutcome.data.trending ?? null)
+                    : null
+                }
               />
             )}
             <SettingsGroupForm group={group} />

@@ -330,3 +330,101 @@ func TestPersistenceWithRealStore(t *testing.T) {
 		t.Fatalf("recovery refresh: ok=%d failed=%d, want 4/0", ok, failed)
 	}
 }
+
+// TestTriggerRefreshQueuesOnce: the manual trigger is a single
+// queued slot — the first request queues, a second while one is
+// still queued is refused (the queued cycle fetches the same fresh
+// state anyway).
+func TestTriggerRefreshQueuesOnce(t *testing.T) {
+	svc := New(Config{BaseURL: "http://127.0.0.1:1", Interval: time.Hour})
+	if !svc.TriggerRefresh() {
+		t.Fatal("first TriggerRefresh: got false, want true")
+	}
+	if svc.TriggerRefresh() {
+		t.Fatal("second TriggerRefresh while queued: got true, want false")
+	}
+}
+
+// TestTriggerRefreshRunsCycleNow: with an hourly interval, a manual
+// trigger must start a cycle immediately rather than after the
+// interval, and once that cycle has run the slot frees up again.
+// The signal is chart-list requests: subject_abstract calls are
+// cached after the first cycle, so they cannot prove a new cycle.
+func TestTriggerRefreshRunsCycleNow(t *testing.T) {
+	var fail atomic.Bool
+	var abstracts atomic.Int64
+	var lists atomic.Int64
+	upstream := stub(&fail, &abstracts)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/j/search_subjects" {
+			lists.Add(1)
+		}
+		upstream.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	svc := New(Config{BaseURL: srv.URL, Interval: time.Hour})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go svc.Run(ctx)
+	<-svc.Ready()
+	before := lists.Load()
+	if before == 0 {
+		t.Fatal("first cycle made no chart requests; stub wiring broken")
+	}
+
+	if !svc.TriggerRefresh() {
+		t.Fatal("TriggerRefresh after Ready: got false, want true")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if lists.Load() > before {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if lists.Load() <= before {
+		t.Fatalf("triggered cycle did not run promptly: chart requests %d -> %d", before, lists.Load())
+	}
+
+	// The triggered cycle consumed the slot: another trigger queues.
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if svc.TriggerRefresh() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("trigger slot never freed after the triggered cycle started")
+}
+
+// TestTriggerRefreshRespectsDisabledGate: a trigger while the
+// feature is off wakes a cycle that skips the fetch, exactly like a
+// scheduled one — no upstream calls, no snapshot.
+func TestTriggerRefreshRespectsDisabledGate(t *testing.T) {
+	var fail atomic.Bool
+	var calls atomic.Int64
+	srv := httptest.NewServer(stub(&fail, &calls))
+	defer srv.Close()
+
+	svc := New(Config{
+		BaseURL:     srv.URL,
+		Interval:    time.Hour,
+		EnabledFunc: func() bool { return false },
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go svc.Run(ctx)
+	<-svc.Ready()
+	if !svc.TriggerRefresh() {
+		t.Fatal("TriggerRefresh while disabled: got false, want true (queued, cycle skips)")
+	}
+	// Give the woken cycle ample time to (not) fetch.
+	time.Sleep(300 * time.Millisecond)
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("disabled service fetched after trigger: abstract calls = %d, want 0", got)
+	}
+	if snap := svc.Get(); len(snap.Movies) != 0 {
+		t.Fatalf("disabled service populated a snapshot: %+v", snap)
+	}
+}
