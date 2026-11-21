@@ -20,6 +20,19 @@
 # role later. The three node keys live in the config file like any
 # other env setting and survive upgrade untouched.
 #
+# WireGuard onboarding: the wg-* commands (and the same entries under
+# the menu's 爬虫节点） set up a dedicated tunnel interface wg-dht
+# (10.9.0.0/24, center 10.9.0.1, UDP 51820 — deliberately NOT wg0 /
+# 10.8.0.0/24, which other stacks on the user's machines use) so a
+# center never has to expose its API port publicly: the center mints
+# a one-line base64 "join bundle" per node (node keypair generated
+# center-side, appliance-style), and `install --join-bundle <line>`
+# on the node writes the tunnel config, joins, and continues through
+# the ordinary node flow with CENTER_URL=http://10.9.0.1:<api-port>.
+# Center tunnel state lives in /etc/wireguard (wg-dht.conf +
+# wg-dht.state + wg-dht.key), outside every path install / upgrade /
+# uninstall manages, so peers survive upgrades untouched.
+#
 # Auto-update: a systemd timer (dhtsearch-update.timer) can run
 # `dhtsearch upgrade --yes` on a daily/weekly schedule. It is off by
 # default; its state (enabled flag, frequency, last check) lives in
@@ -120,6 +133,19 @@ UPDATE_TIMER="dhtsearch-update.timer"
 AUTOUPDATE_FILE="${DATA_DIR}/autoupdate"
 REQUEST_UNIT="dhtsearch-upgrade-request.service"
 REQUEST_TIMER="dhtsearch-upgrade-request.timer"
+# WireGuard node tunnel (see the header comment): interface wg-dht,
+# subnet 10.9.0.0/24, center 10.9.0.1, UDP 51820. The state file
+# next to the conf carries the endpoint and the peer allocations
+# (PEER <name> <ip> <pubkey> lines); the center private key lives in
+# its own root-only file so the conf can be regenerated from state
+# at any time.
+WG_IFACE="wg-dht"
+WG_DIR="${PREFIX}/etc/wireguard"
+WG_CONF="${WG_DIR}/wg-dht.conf"
+WG_KEY_FILE="${WG_DIR}/wg-dht.key"
+WG_STATE="${WG_DIR}/wg-dht.state"
+WG_PORT=51820
+WG_CENTER_IP="10.9.0.1"
 # Panel contract files (see the header comment): the panel writes
 # update-panel / update-request / restart-request, the upgrade agent
 # writes update-status / restart-status, and .au-applied stamps the
@@ -168,6 +194,17 @@ DATABASE_URL_OPT=""
 NODE_CENTER_OPT=""
 NODE_TOKEN_OPT=""
 NODE_NAME_OPT=""
+# --join-bundle: the one-line base64 bundle minted by the center's
+# wg-bundle. Decoded at the top of do_install (wg_parse_bundle) into
+# the JB_* globals; the node keys are then derived from it.
+JOIN_BUNDLE_OPT=""
+JB_NAME=""
+JB_IP=""
+JB_PRIVKEY=""
+JB_CENTER_PUB=""
+JB_ENDPOINT=""
+JB_API_PORT=""
+JB_TOKEN=""
 # Resolved by resolve_database during install: the DATABASE_URL the
 # config file should carry ("" = SQLite) and whether the choice was
 # explicit (--db flag or the interactive prompt), as opposed to "keep
@@ -251,6 +288,20 @@ Commands:
                        reconciles the auto-update timer with the
                        panel/CLI settings and runs one panel-requested
                        upgrade, if any. Not usually run by hand.
+  wg-setup [--endpoint HOST]
+                       (center) set up the wg-dht WireGuard tunnel
+                       (10.9.0.1/24, UDP 51820): keypair, config,
+                       wg-quick@wg-dht enabled. Idempotent. HOST is
+                       the public endpoint nodes dial; auto-detected
+                       when omitted, but cloud elastic IPs usually
+                       need it given explicitly.
+  wg-bundle --name N   (center) register node N and print its
+                       one-line join bundle (a credential: it carries
+                       the node's private key and the NODE_TOKEN)
+  wg-add --name N --pubkey K [--ip A]
+                       (center) register a node whose keypair was
+                       generated on the node itself
+  wg-remove --name N   (center) drop node N and free its tunnel IP
   help                 this text
 
 Options (install / upgrade):
@@ -293,6 +344,13 @@ Options (install / upgrade):
                        --node-center; only ever shown masked)
   --node-name NAME     this node's name at the center (with
                        --node-center; default: the hostname)
+  --join-bundle B64    join a center through its WireGuard tunnel
+                       using the one-line bundle the center minted
+                       (wg-bundle): writes the wg-dht tunnel config,
+                       brings it up, and installs as a worker node
+                       with CENTER_URL=http://10.9.0.1:<bundle API
+                       port>. The bundle is a credential (it carries
+                       this node's private key and the NODE_TOKEN).
   --check              (upgrade) only check for a newer release, like
                        check-update, without upgrading
   --yes                run non-interactively (no prompts); used by the
@@ -555,6 +613,452 @@ node_check() {
         000|"") echo "连通性测试：连不上 — 无法访问 ${url}（网络错误或地址不对）"; return 1 ;;
         *) echo "连通性测试：中心返回了意料外的状态 ${code}（${url}）"; return 1 ;;
     esac
+}
+
+# ------------------------------------------------------- wireguard tunnel
+#
+# The wg-dht tunnel carries node→center traffic so the center's API
+# port never needs a public exposure. Everything here is plain
+# files under /etc/wireguard plus wg/wg-quick/systemctl calls; the
+# center conf is REGENERATED from the state file on every change,
+# which keeps add/remove trivially consistent between the file and
+# the live interface (applied with wg syncconf, never a restart).
+
+# valid_node_name NAME — node names double as state-file fields and
+# stats-key suffixes: letters, digits, dash, underscore only.
+valid_node_name() {
+    case "$1" in
+        ""|*[!A-Za-z0-9_-]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# wg_valid_node_ip IP — a node address inside the tunnel subnet:
+# 10.9.0.2 .. 10.9.0.254 (.1 is the center itself).
+wg_valid_node_ip() {
+    case "$1" in
+        10.9.0.*) ;;
+        *) return 1 ;;
+    esac
+    local oct="${1##*.}"
+    case "$oct" in
+        ""|*[!0-9]*) return 1 ;;
+    esac
+    [ "$oct" -ge 2 ] && [ "$oct" -le 254 ]
+}
+
+# valid_wg_pubkey KEY — a WireGuard public key is 44 base64 chars.
+valid_wg_pubkey() {
+    [ "${#1}" -eq 44 ] || return 1
+    case "$1" in
+        *[!A-Za-z0-9+/=]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# wg_state_value KEY — KEY= value from the tunnel state file.
+wg_state_value() {
+    local line=""
+    if [ -f "$WG_STATE" ]; then
+        line="$(grep -E "^$1=" "$WG_STATE" | tail -1 || true)"
+    fi
+    echo "${line#"$1"=}"
+}
+
+# wg_state_set KEY VALUE — set_env_value's recipe on the state file.
+wg_state_set() {
+    mkdir -p "$WG_DIR"
+    [ -f "$WG_STATE" ] || : > "$WG_STATE"
+    if grep -qE "^$1=" "$WG_STATE"; then
+        sed -i -E "s|^$1=.*|$1=$2|" "$WG_STATE"
+    else
+        printf '%s=%s\n' "$1" "$2" >> "$WG_STATE"
+    fi
+    chmod 600 "$WG_STATE" || true
+}
+
+# wg_peer_lines — the "PEER <name> <ip> <pubkey>" lines of the
+# state file (nothing when there are none).
+wg_peer_lines() {
+    [ -f "$WG_STATE" ] || return 0
+    grep -E '^PEER ' "$WG_STATE" || true
+}
+
+# wg_peer_field NAME N — field N (2=name, 3=ip, 4=pubkey) of NAME's
+# peer line, "" when the node is unknown.
+wg_peer_field() {
+    wg_peer_lines | awk -v n="$1" -v f="$2" '$2 == n { print $f; exit }'
+}
+
+# wg_alloc_ip — the lowest free node address (from .2 up). Freed
+# addresses (wg-remove) are reused; a live peer's address never is.
+wg_alloc_ip() {
+    local used=" " line ip n=2
+    while IFS= read -r line; do
+        ip="$(printf '%s' "$line" | awk '{ print $3 }')"
+        [ -n "$ip" ] && used="${used}${ip##*.} "
+    done <<EOF
+$(wg_peer_lines)
+EOF
+    while :; do
+        case "$used" in
+            *" $n "*) n=$((n + 1)) ;;
+            *) break ;;
+        esac
+    done
+    echo "10.9.0.$n"
+}
+
+# wg_ensure_tools — wg / wg-quick on PATH, installing wireguard-tools
+# via apt when missing (the install_postgres_apt pattern: apt only,
+# anything else stops with manual instructions).
+wg_ensure_tools() {
+    if command -v wg >/dev/null 2>&1 && command -v wg-quick >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! command -v apt-get >/dev/null 2>&1; then
+        die "WireGuard 工具（wg）未安装且本机没有 apt-get，无法自动安装；请先手动安装 wireguard-tools 再重试。"
+    fi
+    log "安装 wireguard-tools（apt）"
+    apt-get update -qq || warn "apt-get update 失败，继续尝试安装"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard-tools \
+        || die "apt-get install wireguard-tools 失败；请手动安装后重试。"
+}
+
+# wg_center_privkey / wg_center_pubkey — the center keypair. The
+# private key is generated once into its own root-only file and
+# never printed; the public key is derived on demand.
+wg_center_privkey() {
+    cat "$WG_KEY_FILE" 2>/dev/null || true
+}
+
+wg_center_pubkey() {
+    local priv
+    priv="$(wg_center_privkey)"
+    [ -n "$priv" ] || return 1
+    printf '%s' "$priv" | wg pubkey
+}
+
+wg_ensure_center_key() {
+    mkdir -p "$WG_DIR"
+    chmod 700 "$WG_DIR" || true
+    if [ ! -s "$WG_KEY_FILE" ]; then
+        ( umask 077 && wg genkey > "$WG_KEY_FILE" ) \
+            || die "生成中心隧道私钥失败（wg genkey）"
+    fi
+    chmod 600 "$WG_KEY_FILE" || true
+}
+
+# wg_detect_endpoint — best-effort public IPv4 of this host. Cloud
+# elastic IPs often are NOT on any local interface, which is why
+# this is only a default: wg-setup --endpoint / the menu prompt
+# override it, and the chosen value is stored in the state file.
+wg_detect_endpoint() {
+    local ip=""
+    ip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+    if [ -z "$ip" ]; then
+        ip="$(curl -fsS --max-time 5 https://ifconfig.me/ip 2>/dev/null || true)"
+    fi
+    case "$ip" in
+        *[!0-9.]*) ip="" ;;
+    esac
+    echo "$ip"
+}
+
+# wg_write_center_conf — regenerate /etc/wireguard/wg-dht.conf from
+# the key file + the state file's peer lines.
+wg_write_center_conf() {
+    local priv line name ip pub
+    priv="$(wg_center_privkey)"
+    [ -n "$priv" ] || die "中心隧道私钥不存在（$WG_KEY_FILE），请先运行 wg-setup"
+    mkdir -p "$WG_DIR"
+    {
+        echo "# wg-dht — DHTSearch 中心隧道（由 dhtsearch install.sh 管理；节点名单在 wg-dht.state，勿手改本文件）"
+        echo "[Interface]"
+        echo "Address = ${WG_CENTER_IP}/24"
+        echo "ListenPort = ${WG_PORT}"
+        echo "PrivateKey = ${priv}"
+        wg_peer_lines | while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            name="$(printf '%s' "$line" | awk '{ print $2 }')"
+            ip="$(printf '%s' "$line" | awk '{ print $3 }')"
+            pub="$(printf '%s' "$line" | awk '{ print $4 }')"
+            echo ""
+            echo "# 节点：${name}"
+            echo "[Peer]"
+            echo "PublicKey = ${pub}"
+            echo "AllowedIPs = ${ip}/32"
+        done
+    } > "${WG_CONF}.tmp"
+    mv "${WG_CONF}.tmp" "$WG_CONF"
+    chmod 600 "$WG_CONF" || true
+}
+
+# wg_apply_live — push the regenerated conf into the running
+# interface without dropping existing tunnels (wg-quick strip +
+# wg syncconf). A no-op when the interface is down: the conf file
+# is picked up when it next starts.
+wg_apply_live() {
+    command -v wg >/dev/null 2>&1 || return 0
+    wg show "$WG_IFACE" >/dev/null 2>&1 || return 0
+    command -v wg-quick >/dev/null 2>&1 || return 0
+    wg syncconf "$WG_IFACE" <(wg-quick strip "$WG_IFACE") >/dev/null 2>&1 \
+        || warn "隧道名单热更新失败（wg syncconf）：新名单将在隧道下次重启时生效（systemctl restart wg-quick@${WG_IFACE}）"
+}
+
+# wg_setup [ENDPOINT] — the center side of the tunnel: tools,
+# keypair, conf, wg-quick@wg-dht enabled+started, and the endpoint
+# recorded in the state file. Idempotent: an existing keypair,
+# endpoint and peer list are all kept.
+wg_setup() {
+    local endpoint_opt="${1:-}"
+    require_root
+    wg_ensure_tools
+    wg_ensure_center_key
+    local endpoint
+    endpoint="$(wg_state_value ENDPOINT)"
+    if [ -n "$endpoint_opt" ]; then
+        endpoint="$endpoint_opt"
+    elif [ -z "$endpoint" ]; then
+        endpoint="$(wg_detect_endpoint)"
+    fi
+    if [ -z "$endpoint" ]; then
+        die "无法确定本机的公网接入地址：云主机的弹性公网 IP 常常不在网卡上，请用 wg-setup --endpoint <公网IP或域名> 明确指定"
+    fi
+    wg_state_set ENDPOINT "$endpoint"
+    wg_write_center_conf
+    svc enable --now "wg-quick@${WG_IFACE}"
+    log "中心隧道已开启：接口 ${WG_IFACE}（${WG_CENTER_IP}/24，UDP ${WG_PORT}），公网接入点 ${endpoint}:${WG_PORT}"
+    log "中心公钥：$(wg_center_pubkey)"
+    echo "提醒：云厂商安全组 / 防火墙需放行入站 UDP ${WG_PORT} —— 那是主机之外的规则，本脚本管不到。"
+}
+
+# wg_add_peer NAME PUBKEY [IP] — register a node on the center:
+# state line, regenerated conf, live apply. With no IP the lowest
+# free address is allocated.
+wg_add_peer() {
+    require_root
+    local name="$1" pub="$2" ip="${3:-}"
+    valid_node_name "$name" \
+        || die "节点名无效：'$name'（只允许字母、数字、- 和 _）"
+    valid_wg_pubkey "$pub" \
+        || die "公钥格式不对（应为 44 字符的 WireGuard 公钥）"
+    [ -s "$WG_KEY_FILE" ] \
+        || die "中心隧道还没开启：先运行 wg-setup（或菜单 → 爬虫节点 → 中心隧道）"
+    if [ -n "$(wg_peer_field "$name" 3)" ]; then
+        die "节点 ${name} 已存在（隧道 IP $(wg_peer_field "$name" 3)）：先 wg-remove --name ${name} 再重新添加"
+    fi
+    if [ -z "$ip" ]; then
+        ip="$(wg_alloc_ip)"
+    fi
+    wg_valid_node_ip "$ip" \
+        || die "隧道 IP 无效：'$ip'（应为 10.9.0.2 - 10.9.0.254）"
+    if [ -n "$(wg_peer_lines | awk -v ip="$ip" '$3 == ip { print $2; exit }')" ]; then
+        die "隧道 IP ${ip} 已被节点 $(wg_peer_lines | awk -v ip="$ip" '$3 == ip { print $2; exit }') 占用"
+    fi
+    mkdir -p "$WG_DIR"
+    [ -f "$WG_STATE" ] || : > "$WG_STATE"
+    printf 'PEER %s %s %s\n' "$name" "$ip" "$pub" >> "$WG_STATE"
+    chmod 600 "$WG_STATE" || true
+    wg_write_center_conf
+    wg_apply_live
+    log "已添加节点 ${name}：隧道 IP ${ip}"
+}
+
+# wg_remove_peer NAME — drop a node: state line removed (its IP is
+# free for the next allocation), conf regenerated, live apply.
+wg_remove_peer() {
+    local name="$1"
+    require_root
+    if [ -z "$(wg_peer_field "$name" 3)" ]; then
+        die "没有名为 ${name} 的节点（现有节点：$(wg_peer_lines | awk '{ printf "%s ", $2 } END { print "" }'))"
+    fi
+    grep -v -E "^PEER ${name} " "$WG_STATE" > "${WG_STATE}.tmp" || true
+    mv "${WG_STATE}.tmp" "$WG_STATE"
+    chmod 600 "$WG_STATE" || true
+    wg_write_center_conf
+    wg_apply_live
+    log "已移除节点 ${name}：其隧道 IP 已释放，可重新分配"
+}
+
+# wg_bundle NAME — mint a one-line base64 join bundle for a node:
+# the node's keypair is generated HERE (appliance-style: the
+# operator owns both machines, and the bundle is a credential),
+# the peer is registered, and the bundle carries everything the
+# node side needs: node private key, assigned IP, center public
+# key, endpoint, API port, node name — and the NODE_TOKEN when the
+# script can see it (the center env file) or the operator pastes it
+# at the prompt; without either, the bundle goes out tokenless and
+# the node prompts for the token during its install.
+wg_bundle() {
+    local name="$1"
+    require_root
+    valid_node_name "$name" \
+        || die "节点名无效：'$name'（只允许字母、数字、- 和 _）"
+    [ -s "$WG_KEY_FILE" ] && [ -f "$WG_CONF" ] \
+        || die "中心隧道还没开启：先运行 wg-setup（或菜单 → 爬虫节点 → 中心隧道）"
+    wg_ensure_tools
+    local endpoint
+    endpoint="$(wg_state_value ENDPOINT)"
+    [ -n "$endpoint" ] \
+        || die "接入点（公网地址）未记录：请重跑 wg-setup --endpoint <公网IP或域名>"
+    local priv pub ip token payload b64
+    priv="$(wg genkey)" || die "生成节点私钥失败（wg genkey）"
+    pub="$(printf '%s' "$priv" | wg pubkey)" || die "生成节点公钥失败（wg pubkey）"
+    ip="$(wg_alloc_ip)"
+    wg_add_peer "$name" "$pub" "$ip"
+    token="$(env_value NODE_TOKEN)"
+    if [ -z "$token" ] && [ -t 0 ]; then
+        printf '粘贴中心在面板里设置的 NODE_TOKEN（输入不回显；留空则接入包不带令牌，节点安装时再输入）: ' >&2
+        read -r -s token || token=""
+        echo >&2
+    fi
+    payload="$(printf 'v=1\nname=%s\nip=%s\nprivkey=%s\ncenter_pubkey=%s\nendpoint=%s:%s\napi_port=%s\ntoken=%s\n' \
+        "$name" "$ip" "$priv" "$(wg_center_pubkey)" "$endpoint" "$WG_PORT" \
+        "$(resolve_api_port)" "$token")"
+    b64="$(printf '%s' "$payload" | base64 | tr -d '\n')"
+    echo "接入包已生成：节点 ${name}（隧道 IP ${ip}）。"
+    echo "在节点机器上运行：dhtsearch install --join-bundle '<下面整行>'"
+    echo "或打开节点机器的管理菜单 → 爬虫节点 → 粘贴接入包，粘贴下面整行。"
+    echo "【凭据警告】接入包含节点私钥与中心令牌，等同凭据：只走可信渠道传递，不要外发、不要贴到公开场所。"
+    echo "$b64"
+    if [ -z "$token" ]; then
+        echo "注意：本接入包未带令牌（中心配置文件里没有 NODE_TOKEN，刚才也没有输入）——节点安装时会再提示输入。"
+    fi
+}
+
+# wg_parse_bundle B64 — decode + validate a join bundle into the
+# JB_* globals. Returns 1 on anything malformed; callers report
+# the one shared "invalid bundle" message.
+wg_parse_bundle() {
+    local raw line key val ver=""
+    raw="$(printf '%s' "$1" | tr -d '[:space:]' | base64 -d 2>/dev/null)" || return 1
+    [ -n "$raw" ] || return 1
+    JB_NAME=""; JB_IP=""; JB_PRIVKEY=""; JB_CENTER_PUB=""
+    JB_ENDPOINT=""; JB_API_PORT=""; JB_TOKEN=""
+    while IFS= read -r line; do
+        case "$line" in
+            *=*) ;;
+            *) continue ;;
+        esac
+        key="${line%%=*}"
+        val="${line#*=}"
+        case "$key" in
+            v) ver="$val" ;;
+            name) JB_NAME="$val" ;;
+            ip) JB_IP="$val" ;;
+            privkey) JB_PRIVKEY="$val" ;;
+            center_pubkey) JB_CENTER_PUB="$val" ;;
+            endpoint) JB_ENDPOINT="$val" ;;
+            api_port) JB_API_PORT="$val" ;;
+            token) JB_TOKEN="$val" ;;
+        esac
+    done <<EOF
+$raw
+EOF
+    [ "$ver" = "1" ] || return 1
+    valid_node_name "$JB_NAME" || return 1
+    wg_valid_node_ip "$JB_IP" || return 1
+    valid_wg_pubkey "$JB_PRIVKEY" || return 1
+    valid_wg_pubkey "$JB_CENTER_PUB" || return 1
+    case "$JB_ENDPOINT" in
+        *:* ) ;;
+        *) return 1 ;;
+    esac
+    valid_port "$JB_API_PORT" || return 1
+    return 0
+}
+
+# wg_write_node_conf — the node's wg-dht.conf from the JB_* fields:
+# only the center is a peer, and only the center's tunnel address
+# is routed (the API over the tunnel is the whole point; nothing
+# else leaves the node through it).
+wg_write_node_conf() {
+    mkdir -p "$WG_DIR"
+    chmod 700 "$WG_DIR" || true
+    {
+        echo "# wg-dht — DHTSearch 爬虫节点隧道（由接入包生成；重新接入会整体覆盖本文件）"
+        echo "[Interface]"
+        echo "PrivateKey = ${JB_PRIVKEY}"
+        echo "Address = ${JB_IP}/32"
+        echo ""
+        echo "[Peer]"
+        echo "PublicKey = ${JB_CENTER_PUB}"
+        echo "Endpoint = ${JB_ENDPOINT}"
+        echo "AllowedIPs = ${WG_CENTER_IP}/32"
+        echo "PersistentKeepalive = 25"
+    } > "${WG_CONF}.tmp"
+    mv "${WG_CONF}.tmp" "$WG_CONF"
+    chmod 600 "$WG_CONF" || true
+}
+
+# wg_tunnel_start — bring wg-dht up (restart when already up, so a
+# re-join's fresh conf takes effect).
+wg_tunnel_start() {
+    if command -v wg >/dev/null 2>&1 && wg show "$WG_IFACE" >/dev/null 2>&1; then
+        svc restart "wg-quick@${WG_IFACE}" || true
+    else
+        svc enable --now "wg-quick@${WG_IFACE}" || true
+    fi
+}
+
+# wg_wait_handshake — 0 when any peer reports a handshake within
+# ~15s. This is the TUNNEL's verdict, deliberately distinct from
+# the API self-check's four outcomes: no handshake means the UDP
+# path itself is broken (endpoint wrong, 51820 blocked), and no API
+# result over the tunnel would mean anything yet.
+wg_wait_handshake() {
+    local tries="${WG_HANDSHAKE_TRIES:-15}" i hs
+    for i in $(seq 1 "$tries"); do
+        hs="$(wg show "$WG_IFACE" latest-handshakes 2>/dev/null \
+            | awk '$2 > 0 { print $2; exit }' || true)"
+        [ -n "$hs" ] && return 0
+        [ "$i" -lt "$tries" ] && sleep 1
+    done
+    return 1
+}
+
+# wg_join_apply — the tunnel half of joining (bundle already parsed
+# into JB_*): tools, node conf, tunnel up, handshake verdict. Never
+# dies on a missing handshake — the caller continues into the node
+# flow and the API self-check reports its own outcome; the tunnel
+# message stays distinct so the operator knows WHICH layer failed.
+wg_join_apply() {
+    wg_ensure_tools
+    wg_write_node_conf
+    wg_tunnel_start
+    if wg_wait_handshake; then
+        log "WireGuard 隧道已建立（${WG_IFACE}：本机 ${JB_IP} ↔ 中心 ${WG_CENTER_IP}）"
+    else
+        warn "WireGuard 隧道未建立：约 15 秒内没有完成握手——先查中心的安全组是否放行 UDP ${WG_PORT}、接入点地址是否正确；隧道通了之后推送会自动恢复。"
+    fi
+}
+
+# wg_status_line — one cheap, local line for `dhtsearch status`
+# when a wg-dht conf exists on this machine: interface down, or up
+# with the center-side peer count / the node-side handshake age.
+wg_status_line() {
+    [ -f "$WG_CONF" ] || return 0
+    if ! command -v wg >/dev/null 2>&1 || ! wg show "$WG_IFACE" >/dev/null 2>&1; then
+        echo "Tunnel:  wg-dht 未运行（配置文件在 ${WG_CONF}）"
+        return 0
+    fi
+    if node_mode; then
+        local hs now age
+        hs="$(wg show "$WG_IFACE" latest-handshakes 2>/dev/null \
+            | awk '{ if ($2 > m) m = $2 } END { print m + 0 }' || true)"
+        if [ "${hs:-0}" -gt 0 ] 2>/dev/null; then
+            now="$(date +%s)"
+            age=$((now - hs))
+            echo "Tunnel:  wg-dht 运行中（中心 ${WG_CENTER_IP}，最近握手 ${age} 秒前）"
+        else
+            echo "Tunnel:  wg-dht 运行中（中心 ${WG_CENTER_IP}，尚无握手）"
+        fi
+    else
+        local n
+        n="$(wg_peer_lines | grep -c . || true)"
+        echo "Tunnel:  wg-dht 运行中（中心隧道，已注册节点 ${n} 个）"
+    fi
 }
 
 # ---------------------------------------------------------------- database
@@ -2006,6 +2510,25 @@ do_upgrade_request() {
 
 do_install() {
     require_root
+    # A join bundle turns this install into a tunneled worker BEFORE
+    # any port/platform decision looks at the role: decode it into
+    # the JB_* fields and derive the ordinary --node-* options from
+    # it (center = the tunnel address of the center's API).
+    if [ -n "$JOIN_BUNDLE_OPT" ]; then
+        [ -z "$NODE_CENTER_OPT" ] \
+            || die "--join-bundle 与 --node-center 不能同时使用（接入包已自带中心地址）"
+        wg_parse_bundle "$JOIN_BUNDLE_OPT" \
+            || die "接入包无效：无法解码或字段不全，请从中心重新生成后整行粘贴"
+        NODE_CENTER_OPT="http://${WG_CENTER_IP}:${JB_API_PORT}"
+        NODE_NAME_OPT="$JB_NAME"
+        if [ -n "$JB_TOKEN" ]; then
+            NODE_TOKEN_OPT="$JB_TOKEN"
+        elif [ -t 0 ]; then
+            printf '接入包未带令牌，请输入中心 NODE_TOKEN（输入不回显，留空则跳过）: '
+            read -r -s NODE_TOKEN_OPT || NODE_TOKEN_OPT=""
+            echo
+        fi
+    fi
     check_platform
     validate_ports
     check_ports_free
@@ -2043,6 +2566,13 @@ do_install() {
     # their web handling off them.
     if [ -n "$NODE_CENTER_OPT" ]; then
         apply_node_config
+    fi
+    # Join-bundle installs bring the tunnel up before the services
+    # start, so the API's first push already rides it. A tunnel that
+    # does not handshake only warns (wg_join_apply): the self-check
+    # at the end reports the API-side outcome as usual.
+    if [ -n "$JOIN_BUNDLE_OPT" ]; then
+        wg_join_apply
     fi
     write_units
     fix_permissions
@@ -2155,6 +2685,10 @@ do_upgrade() {
         NODE_CENTER_OPT=""
         NODE_TOKEN_OPT=""
         NODE_NAME_OPT=""
+    fi
+    if [ -n "$JOIN_BUNDLE_OPT" ]; then
+        warn "--join-bundle is ignored by upgrade: the tunnel and the node role live outside the upgrade path (in /etc/wireguard and the config file) and are kept as configured."
+        JOIN_BUNDLE_OPT=""
     fi
     # Version gate: same-or-older target means no download, no
     # backup, no service restart — return success right here.
@@ -2271,6 +2805,7 @@ do_status() {
     echo "Data:    $DATA_DIR"
     echo "Database: $(db_display)"
     echo "角色：   $(node_role_line)"
+    wg_status_line
     lt_sidecar_line
     echo "Ports:   API $(resolve_api_port)   Web $(resolve_web_port)"
     echo "Autostart: $(autostart_state)"
@@ -3177,8 +3712,132 @@ menu_node_remove() {
     echo "已解除节点模式，当前角色：$(node_role_line)"
 }
 
+# menu_node_join — 粘贴接入包： the center minted a one-line bundle
+# (wg-bundle); pasting it here writes the tunnel config, brings
+# wg-dht up, writes the three node keys with the center reached
+# THROUGH the tunnel, rewrites the units, restarts, and finishes
+# with the usual connectivity self-check. Re-joining with a fresh
+# bundle simply replaces the tunnel config and the keys.
+menu_node_join() {
+    local b64 token
+    printf '粘贴接入包（中心 wg-bundle 生成的整行）: '
+    if ! read -r b64; then return 0; fi
+    if ! wg_parse_bundle "$b64"; then
+        echo "接入包无效：无法解码或字段不全，请从中心重新生成后整行粘贴。"
+        return 0
+    fi
+    token="$(env_value NODE_TOKEN)"
+    if [ -z "$token" ]; then
+        printf '接入包未带令牌，请输入中心 NODE_TOKEN（输入不回显，留空则跳过）: '
+        if ! read -r -s token; then echo; return 0; fi
+        echo
+    fi
+    echo
+    echo "接入汇总："
+    echo "  隧道接入点：${JB_ENDPOINT}"
+    echo "  本机隧道 IP：${JB_IP}"
+    echo "  节点名：      ${JB_NAME}"
+    echo "  中心地址：    http://${WG_CENTER_IP}:${JB_API_PORT}（经隧道）"
+    echo "  令牌：        $(mask_secret_head "$token")"
+    echo "  本机 Web 服务将停止并禁用（节点只运行 API 与爬虫）。"
+    if ! confirm "确认接入并重启 API 服务？"; then return 0; fi
+    wg_join_apply
+    set_env_value CENTER_URL "http://${WG_CENTER_IP}:${JB_API_PORT}"
+    if [ -n "$token" ]; then
+        set_env_value NODE_TOKEN "$token"
+    elif [ -z "$(env_value NODE_TOKEN)" ]; then
+        warn "NODE_TOKEN 仍未设置：中心会拒绝本节点（401），配好后在「连通性测试」里复查。"
+    fi
+    set_env_value NODE_NAME "$JB_NAME"
+    write_units
+    restart_services
+    wait_health || true
+    node_check "$(env_value CENTER_URL)" "$(env_value NODE_TOKEN)" \
+        || echo "自检未通过：配置已保存，节点照常运行（失败开放）；中心或隧道修好后推送自动恢复。"
+}
+
+# menu_wg_center — the center side of the tunnel: status (endpoint
+# + registered nodes), wg-setup, bundle minting, manual peer add,
+# peer removal. The non-interactive twins are the wg-* commands.
+menu_wg_center() {
+    local c name pub ip ep def cur line
+    while true; do
+        echo "中心隧道（WireGuard / ${WG_IFACE}，子网 10.9.0.0/24）"
+        if [ -s "$WG_KEY_FILE" ]; then
+            echo "  状态：已开启，接入点 $(wg_state_value ENDPOINT):${WG_PORT}，本机 ${WG_CENTER_IP}"
+            echo "  已注册节点："
+            if [ -n "$(wg_peer_lines)" ]; then
+                wg_peer_lines | while IFS= read -r line; do
+                    echo "    - $(printf '%s' "$line" | awk '{ print $2 }')（$(printf '%s' "$line" | awk '{ print $3 }')）"
+                done
+            else
+                echo "    （暂无）"
+            fi
+        else
+            echo "  状态：未开启（先选 1）"
+        fi
+        echo "  1) 开启隧道 / 修改接入点（wg-setup）"
+        echo "  2) 生成接入包（新节点一键接入）"
+        echo "  3) 手动添加节点（对方自备公钥）"
+        echo "  4) 移除节点"
+        echo "  0) 返回"
+        printf '选择： '
+        if ! read -r c; then return 0; fi
+        case "$c" in
+            1)
+                cur="$(wg_state_value ENDPOINT)"
+                def="$cur"
+                [ -n "$def" ] || def="$(wg_detect_endpoint)"
+                ep="$(prompt_line "公网接入点（云厂商弹性 IP 或域名，节点按这个地址连进来）" "$def")" || ep=""
+                if [ -z "$ep" ]; then
+                    echo "接入点不能为空（自动探测不到时必须手填云厂商分配的公网地址）。"
+                else
+                    wg_setup "$ep" || true
+                fi
+                ;;
+            2)
+                if [ ! -s "$WG_KEY_FILE" ]; then
+                    echo "中心隧道还没开启，先选 1。"
+                else
+                    name="$(prompt_line "新节点名" "")" || name=""
+                    if ! valid_node_name "$name"; then
+                        echo "节点名无效（只允许字母、数字、- 和 _）。"
+                    else
+                        wg_bundle "$name" || true
+                    fi
+                fi
+                ;;
+            3)
+                if [ ! -s "$WG_KEY_FILE" ]; then
+                    echo "中心隧道还没开启，先选 1。"
+                else
+                    name="$(prompt_line "节点名" "")" || name=""
+                    pub="$(prompt_line "节点公钥（在节点机上 wg genkey / wg pubkey 生成）" "")" || pub=""
+                    ip="$(prompt_line "隧道 IP（留空自动分配）" "$(wg_alloc_ip)")" || ip=""
+                    if ! valid_node_name "$name" || ! valid_wg_pubkey "$pub"; then
+                        echo "节点名或公钥无效，未添加。"
+                    else
+                        wg_add_peer "$name" "$pub" "$ip" || true
+                    fi
+                fi
+                ;;
+            4)
+                name="$(prompt_line "要移除的节点名" "")" || name=""
+                if [ -z "$(wg_peer_field "$name" 3)" ]; then
+                    echo "没有名为 ${name} 的节点。"
+                elif confirm "确认移除节点 ${name}？它的隧道 IP 将被释放。"; then
+                    wg_remove_peer "$name" || true
+                fi
+                ;;
+            0) return 0 ;;
+            *) echo "未知选择：$c" ;;
+        esac
+        menu_pause
+    done
+}
+
 # menu_node — the 爬虫节点 submenu: the current role first (token
-# as set/unset only, never a value), then the three actions.
+# as set/unset only, never a value), then the actions.
 menu_node() {
     local c tok_state
     while true; do
@@ -3194,6 +3853,8 @@ menu_node() {
         echo "  1) 配置 / 修改节点接入"
         echo "  2) 解除节点模式"
         echo "  3) 连通性测试"
+        echo "  4) 粘贴接入包加入中心（WireGuard 隧道）"
+        echo "  5) 中心隧道（生成接入包 / 管理节点）"
         echo "  0) 返回"
         printf '选择： '
         if ! read -r c; then return 0; fi
@@ -3207,6 +3868,8 @@ menu_node() {
                     echo "本机未配置节点接入，先选 1 配置。"
                 fi
                 ;;
+            4) menu_node_join ;;
+            5) menu_wg_center ;;
             0) return 0 ;;
             *) echo "未知选择：$c" ;;
         esac
@@ -3621,6 +4284,73 @@ menu() {
     done
 }
 
+# wg_cmd SUBCMD ARGS... — the non-interactive WireGuard commands
+# (the menu's 中心隧道 submenu drives the same functions).
+wg_cmd() {
+    local sub="$1"
+    shift
+    case "$sub" in
+        wg-setup)
+            local endpoint=""
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --endpoint)
+                        [ $# -ge 2 ] || die "--endpoint needs a value"
+                        endpoint="$2"; shift 2 ;;
+                    *) die "unknown option for wg-setup: $1 (see: install.sh help)" ;;
+                esac
+            done
+            wg_setup "$endpoint"
+            ;;
+        wg-bundle)
+            local name=""
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --name)
+                        [ $# -ge 2 ] || die "--name needs a value"
+                        name="$2"; shift 2 ;;
+                    *) die "unknown option for wg-bundle: $1 (see: install.sh help)" ;;
+                esac
+            done
+            [ -n "$name" ] || die "usage: install.sh wg-bundle --name <node-name>"
+            wg_bundle "$name"
+            ;;
+        wg-add)
+            local name="" pubkey="" ip=""
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --name)
+                        [ $# -ge 2 ] || die "--name needs a value"
+                        name="$2"; shift 2 ;;
+                    --pubkey)
+                        [ $# -ge 2 ] || die "--pubkey needs a value"
+                        pubkey="$2"; shift 2 ;;
+                    --ip)
+                        [ $# -ge 2 ] || die "--ip needs a value"
+                        ip="$2"; shift 2 ;;
+                    *) die "unknown option for wg-add: $1 (see: install.sh help)" ;;
+                esac
+            done
+            [ -n "$name" ] && [ -n "$pubkey" ] \
+                || die "usage: install.sh wg-add --name <node-name> --pubkey <key> [--ip <10.9.0.x>]"
+            wg_add_peer "$name" "$pubkey" "$ip"
+            ;;
+        wg-remove)
+            local name=""
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --name)
+                        [ $# -ge 2 ] || die "--name needs a value"
+                        name="$2"; shift 2 ;;
+                    *) die "unknown option for wg-remove: $1 (see: install.sh help)" ;;
+                esac
+            done
+            [ -n "$name" ] || die "usage: install.sh wg-remove --name <node-name>"
+            wg_remove_peer "$name"
+            ;;
+    esac
+}
+
 # ---------------------------------------------------------------- main
 
 parse_opts() {
@@ -3666,6 +4396,10 @@ parse_opts() {
             --node-name)
                 [ $# -ge 2 ] || die "--node-name needs a value"
                 NODE_NAME_OPT="$2"
+                shift 2 ;;
+            --join-bundle)
+                [ $# -ge 2 ] || die "--join-bundle needs a value"
+                JOIN_BUNDLE_OPT="$2"
                 shift 2 ;;
             --dry-run) DRY_RUN=1; shift ;;
             --purge) PURGE=1; shift ;;
@@ -3728,6 +4462,7 @@ main() {
             esac
             ;;
         upgrade-request) require_root; do_upgrade_request ;;
+        wg-setup|wg-bundle|wg-add|wg-remove) wg_cmd "$@" ;;
         auto-update)
             shift
             case "${1:-status}" in
