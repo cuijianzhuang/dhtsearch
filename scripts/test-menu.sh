@@ -52,7 +52,7 @@ not_contains() {
 # --- 1. fresh root: grouped menu, kv header, 未安装 state ------------
 out="$(run_menu '0\n')" || fail "menu exit on '0' (fresh root)"
 contains "$out" "DHTSearch 管理菜单" "menu title"
-contains "$out" "状态：未安装（选 15 安装）" "not-installed header"
+contains "$out" "状态：未安装（选 16 安装）" "not-installed header"
 contains "$out" "系统：" "system header line"
 not_contains "$out" "API 服务" "no service lines when not installed"
 not_contains "$out" "发现新版本" "no update hint when not installed"
@@ -66,12 +66,13 @@ contains "$out" "  7) 升级到最新版" "item 7"
 # is annotated even in hook mode; 开机自启 needs systemd, so in hook
 # mode it carries no annotation rather than a guessed one.
 contains "$out" "  8) 自动更新设置 [关]" "item 8 with auto-update state"
-contains "$out" "  12) 开机自启" "item 12"
-not_contains "$out" "开机自启 [" "item 12 unannotated in hook mode"
-contains "$out" "  15) 安装 / 重新安装" "item 15"
-contains "$out" "  16) 卸载" "item 16"
+contains "$out" "  10) 爬虫节点" "item 10 crawler node"
+contains "$out" "  13) 开机自启" "item 13"
+not_contains "$out" "开机自启 [" "item 13 unannotated in hook mode"
+contains "$out" "  16) 安装 / 重新安装" "item 16"
+contains "$out" "  17) 卸载" "item 17"
 contains "$out" "  0) 退出" "item 0"
-contains "$out" "请选择 [0-16]：" "ranged prompt"
+contains "$out" "请选择 [0-17]：" "ranged prompt"
 
 # --- 2. not-installed guards: notice instead of the handler ---------
 out="$(run_menu '1\n\n0\n')" || fail "menu exit after guarded 状态"
@@ -132,5 +133,26 @@ chmod +x "$STUB_BIN/curl"
 out="$(printf '%b' '99\n99\n99\n0\n' | PATH="$STUB_BIN:$PATH" DHTSEARCH_ROOT="$ROOT" \
     script -qec "bash $INSTALL" /dev/null | tr -d '\r')" || fail "menu exit (hint case)"
 contains "$out" "发现新版本 v9.9.9，选 7 升级到最新版" "update hint line"
+
+# --- 8. 爬虫节点 submenu: role display follows the config file ------
+# Standalone first: the submenu says 独立 and offers the three
+# actions. (The guard requires an install; the VERSION file above
+# already marks this root installed.)
+out="$(run_menu '10\n0\n0\n')" || fail "menu exit after node submenu (standalone)"
+contains "$out" "爬虫节点接入" "node submenu title"
+contains "$out" "当前角色：独立" "node submenu standalone role"
+contains "$out" "配置 / 修改节点接入" "node submenu configure action"
+contains "$out" "连通性测试" "node submenu check action"
+# Now seed the worker keys: the submenu and the header must both
+# show the node role, with the token as set-only.
+ENV_TEST="$ROOT/etc/dhtsearch/dhtsearch.env"
+mkdir -p "$(dirname "$ENV_TEST")"
+printf 'CENTER_URL=https://center.example:10800\nNODE_TOKEN=<redacted>\nNODE_NAME=hk-1\n' > "$ENV_TEST"
+out="$(run_menu '10\n0\n0\n')" || fail "menu exit after node submenu (worker)"
+contains "$out" "角色：爬虫节点（中心 https://center.example:10800，节点名 hk-1）" "header node role"
+contains "$out" "当前角色：爬虫节点（中心 https://center.example:10800，节点名 hk-1）" "node submenu worker role"
+contains "$out" "令牌：    已设置" "node submenu token state"
+not_contains "$out" "secret-token-1234" "token value never printed in the menu"
+rm -f "$ENV_TEST"
 
 echo "menu tests: all passed"
