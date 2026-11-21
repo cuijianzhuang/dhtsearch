@@ -34,6 +34,13 @@
 //   - When discovery is frozen too (whole-network outage shape), a
 //     restart cannot help: it dumps stacks and warns, but never
 //     exits.
+//   - Episode transitions are reported through Config.OnEvent
+//     (begin once per episode, whichever detector fired first;
+//     recovery when progress resumes) and Config.BeforeExit (a
+//     synchronous flush hook immediately before an escalation
+//     exit), so the alerting layer (internal/alerts) can notify
+//     the operator externally without owning a second detector
+//     that could disagree with this one.
 package watchdog
 
 import (
@@ -83,6 +90,43 @@ type Status struct {
 	Since time.Time
 }
 
+// EventKind identifies an episode transition the alerting layer
+// (internal/alerts) turns into an external notification. The
+// watchdog owns detection; the events are its only outward signal,
+// so an alert can never disagree with the watchdog's own verdict.
+type EventKind string
+
+const (
+	// EventStalled: discovery moving, ingest zero-progress for
+	// WarnAfter — the incident's shape.
+	EventStalled EventKind = "stalled"
+	// EventCrawling: ingest trickling far below baseline with the
+	// fetch queue not draining (first crawl window of an episode).
+	EventCrawling EventKind = "crawling"
+	// EventFrozen: discovery and ingest both frozen (outage shape;
+	// warns and alerts, never exits).
+	EventFrozen EventKind = "frozen"
+	// EventRecovered: ingest progress resumed after an alerted
+	// episode.
+	EventRecovered EventKind = "recovered"
+	// EventExiting: the watchdog is about to exit the process for
+	// a systemd restart; delivered through BeforeExit, not OnEvent.
+	EventExiting EventKind = "exiting"
+)
+
+// Event is one episode transition, with the counters the alert
+// message quotes. Since is when the episode began (for a recovery,
+// the start its begin event reported); StalledFor is the
+// episode's age at the transition.
+type Event struct {
+	Kind           EventKind
+	Since          time.Time
+	StalledFor     time.Duration
+	Probe          Probe // latest sample at the transition
+	SeenAtProgress int64 // Seen when Fetched last grew (stall kinds)
+	WindowFetched  int64 // records stored in the judged window (crawl kind)
+}
+
 // Config controls a Watchdog. The zero value of every duration picks
 // the documented default.
 type Config struct {
@@ -105,6 +149,18 @@ type Config struct {
 	Stack func() string
 	// Now, nil for time.Now. Injected in tests.
 	Now func() time.Time
+	// OnEvent, when non-nil, is called synchronously from Tick on
+	// episode transitions: a stall/crawl/frozen episode begins
+	// (once per episode) and an alerted episode recovers. It must
+	// be fast and non-blocking — it only hands the event to the
+	// alerting layer, which owns delivery.
+	OnEvent func(Event)
+	// BeforeExit, when non-nil, is called synchronously immediately
+	// before Exit on a stall/crawl escalation, so the alerting
+	// layer can flush the episode's alert (and send its exit
+	// notice) before the process dies. It is expected to bound its
+	// own wait; Tick does not return to its caller until it does.
+	BeforeExit func(Event)
 
 	Tick        time.Duration // sample period, default 1m
 	StatusEvery time.Duration // status line period, default 10m
@@ -144,6 +200,15 @@ type Watchdog struct {
 	warned         bool  // stack dumped for the current stall episode
 	frozenWarnedAt time.Time
 	exited         bool
+
+	// Alerting bookkeeping: alerted is true from the episode's
+	// first OnEvent emission until its recovery emission, so each
+	// episode produces exactly one begin event whichever detector
+	// (zero-progress, crawl, frozen) fired first, and at most one
+	// recovery. alertSince is the episode start the begin event
+	// reported, reused to age the recovery.
+	alerted    bool
+	alertSince time.Time
 
 	statusBase Probe // sample the status-line deltas are measured from
 	statusAt   time.Time
@@ -212,6 +277,66 @@ func (w *Watchdog) setStatus(s Status) {
 	w.mu.Unlock()
 }
 
+// emitBegin fires the episode's single begin event. Callers pass
+// the detector-specific kind and episode start; the guard here is
+// what makes the three detectors share one episode.
+func (w *Watchdog) emitBegin(kind EventKind, since time.Time, now time.Time, p Probe, windowFetched int64) {
+	if w.alerted {
+		return
+	}
+	w.alerted = true
+	w.alertSince = since
+	if w.cfg.OnEvent == nil {
+		return
+	}
+	w.cfg.OnEvent(Event{
+		Kind:           kind,
+		Since:          since,
+		StalledFor:     now.Sub(since),
+		Probe:          p,
+		SeenAtProgress: w.seenAtProgress,
+		WindowFetched:  windowFetched,
+	})
+}
+
+// emitRecovered fires the recovery event for an alerted episode
+// and closes it. A crawl episode still in progress (crawlStalled)
+// is not recovered by a trickle of progress — its detector clears
+// it separately — so callers from the progress path pass the
+// current crawl state and this stays quiet while it holds.
+func (w *Watchdog) emitRecovered(now time.Time, p Probe) {
+	if !w.alerted {
+		return
+	}
+	w.alerted = false
+	if w.cfg.OnEvent == nil {
+		return
+	}
+	w.cfg.OnEvent(Event{
+		Kind:       EventRecovered,
+		Since:      w.alertSince,
+		StalledFor: now.Sub(w.alertSince),
+		Probe:      p,
+	})
+}
+
+// beforeExit runs the alerting layer's synchronous flush hook for
+// an escalation exit, immediately before Exit itself. since is the
+// episode's start (lastProgressAt for a zero-progress stall,
+// crawlSince for a crawl).
+func (w *Watchdog) beforeExit(since time.Time, now time.Time, p Probe) {
+	if w.cfg.BeforeExit == nil {
+		return
+	}
+	w.cfg.BeforeExit(Event{
+		Kind:           EventExiting,
+		Since:          since,
+		StalledFor:     now.Sub(since),
+		Probe:          p,
+		SeenAtProgress: w.seenAtProgress,
+	})
+}
+
 // Run samples the pipeline every Tick until ctx ends. It is a no-op
 // when the watchdog is not Active.
 func (w *Watchdog) Run(ctx context.Context) {
@@ -252,6 +377,12 @@ func (w *Watchdog) Tick(now time.Time, p Probe) {
 	}
 	if w.haveSample && p.Fetched > w.last.Fetched {
 		// Any stored record is progress: the episode, if any, is over.
+		// A crawl episode is the exception: its ingest trickles by
+		// definition, so only its own detector may close it (see
+		// evalCrawl); every other alerted episode recovers here.
+		if !w.crawlStalled {
+			w.emitRecovered(now, p)
+		}
 		w.lastProgressAt = now
 		w.seenAtProgress = p.Seen
 		w.warned = false
@@ -302,12 +433,14 @@ func (w *Watchdog) Tick(now time.Time, p Probe) {
 			w.logger.Printf("watchdog: ERROR ingest stalled: no records stored for %s while discovery kept moving (seen %d -> %d, queue_depth %d); goroutine dump follows",
 				stallFor.Round(time.Second), w.seenAtProgress, p.Seen, p.QueueDepth)
 			w.logger.Printf("watchdog: goroutine dump:\n%s", w.cfg.Stack())
+			w.emitBegin(EventStalled, w.lastProgressAt, now, p, 0)
 		}
 		if stallFor >= w.cfg.ExitAfter && !w.exited {
 			w.exited = true
 			w.logger.Printf("watchdog: ERROR ingest still stalled after %s; dumping goroutines and exiting for systemd to restart the process",
 				stallFor.Round(time.Second))
 			w.logger.Printf("watchdog: goroutine dump:\n%s", w.cfg.Stack())
+			w.beforeExit(w.lastProgressAt, now, p)
 			w.cfg.Exit(1)
 		}
 		return
@@ -322,6 +455,7 @@ func (w *Watchdog) Tick(now time.Time, p Probe) {
 		w.logger.Printf("watchdog: ERROR pipeline frozen: no discovery and no ingest for %s (seen %d, queue_depth %d); not exiting (a restart cannot fix an external outage); goroutine dump follows",
 			stallFor.Round(time.Second), p.Seen, p.QueueDepth)
 		w.logger.Printf("watchdog: goroutine dump:\n%s", w.cfg.Stack())
+		w.emitBegin(EventFrozen, w.lastProgressAt, now, p, 0)
 	}
 }
 
@@ -356,6 +490,13 @@ func (w *Watchdog) evalCrawl(now time.Time, p Probe) {
 	w.crawlBaseAt = now
 
 	if seenDelta <= 0 || fetchedDelta <= 0 || fetchedDelta >= crawlMinFetched || !queueStuck {
+		// A healthy (or frozen, or drained) window closes a crawl
+		// episode: if it was alerted, this is its recovery — the
+		// progress path in Tick cannot close it, since a crawl's
+		// trickle counts as progress there by design.
+		if w.crawlStalled && w.alerted {
+			w.emitRecovered(now, p)
+		}
 		w.crawlStalled = false
 		w.crawlBadWindows = 0
 		return
@@ -369,6 +510,7 @@ func (w *Watchdog) evalCrawl(now time.Time, p Probe) {
 		w.logger.Printf("watchdog: ERROR ingest crawling: only +%d records stored in %s while discovery kept moving (seen +%d) and the fetch queue did not drain (queue_depth %d); goroutine dump follows",
 			fetchedDelta, crawlWindow, seenDelta, p.QueueDepth)
 		w.logger.Printf("watchdog: goroutine dump:\n%s", w.cfg.Stack())
+		w.emitBegin(EventCrawling, w.crawlSince, now, p, fetchedDelta)
 		return
 	}
 	if !w.exited {
@@ -376,6 +518,7 @@ func (w *Watchdog) evalCrawl(now time.Time, p Probe) {
 		w.logger.Printf("watchdog: ERROR ingest still crawling after another %s (+%d records stored, queue_depth %d); dumping goroutines and exiting for systemd to restart the process",
 			crawlWindow, fetchedDelta, p.QueueDepth)
 		w.logger.Printf("watchdog: goroutine dump:\n%s", w.cfg.Stack())
+		w.beforeExit(w.crawlSince, now, p)
 		w.cfg.Exit(1)
 	}
 }

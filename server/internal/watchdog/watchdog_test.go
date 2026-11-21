@@ -16,6 +16,10 @@ type harness struct {
 	exits  []int
 	stacks int
 	on     bool
+	events []Event
+	// order records the exit-path call sequence ("beforeExit",
+	// "exit") so the flush-before-exit ordering is assertable.
+	order []string
 }
 
 func newHarness() *harness {
@@ -24,10 +28,26 @@ func newHarness() *harness {
 		Active:  true,
 		Enabled: func() bool { return h.on },
 		Logger:  log.New(h.logs, "", 0),
-		Exit:    func(code int) { h.exits = append(h.exits, code) },
+		Exit: func(code int) {
+			h.exits = append(h.exits, code)
+			h.order = append(h.order, "exit")
+		},
 		Stack:   func() string { h.stacks++; return "FAKE STACK" },
+		OnEvent: func(ev Event) { h.events = append(h.events, ev) },
+		BeforeExit: func(ev Event) {
+			h.events = append(h.events, ev)
+			h.order = append(h.order, "beforeExit")
+		},
 	})
 	return h
+}
+
+func (h *harness) kinds() []EventKind {
+	out := make([]EventKind, 0, len(h.events))
+	for _, ev := range h.events {
+		out = append(out, ev.Kind)
+	}
+	return out
 }
 
 var t0 = time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
@@ -249,6 +269,116 @@ func TestCrawlHealthyThroughputNotFlagged(t *testing.T) {
 	}
 	if st := h.wd.Status(); st.State != StateOK {
 		t.Fatalf("status = %v, want ok", st.State)
+	}
+}
+
+// Episode events: one begin per stall episode at the warn
+// transition, one recovery when progress resumes, and a second
+// begin when a later stall forms a new episode.
+func TestStallEventsOncePerEpisode(t *testing.T) {
+	h := newHarness()
+	phase := func(i int, p *Probe) {
+		p.Seen += 1000
+		switch {
+		case i == 0:
+			p.Fetched = 10
+		case i == 20:
+			p.Fetched = 25 // recovery
+		}
+	}
+	h.tickN(40, phase)
+	want := []EventKind{EventStalled, EventRecovered, EventStalled}
+	got := h.kinds()
+	if len(got) != len(want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("events = %v, want %v", got, want)
+		}
+	}
+	stall := h.events[0]
+	if stall.Probe.Seen == 0 || stall.StalledFor < 15*time.Minute {
+		t.Fatalf("stall event lacks context: %+v", stall)
+	}
+	rec := h.events[1]
+	if rec.StalledFor <= 0 || rec.Since.IsZero() {
+		t.Fatalf("recovery event lacks episode age: %+v", rec)
+	}
+}
+
+// A crawl episode emits its begin at the first crawl window and
+// its recovery when a healthy window closes it — the trickle in
+// between must not read as recovery.
+func TestCrawlEvents(t *testing.T) {
+	h := newHarness()
+	h.tickN(32, func(i int, p *Probe) {
+		p.Seen += 1000
+		p.QueueDepth = 15000
+		switch {
+		case i <= 10:
+			p.Fetched += 2 // window 1: crawl
+		case i <= 20:
+			p.Fetched += 40 // window 2: healthy
+		default:
+			p.Fetched += 40
+		}
+	})
+	want := []EventKind{EventCrawling, EventRecovered}
+	got := h.kinds()
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	if h.events[0].WindowFetched <= 0 || h.events[0].WindowFetched >= crawlMinFetched {
+		t.Fatalf("crawl event window fetched = %d, want within the crawl band", h.events[0].WindowFetched)
+	}
+}
+
+// A both-frozen pipeline emits one frozen begin per episode.
+func TestFrozenEvent(t *testing.T) {
+	h := newHarness()
+	h.tickN(40, func(i int, p *Probe) {})
+	want := []EventKind{EventFrozen}
+	got := h.kinds()
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+}
+
+// The exit path must run the BeforeExit flush hook immediately
+// before Exit, with an exiting event describing the episode.
+func TestBeforeExitRunsBeforeExit(t *testing.T) {
+	h := newHarness()
+	h.tickN(35, func(i int, p *Probe) {
+		p.Seen += 1000
+		if i == 0 {
+			p.Fetched = 10
+		}
+	})
+	if len(h.exits) != 1 {
+		t.Fatalf("exits = %v, want one", h.exits)
+	}
+	if len(h.order) != 2 || h.order[0] != "beforeExit" || h.order[1] != "exit" {
+		t.Fatalf("exit-path order = %v, want [beforeExit exit]", h.order)
+	}
+	last := h.events[len(h.events)-1]
+	if last.Kind != EventExiting {
+		t.Fatalf("last event = %v, want exiting", last.Kind)
+	}
+	if last.StalledFor < 30*time.Minute {
+		t.Fatalf("exiting event stalledFor = %v, want >= 30m", last.StalledFor)
+	}
+}
+
+// A healthy pipeline emits nothing.
+func TestNoEventsWhenHealthy(t *testing.T) {
+	h := newHarness()
+	h.tickN(40, func(i int, p *Probe) {
+		p.Seen += 1000
+		p.Fetched += 30
+	})
+	if len(h.events) != 0 {
+		t.Fatalf("events = %v, want none", h.events)
 	}
 }
 

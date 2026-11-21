@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"dhtsearch/server/internal/admission"
+	"dhtsearch/server/internal/alerts"
 	"dhtsearch/server/internal/api"
 	"dhtsearch/server/internal/crawler"
 	"dhtsearch/server/internal/envfile"
@@ -520,6 +521,15 @@ func main() {
 	reg(settings.KeyRetentionEnabled, strconv.FormatBool(envBool("RETENTION_ENABLED", false)))
 	reg(settings.KeyRetentionMinAgeDays, strconv.Itoa(envInt("RETENTION_MIN_AGE_DAYS", 30)))
 	reg(settings.KeyRetentionIntervalH, strconv.Itoa(envInt("RETENTION_INTERVAL_H", 24)))
+	// Stall alerts: secrets come from the environment only at this
+	// layer (DB overrides may replace them via the settings page);
+	// the token is read with os.Getenv like the other secrets so it
+	// never lands in a flag dump.
+	reg(settings.KeyAlertEnabled, strconv.FormatBool(envBool("ALERT_ENABLED", false)))
+	reg(settings.KeyAlertWebhookURL, os.Getenv("ALERT_WEBHOOK_URL"))
+	reg(settings.KeyAlertTelegramBotToken, os.Getenv("ALERT_TELEGRAM_BOT_TOKEN"))
+	reg(settings.KeyAlertTelegramChatID, envDefault("ALERT_TELEGRAM_CHAT_ID", ""))
+	reg(settings.KeyAlertStallMinutes, strconv.Itoa(envInt("ALERT_STALL_MINUTES", 15)))
 
 	mgr, err := settings.New(base, fromEnv, st, logger)
 	if err != nil {
@@ -1031,16 +1041,47 @@ func main() {
 		}
 	}()
 
+	// Stall alerting (internal/alerts): delivery only — the
+	// watchdog below owns detection and reports its episodes
+	// through the OnEvent/BeforeExit hooks wired here, so an alert
+	// can never disagree with the watchdog's own verdict. Dynamic
+	// config: channel knobs saved in the settings page apply to
+	// the next episode without a restart.
+	alertsSvc := alerts.New(alerts.Config{
+		Logger: logger,
+		ConfigFunc: func() alerts.Config {
+			return alerts.Config{
+				Enabled:        mgr.Bool(settings.KeyAlertEnabled),
+				WebhookURL:     mgr.Get(settings.KeyAlertWebhookURL),
+				TelegramToken:  mgr.Get(settings.KeyAlertTelegramBotToken),
+				TelegramChatID: mgr.Get(settings.KeyAlertTelegramChatID),
+				Logger:         logger,
+			}
+		},
+	})
+	go alertsSvc.Run(ctx)
+
 	// Pipeline stall watchdog + periodic status line (internal/
 	// watchdog). The probe reads the same counters the status line
 	// and the admin overview use; the ingest-progress signal is the
 	// stats table's "fetched" counter, which onRecord increments
 	// only after a record is actually stored (in bare-infohash mode
 	// the "seen" stat plays that role, one increment per upsert).
+	// The warn/exit thresholds come from ALERT_STALL_MINUTES: the
+	// alert fires at the same transition that dumps the stacks, and
+	// the exit threshold stays twice the warn threshold, as it was
+	// when both were constants (15m/30m).
+	stallWarnAfter := time.Duration(mgr.Int(settings.KeyAlertStallMinutes)) * time.Minute
 	wd := watchdog.New(watchdog.Config{
-		Active:  crawlOn,
-		Enabled: func() bool { return mgr.Bool(settings.KeyCrawlerWatchdogEnabled) },
-		Logger:  logger,
+		Active:    crawlOn,
+		Enabled:   func() bool { return mgr.Bool(settings.KeyCrawlerWatchdogEnabled) },
+		Logger:    logger,
+		WarnAfter: stallWarnAfter,
+		ExitAfter: 2 * stallWarnAfter,
+		OnEvent:   alertsSvc.NotifyEvent,
+		BeforeExit: func(ev watchdog.Event) {
+			alertsSvc.FlushBeforeExit(ev)
+		},
 		Probe: func(ctx context.Context) (watchdog.Probe, error) {
 			p := watchdog.Probe{Seen: cr.Stats().Harvested}
 			if fetcher != nil {
@@ -1152,6 +1193,7 @@ func main() {
 			DataDir:       dataDirOf(*dbPath),
 			Settings:      mgr,
 			Retention:     retSvc,
+			Alerts:        alertsSvc,
 			Trackers:      func() []string { return mgr.List(settings.KeyTrackers) },
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
