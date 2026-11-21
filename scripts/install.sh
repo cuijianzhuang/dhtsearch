@@ -9,9 +9,16 @@
 # Run with no arguments in a terminal for an interactive menu.
 # install also copies this script to /usr/local/bin/dhtsearch, so on an
 # installed machine plain `dhtsearch` re-opens the menu (install / upgrade /
-# status / start / stop / restart / logs / change ports / switch database /
-# autostart / config / backup & restore / selfcheck / check update /
-# auto-update / uninstall) without re-downloading it.
+# status / start / stop / restart / logs / change ports / crawler node /
+# switch database / autostart / config / backup & restore / selfcheck /
+# check update / auto-update / uninstall) without re-downloading it.
+#
+# Crawler nodes: install --node-center URL --node-token TOKEN turns a
+# machine into a worker node (the server binary's CENTER_URL mode):
+# only the API service is installed and run — a worker has no web
+# frontend — and the menu's 爬虫节点 entry reconfigures or undoes the
+# role later. The three node keys live in the config file like any
+# other env setting and survive upgrade untouched.
 #
 # Auto-update: a systemd timer (dhtsearch-update.timer) can run
 # `dhtsearch upgrade --yes` on a daily/weekly schedule. It is off by
@@ -155,6 +162,12 @@ API_PORT_OPT=""
 WEB_PORT_OPT=""
 DB_OPT=""
 DATABASE_URL_OPT=""
+# Crawler-node install options (--node-center / --node-token /
+# --node-name): NODE_CENTER_OPT non-empty asks install to put this
+# machine into worker-node mode (see apply_node_config).
+NODE_CENTER_OPT=""
+NODE_TOKEN_OPT=""
+NODE_NAME_OPT=""
 # Resolved by resolve_database during install: the DATABASE_URL the
 # config file should carry ("" = SQLite) and whether the choice was
 # explicit (--db flag or the interactive prompt), as opposed to "keep
@@ -268,6 +281,18 @@ Options (install / upgrade):
                        from the `dhtsearch` menu (数据库切换), which
                        also migrates the data.
   --database-url URL   postgres:// connection URL for --db postgres-url
+  --node-center URL    install this machine as a crawler worker node
+                       reporting to the center at URL (http(s)://...):
+                       CENTER_URL / NODE_TOKEN / NODE_NAME are written
+                       to the config file and ONLY the API service is
+                       installed and started — a worker runs no web
+                       frontend (an existing web service is stopped
+                       and disabled). Reconfigurable later from the
+                       `dhtsearch` menu (爬虫节点).
+  --node-token TOKEN   the shared NODE_TOKEN of the center (with
+                       --node-center; only ever shown masked)
+  --node-name NAME     this node's name at the center (with
+                       --node-center; default: the hostname)
   --check              (upgrade) only check for a newer release, like
                        check-update, without upgrading
   --yes                run non-interactively (no prompts); used by the
@@ -319,7 +344,9 @@ check_platform() {
     if [ -z "$PREFIX" ] && ! command -v systemctl >/dev/null 2>&1; then
         die "systemctl not found; this installer manages systemd services"
     fi
-    if ! command -v node >/dev/null 2>&1; then
+    # A crawler worker node runs no web frontend, so it does not
+    # need the Node.js runtime the standalone web server requires.
+    if ! want_node_mode && ! command -v node >/dev/null 2>&1; then
         die "Node.js runtime not found: the web frontend is a Next.js standalone server and needs node (>= 18) on PATH. Install Node.js, then re-run."
     fi
 }
@@ -383,6 +410,9 @@ validate_ports() {
     ap="$(resolve_api_port)"
     wp="$(resolve_web_port)"
     valid_port "$ap" || die "invalid API port: '$ap' (must be a number 1-65535; see --api-port)"
+    # A worker node runs no web service; its web port is meaningless
+    # and must not fail (or constrain) the install.
+    if want_node_mode; then return 0; fi
     valid_port "$wp" || die "invalid web port: '$wp' (must be a number 1-65535; see --web-port)"
     [ "$ap" != "$wp" ] || die "API port and web port must differ (both resolved to $ap)"
 }
@@ -425,6 +455,106 @@ ensure_internal_token() {
         set_env_value INTERNAL_API_TOKEN "$(gen_secret)"
         log "Generated INTERNAL_API_TOKEN (web-to-API first-party channel) in $ENV_FILE; the web unit carries the same value."
     fi
+}
+
+# ------------------------------------------------------------ crawler node
+
+# mask_secret_head VALUE — the only printable form of a node token:
+# the first four characters and an ellipsis (a value of four chars
+# or fewer prints as just the ellipsis, so nothing usable leaks).
+mask_secret_head() {
+    if [ "${#1}" -gt 4 ]; then
+        printf '%s…' "${1:0:4}"
+    else
+        printf '…'
+    fi
+}
+
+# node_mode — this machine is configured as a crawler worker node:
+# the config carries a CENTER_URL (the server binary keys its whole
+# worker behaviour off that one variable; see cmd/server).
+node_mode() {
+    [ -n "$(env_value CENTER_URL)" ]
+}
+
+# want_node_mode — the machine is a node, or this install run is
+# turning it into one (--node-center). Used by the platform / port /
+# unit steps that must treat a node differently BEFORE the config
+# file carries the keys.
+want_node_mode() {
+    [ -n "$NODE_CENTER_OPT" ] || node_mode
+}
+
+# apply_node_config — write the worker keys from the --node-* options
+# into the config file. NODE_NAME falls back to an existing value,
+# then to the hostname (the server's own default). A missing token
+# is a warning, not a failure: the center will answer 401 until one
+# is set (menu → 爬虫节点）, and the install itself must not die on
+# a not-yet-configured center.
+apply_node_config() {
+    set_env_value CENTER_URL "$NODE_CENTER_OPT"
+    if [ -n "$NODE_TOKEN_OPT" ]; then
+        set_env_value NODE_TOKEN "$NODE_TOKEN_OPT"
+    fi
+    if [ -n "$NODE_NAME_OPT" ]; then
+        set_env_value NODE_NAME "$NODE_NAME_OPT"
+    elif [ -z "$(env_value NODE_NAME)" ]; then
+        set_env_value NODE_NAME "$(hostname 2>/dev/null || echo node)"
+    fi
+    if [ -z "$(env_value NODE_TOKEN)" ]; then
+        warn "NODE_TOKEN is not set: the center will reject this node (401) until a token is configured (dhtsearch menu → 爬虫节点）。"
+    fi
+    log "Crawler node configured: center $(env_value CENTER_URL), node name $(env_value NODE_NAME), token $(mask_secret_head "$(env_value NODE_TOKEN)")"
+}
+
+# clear_node_config — remove the worker keys, back to standalone.
+clear_node_config() {
+    remove_env_value CENTER_URL
+    remove_env_value NODE_TOKEN
+    remove_env_value NODE_NAME
+}
+
+# node_role_line — the status/header one-liner for this machine's
+# role. Worker state is fully in the config file. The center-ingest
+# state of a standalone machine lives in the settings DB, so it is
+# only reported when the config file itself pins NODE_INGEST_ENABLED
+# (an env seed the server honours); otherwise the line stays plain
+# 独立 rather than guessing at the database.
+node_role_line() {
+    local center
+    center="$(env_value CENTER_URL)"
+    if [ -n "$center" ]; then
+        echo "爬虫节点（中心 ${center}，节点名 $(env_value NODE_NAME)）"
+        return
+    fi
+    case "$(env_value NODE_INGEST_ENABLED)" in
+        true|1) echo "独立（中心接入已开启）" ;;
+        false|0) echo "独立（中心接入未开启）" ;;
+        *) echo "独立" ;;
+    esac
+}
+
+# node_check CENTER_URL TOKEN — the connectivity self-check: one
+# POST /api/node/check with a single probe hash, exactly the call a
+# worker's admission checker makes. The four outcomes are reported
+# distinctly (and return 0 only for 通）; callers warn-and-continue
+# on failure — a worker fail-opens by design, so a failed check
+# must never fail an install.
+node_check() {
+    local url="${1%/}" token="$2" code
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+        -X POST "${url}/api/node/check" \
+        -H "Authorization: Bearer ${token}" \
+        -H 'Content-Type: application/json' \
+        -d '{"hashes":["0000000000000000000000000000000000000000"]}' \
+        2>/dev/null || true)"
+    case "$code" in
+        200) echo "连通性测试：通 — 中心已接受本节点的接入（${url}）"; return 0 ;;
+        503) echo "连通性测试：中心未开启节点接入 — 请在中心的管理面板 设置 → 节点接入 打开开关（${url}）"; return 1 ;;
+        401) echo "连通性测试：令牌不正确 — 与中心的 NODE_TOKEN 不一致（${url}）"; return 1 ;;
+        000|"") echo "连通性测试：连不上 — 无法访问 ${url}（网络错误或地址不对）"; return 1 ;;
+        *) echo "连通性测试：中心返回了意料外的状态 ${code}（${url}）"; return 1 ;;
+    esac
 }
 
 # ---------------------------------------------------------------- database
@@ -709,8 +839,7 @@ EOF
 }
 
 write_units() {
-    local node_bin ap wp internal_tok internal_line
-    node_bin="$(command -v node)"
+    local node_bin="" ap wp internal_tok internal_line
     ap="$(resolve_api_port)"
     wp="$(resolve_web_port)"
     # The web unit carries the first-party token so the frontend can
@@ -747,6 +876,16 @@ ReadWritePaths=${L_DATA_DIR}
 [Install]
 WantedBy=multi-user.target
 EOF
+    # A worker node gets no web unit at all: there is nothing to
+    # start. An existing unit file from a previous standalone
+    # install is left on disk (restart_services stops + disables
+    # the service), so 解除节点模式 can bring the frontend back
+    # without a reinstall.
+    if want_node_mode; then
+        log "Crawler node mode: writing only the API unit (no web service)"
+        return 0
+    fi
+    node_bin="$(command -v node)"
     cat > "${UNIT_DIR}/${WEB_UNIT}" <<EOF
 [Unit]
 Description=DHTSearch web frontend (Next.js standalone)
@@ -837,7 +976,11 @@ or the port prompts in the interactive menu)."
 check_ports_free() {
     have_systemd || return 0
     check_port_free "$(resolve_api_port)" "$API_UNIT" "API"
-    check_port_free "$(resolve_web_port)" "$WEB_UNIT" "Web"
+    # Node mode never starts the web service, so its port being busy
+    # is not this install's problem.
+    if ! want_node_mode; then
+        check_port_free "$(resolve_web_port)" "$WEB_UNIT" "Web"
+    fi
 }
 
 # ---------------------------------------------------------------- systemd
@@ -852,6 +995,15 @@ svc() {
 
 restart_services() {
     svc daemon-reload
+    if node_mode; then
+        # A worker runs only the API service. The web unit (if one
+        # is left over from a standalone install) is stopped and
+        # disabled, and stays that way across upgrades.
+        svc disable --now "$WEB_UNIT" >/dev/null 2>&1 || true
+        svc enable --now "$API_UNIT" >/dev/null 2>&1 || true
+        svc restart "$API_UNIT"
+        return 0
+    fi
     svc enable --now "$API_UNIT" "$WEB_UNIT" >/dev/null 2>&1 || true
     svc restart "$API_UNIT" "$WEB_UNIT"
 }
@@ -879,6 +1031,12 @@ wait_health() {
             journalctl -u "$API_UNIT" -n 50 --no-pager >&2 || true
         fi
         return 1
+    fi
+    # A worker node runs no web service: API health is the whole
+    # check there.
+    if node_mode; then
+        log "Node mode: web service not run, skipping the web check"
+        return 0
     fi
     # The API being up is not enough: the web unit can crash-loop on its
     # own (bad WorkingDirectory perms, missing node) while healthz passes.
@@ -1880,6 +2038,12 @@ do_install() {
     prepare_dirs_and_user
     install_package_files "$tarball"
     write_env_file
+    # Node keys go in after the config file exists (fresh template or
+    # kept file alike); write_units / restart_services below key
+    # their web handling off them.
+    if [ -n "$NODE_CENTER_OPT" ]; then
+        apply_node_config
+    fi
     write_units
     fix_permissions
     restart_services
@@ -1891,8 +2055,21 @@ do_install() {
     au_apply
     request_apply
     log "Installed DHTSearch $RESOLVED_VERSION (arch $arch)"
-    log "API: http://127.0.0.1:$(resolve_api_port)/api/healthz   Web: http://127.0.0.1:$(resolve_web_port)/"
+    if node_mode; then
+        log "API: http://127.0.0.1:$(resolve_api_port)/api/healthz   （爬虫节点模式：不运行 Web 服务）"
+    else
+        log "API: http://127.0.0.1:$(resolve_api_port)/api/healthz   Web: http://127.0.0.1:$(resolve_web_port)/"
+    fi
     log "Database: $(db_display)"
+    log "角色：$(node_role_line)"
+    if node_mode; then
+        # The self-check never fails the install: a worker fail-opens
+        # and starts pushing once the center is reachable/fixed.
+        node_check "$(env_value CENTER_URL)" "$(env_value NODE_TOKEN)" \
+            || warn "节点自检未通过（见上）：安装已完成，节点照常运行；中心修好后推送自动恢复。"
+    else
+        log "多机提示：本机可作为中心接受其他机器接入——在管理面板 设置 → 节点接入 开启即可。"
+    fi
     if [ "$LOCAL_PG_PASSWORD_NEW" = "1" ]; then
         log "Local PostgreSQL configured. Connection URL, shown only this once — save it:"
         log "  $RESOLVED_DATABASE_URL"
@@ -1972,6 +2149,12 @@ do_upgrade() {
     if [ -n "$DB_OPT" ]; then
         warn "--db is ignored by upgrade: the database backend is never changed here. Use the dhtsearch menu (数据库切换) to switch, which also migrates the data."
         DB_OPT=""
+    fi
+    if [ -n "$NODE_CENTER_OPT" ]; then
+        warn "--node-* is ignored by upgrade: the machine's role is kept as configured. Use the dhtsearch menu (爬虫节点) to change it."
+        NODE_CENTER_OPT=""
+        NODE_TOKEN_OPT=""
+        NODE_NAME_OPT=""
     fi
     # Version gate: same-or-older target means no download, no
     # backup, no service restart — return success right here.
@@ -2087,6 +2270,7 @@ do_status() {
     echo "Config:  $ENV_FILE"
     echo "Data:    $DATA_DIR"
     echo "Database: $(db_display)"
+    echo "角色：   $(node_role_line)"
     lt_sidecar_line
     echo "Ports:   API $(resolve_api_port)   Web $(resolve_web_port)"
     echo "Autostart: $(autostart_state)"
@@ -2110,7 +2294,9 @@ do_status() {
     else
         echo "Health:  API not responding on port ${port}"
     fi
-    if curl -fsS "http://127.0.0.1:${webport}/" >/dev/null 2>&1; then
+    if node_mode; then
+        echo "Health:  Web not run (crawler node mode)"
+    elif curl -fsS "http://127.0.0.1:${webport}/" >/dev/null 2>&1; then
         echo "Health:  Web OK (http://127.0.0.1:${webport}/)"
     else
         echo "Health:  Web not responding on port ${webport}"
@@ -2130,7 +2316,11 @@ autostart_state() {
 
 do_start() {
     require_root
-    svc start "$API_UNIT" "$WEB_UNIT" || { warn "failed to start the services (installed? check: systemctl status $API_UNIT)"; return 1; }
+    if node_mode; then
+        svc start "$API_UNIT" || { warn "failed to start the API service (installed? check: systemctl status $API_UNIT)"; return 1; }
+    else
+        svc start "$API_UNIT" "$WEB_UNIT" || { warn "failed to start the services (installed? check: systemctl status $API_UNIT)"; return 1; }
+    fi
     wait_health || true
 }
 
@@ -2477,12 +2667,18 @@ do_selfcheck() {
     wp="$(resolve_web_port)"
     echo "DHTSearch 自检（$(date '+%Y-%m-%d %H:%M:%S')）"
     echo "版本：    $(installed_version)"
+    echo "角色：    $(node_role_line)"
     if have_systemd; then
         local a w
         a="$(systemctl is-active "$API_UNIT" 2>/dev/null || echo unknown)"
         w="$(systemctl is-active "$WEB_UNIT" 2>/dev/null || echo unknown)"
-        echo "服务：    API $a / Web $w"
-        if [ "$a" != "active" ] || [ "$w" != "active" ]; then fail=1; fi
+        if node_mode; then
+            echo "服务：    API $a / Web $w（节点模式，不运行）"
+            if [ "$a" != "active" ]; then fail=1; fi
+        else
+            echo "服务：    API $a / Web $w"
+            if [ "$a" != "active" ] || [ "$w" != "active" ]; then fail=1; fi
+        fi
     else
         echo "服务：    无 systemd，跳过状态检查"
     fi
@@ -2491,20 +2687,24 @@ do_selfcheck() {
     else
         echo "端口：    API $ap 无监听"; fail=1
     fi
-    if [ -n "$(port_listeners "$wp")" ]; then
-        echo "端口：    Web $wp 监听中"
-    else
-        echo "端口：    Web $wp 无监听"; fail=1
+    if ! node_mode; then
+        if [ -n "$(port_listeners "$wp")" ]; then
+            echo "端口：    Web $wp 监听中"
+        else
+            echo "端口：    Web $wp 无监听"; fail=1
+        fi
     fi
     if curl -fsS "http://127.0.0.1:${ap}/api/healthz" >/dev/null 2>&1; then
         echo "健康：    API healthz OK"
     else
         echo "健康：    API healthz 无响应"; fail=1
     fi
-    if curl -fsS "http://127.0.0.1:${wp}/" >/dev/null 2>&1; then
-        echo "健康：    Web OK"
-    else
-        echo "健康：    Web 无响应"; fail=1
+    if ! node_mode; then
+        if curl -fsS "http://127.0.0.1:${wp}/" >/dev/null 2>&1; then
+            echo "健康：    Web OK"
+        else
+            echo "健康：    Web 无响应"; fail=1
+        fi
     fi
     if [ -d "$DATA_DIR" ]; then
         echo "磁盘：    数据目录所在盘 $(df -h "$DATA_DIR" | awk 'NR==2 {print $4 " 可用 / 共 " $2 "（已用 " $5 "）"}')"
@@ -2900,6 +3100,120 @@ menu_stop() {
     menu_pause
 }
 
+# ------------------------------------------------------- crawler node menu
+
+# prompt_line LABEL DEFAULT — one-line free-text prompt: empty
+# input takes DEFAULT. The value goes to stdout; all prompting goes
+# to stderr so the value can be captured.
+prompt_line() {
+    local label="$1" def="$2" v
+    if [ -n "$def" ]; then
+        printf '%s（默认 %s）: ' "$label" "$def" >&2
+    else
+        printf '%s: ' "$label" >&2
+    fi
+    if ! read -r v; then return 1; fi
+    echo "${v:-$def}"
+}
+
+# menu_node_configure — ask for center URL / token (hidden) / name,
+# write the three keys, rewrite the units for the new role, restart
+# the API service, then run the connectivity self-check (a failed
+# check only warns: the configuration stays and the worker
+# fail-opens until the center is fixed).
+menu_node_configure() {
+    local url token name cur_token
+    url="$(prompt_line "中心地址（中心的 http(s) 地址，如 https://center.example:10800）" "$(env_value CENTER_URL)")" || return 0
+    case "$url" in
+        http://*|https://*) ;;
+        *) echo "地址无效：必须以 http:// 或 https:// 开头。"; return 0 ;;
+    esac
+    cur_token="$(env_value NODE_TOKEN)"
+    if [ -n "$cur_token" ]; then
+        printf '节点令牌（输入不回显，留空保持不变）: '
+    else
+        printf '节点令牌（输入不回显）: '
+    fi
+    if ! read -r -s token; then echo; return 0; fi
+    echo
+    token="${token:-$cur_token}"
+    if [ -z "$token" ]; then
+        echo "令牌不能为空：中心会拒绝没有令牌的节点。"
+        return 0
+    fi
+    name="$(prompt_line "节点名" "$(env_value NODE_NAME)")" || return 0
+    [ -n "$name" ] || name="$(hostname 2>/dev/null || echo node)"
+    echo
+    echo "节点接入汇总："
+    echo "  中心地址：$url"
+    echo "  节点名：  $name"
+    echo "  令牌：    $(mask_secret_head "$token")"
+    echo "  本机 Web 服务将停止并禁用（节点只运行 API 与爬虫）。"
+    if ! confirm "确认保存并重启 API 服务？"; then return 0; fi
+    set_env_value CENTER_URL "$url"
+    set_env_value NODE_TOKEN "$token"
+    set_env_value NODE_NAME "$name"
+    write_units
+    restart_services
+    wait_health || true
+    node_check "$url" "$token" \
+        || echo "自检未通过：配置已保存，节点照常运行（失败开放）；中心修好后推送自动恢复。"
+}
+
+# menu_node_remove — back to standalone: drop the three keys,
+# regenerate the units (the web unit is written again), and restart
+# — restart_services re-enables the web service when its unit file
+# exists, exactly the pre-node behaviour.
+menu_node_remove() {
+    if ! node_mode; then
+        echo "本机当前不是爬虫节点，无需解除。"
+        return 0
+    fi
+    if ! confirm "确认解除节点模式？本机恢复独立部署，Web 服务将重新启用。"; then return 0; fi
+    clear_node_config
+    write_units
+    restart_services
+    wait_health || true
+    echo "已解除节点模式，当前角色：$(node_role_line)"
+}
+
+# menu_node — the 爬虫节点 submenu: the current role first (token
+# as set/unset only, never a value), then the three actions.
+menu_node() {
+    local c tok_state
+    while true; do
+        echo "爬虫节点接入"
+        echo "  当前角色：$(node_role_line)"
+        if node_mode; then
+            tok_state="未设置"
+            [ -n "$(env_value NODE_TOKEN)" ] && tok_state="已设置"
+            echo "  令牌：    $tok_state"
+        else
+            echo "  提示：接受其他节点接入本机（中心侧开关）在管理面板 设置 → 节点接入；本菜单管本机作为节点接入别的中心。"
+        fi
+        echo "  1) 配置 / 修改节点接入"
+        echo "  2) 解除节点模式"
+        echo "  3) 连通性测试"
+        echo "  0) 返回"
+        printf '选择： '
+        if ! read -r c; then return 0; fi
+        case "$c" in
+            1) menu_node_configure ;;
+            2) menu_node_remove ;;
+            3)
+                if node_mode; then
+                    node_check "$(env_value CENTER_URL)" "$(env_value NODE_TOKEN)" || true
+                else
+                    echo "本机未配置节点接入，先选 1 配置。"
+                fi
+                ;;
+            0) return 0 ;;
+            *) echo "未知选择：$c" ;;
+        esac
+        menu_pause
+    done
+}
+
 menu_autostart() {
     echo "开机自启：当前为 $(autostart_state)（$API_UNIT / $WEB_UNIT）"
     echo "  1) 开启开机自启"
@@ -3140,7 +3454,7 @@ menu_installed() {
 # the handler. 安装 itself stays unguarded.
 menu_require_installed() {
     if menu_installed; then return 0; fi
-    echo "尚未安装，请先选「15) 安装 / 重新安装」。"
+    echo "尚未安装，请先选「16) 安装 / 重新安装」。"
     menu_pause
     return 1
 }
@@ -3213,6 +3527,9 @@ menu_header() {
         [ -n "$svc" ] && menu_kv "API 服务" "$svc"
         svc="$(menu_svc_state "$WEB_UNIT")"
         [ -n "$svc" ] && menu_kv "Web 服务" "$svc"
+        if node_mode; then
+            menu_kv "角色" "$(node_role_line)"
+        fi
         menu_kv "自动更新" "$(menu_au_label)"
         menu_kv "系统" "$(menu_sys_line)"
         if [ -n "$MENU_LATEST_FILE" ] && [ -s "$MENU_LATEST_FILE" ]; then
@@ -3222,7 +3539,7 @@ menu_header() {
             menu_kv "更新" "发现新版本 $latest，选 7 升级到最新版"
         fi
     else
-        menu_kv "状态" "未安装（选 15 安装）"
+        menu_kv "状态" "未安装（选 16 安装）"
         menu_kv "系统" "$(menu_sys_line)"
     fi
 }
@@ -3267,17 +3584,18 @@ menu() {
         menu_row 8 "自动更新设置 [$au_mark]"
         menu_section "配置"
         menu_row 9 "修改端口"
-        menu_row 10 "数据库切换"
-        menu_row 11 "配置管理"
-        menu_row 12 "开机自启$as_mark"
+        menu_row 10 "爬虫节点"
+        menu_row 11 "数据库切换"
+        menu_row 12 "配置管理"
+        menu_row 13 "开机自启$as_mark"
         menu_section "数据"
-        menu_row 13 "备份与恢复"
-        menu_row 14 "自检"
+        menu_row 14 "备份与恢复"
+        menu_row 15 "自检"
         menu_section "系统"
-        menu_row 15 "安装 / 重新安装"
-        menu_row 16 "卸载"
+        menu_row 16 "安装 / 重新安装"
+        menu_row 17 "卸载"
         menu_row 0 "退出"
-        printf '请选择 [0-16]： '
+        printf '请选择 [0-17]： '
         if ! read -r choice; then exit 0; fi
         case "$choice" in
             1) menu_require_installed && { do_status; menu_pause; } ;;
@@ -3289,13 +3607,14 @@ menu() {
             7) menu_require_installed && menu_upgrade ;;
             8) menu_require_installed && menu_auto_update ;;
             9) menu_require_installed && menu_change_port ;;
-            10) menu_require_installed && menu_switch_db ;;
-            11) menu_require_installed && menu_config ;;
-            12) menu_require_installed && menu_autostart ;;
-            13) menu_require_installed && menu_backup ;;
-            14) menu_require_installed && menu_selfcheck ;;
-            15) menu_install ;;
-            16) menu_require_installed && menu_uninstall ;;
+            10) menu_require_installed && menu_node ;;
+            11) menu_require_installed && menu_switch_db ;;
+            12) menu_require_installed && menu_config ;;
+            13) menu_require_installed && menu_autostart ;;
+            14) menu_require_installed && menu_backup ;;
+            15) menu_require_installed && menu_selfcheck ;;
+            16) menu_install ;;
+            17) menu_require_installed && menu_uninstall ;;
             0) exit 0 ;;
             *) echo "未知选择：$choice" ;;
         esac
@@ -3331,6 +3650,22 @@ parse_opts() {
             --database-url)
                 [ $# -ge 2 ] || die "--database-url needs a value"
                 DATABASE_URL_OPT="$2"
+                shift 2 ;;
+            --node-center)
+                [ $# -ge 2 ] || die "--node-center needs a value"
+                NODE_CENTER_OPT="$2"
+                case "$NODE_CENTER_OPT" in
+                    http://*|https://*) ;;
+                    *) die "invalid --node-center: '$NODE_CENTER_OPT' (must start with http:// or https://)" ;;
+                esac
+                shift 2 ;;
+            --node-token)
+                [ $# -ge 2 ] || die "--node-token needs a value"
+                NODE_TOKEN_OPT="$2"
+                shift 2 ;;
+            --node-name)
+                [ $# -ge 2 ] || die "--node-name needs a value"
+                NODE_NAME_OPT="$2"
                 shift 2 ;;
             --dry-run) DRY_RUN=1; shift ;;
             --purge) PURGE=1; shift ;;
