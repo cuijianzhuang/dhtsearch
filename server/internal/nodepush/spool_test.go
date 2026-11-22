@@ -386,3 +386,42 @@ func TestSpoolReplayResumesWithinSegment(t *testing.T) {
 		t.Fatalf("spool files after full replay = %d, want 0", len(files))
 	}
 }
+
+// TestSpoolOpenEnforcesCap: segments written under a generous cap
+// must be trimmed when the spool is reopened under a smaller one —
+// previously the cap only applied to new appends, so a lowered
+// NODE_SPOOL_MAX_MB left the spool over its bound until the first
+// append of the new run.
+func TestSpoolOpenEnforcesCap(t *testing.T) {
+	dir := t.TempDir()
+	sp, err := OpenSpool(dir, 1<<30, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp.segBytes = 300 // ~one batch per segment
+	bigName := strings.Repeat("n", 120)
+	mk := func(c rune) spoolBatch {
+		return spoolBatch{Records: []RecordWire{{InfoHash: strings.Repeat(string(c), 40), Name: bigName}}}
+	}
+	for _, c := range []rune{'a', 'b', 'c'} {
+		if err := sp.Append(mk(c)); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	segs, _, _ := sp.Depth()
+	if segs != 3 {
+		t.Fatalf("segments before reopen = %d, want 3", segs)
+	}
+
+	sp2, err := OpenSpool(dir, 620, testLogger()) // ~two segments fit
+	if err != nil {
+		t.Fatal(err)
+	}
+	segs, _, recs := sp2.Depth()
+	if segs != 2 || recs != 2 {
+		t.Fatalf("after reopen: %d segs / %d records, want 2/2 (oldest dropped at open)", segs, recs)
+	}
+	if sp2.DroppedRecords() != 1 {
+		t.Fatalf("DroppedRecords = %d, want 1", sp2.DroppedRecords())
+	}
+}

@@ -138,6 +138,31 @@ func (c *peerHintCache) add(ih [20]byte, ap netip.AddrPort) {
 	c.seq++
 	c.m[ih] = &hintEntry{peers: []netip.AddrPort{ap}, exp: now.Add(c.ttl), seq: c.seq}
 	c.ring = append(c.ring, hintRingSlot{ih: ih, seq: c.seq})
+	// Bound the ring itself. Slots are consumed only by the
+	// eviction loop above, which runs only when the map is at its
+	// cap — but in the normal regime entries are taken (consumed)
+	// or expire long before the cap is reached, so without this
+	// the ring grew by one slot (~28 B) per distinct hinted hash
+	// forever: a slow, unbounded leak riding under a bounded map.
+	// When the ring exceeds twice the entry cap, rebuild it from
+	// the live entries (in insertion order, so eviction order is
+	// preserved). The rebuild is O(ring) but happens at most once
+	// per maxEntries inserts, so inserts stay amortized O(1) and
+	// len(ring) never exceeds 2*maxEntries+1.
+	if len(c.ring) > 2*c.maxEntries {
+		live := c.ring[:0]
+		for _, slot := range c.ring {
+			if e, ok := c.m[slot.ih]; ok && e.seq == slot.seq {
+				live = append(live, slot)
+			}
+		}
+		// Zero the tail so dropped slots' hashes don't linger in
+		// the backing array beyond the live length.
+		for i := len(live); i < len(c.ring); i++ {
+			c.ring[i] = hintRingSlot{}
+		}
+		c.ring = live
+	}
 }
 
 // take returns and deletes a hash's hints — a hint is spent on the

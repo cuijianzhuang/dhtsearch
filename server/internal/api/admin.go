@@ -192,6 +192,10 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		"reports_pending": reportsPending,
 		"dialect":         s.st.Dialect(),
 		"stats":           counters,
+		// The serving process's own memory footprint (see
+		// runtime.go): the overview's system panel shows it so a
+		// memory soak on a real deployment needs no shell access.
+		"runtime": runtimeStatus(),
 		"fetch": map[string]any{
 			"fetched":           counters["fetched"],
 			"timed_out":         counters["meta_timed_out"],

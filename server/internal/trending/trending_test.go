@@ -5,6 +5,7 @@ import (
 
 	"context"
 	"dhtsearch/server/internal/store"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -426,5 +427,59 @@ func TestTriggerRefreshRespectsDisabledGate(t *testing.T) {
 	}
 	if snap := svc.Get(); len(snap.Movies) != 0 {
 		t.Fatalf("disabled service populated a snapshot: %+v", snap)
+	}
+}
+
+// TestNamesCacheCapped: the subject-name cache used to grow by one
+// entry per subject that ever charted (and bloat the persisted
+// state with it). At maxCachedNames, resolving a new subject must
+// evict rather than grow.
+func TestNamesCacheCapped(t *testing.T) {
+	var fail atomic.Bool
+	var calls atomic.Int64
+	srv := httptest.NewServer(stub(&fail, &calls))
+	defer srv.Close()
+
+	svc := New(Config{BaseURL: srv.URL, Interval: time.Hour})
+	svc.mu.Lock()
+	for i := 0; i < maxCachedNames; i++ {
+		svc.names[fmt.Sprintf("old-%d", i)] = "Old"
+	}
+	svc.mu.Unlock()
+
+	got := svc.englishTitle(context.Background(), subject{ID: "fresh", Title: "新片"})
+	if got == "" {
+		t.Fatal("englishTitle returned empty")
+	}
+	svc.mu.RLock()
+	n := len(svc.names)
+	_, fresh := svc.names["fresh"]
+	svc.mu.RUnlock()
+	if n > maxCachedNames {
+		t.Fatalf("names = %d, want <= %d", n, maxCachedNames)
+	}
+	if !fresh {
+		t.Fatal("freshly resolved subject not cached")
+	}
+}
+
+// TestRestoreTrimsOversizedNames: a state blob persisted by an
+// older, uncapped build is trimmed back to the cap on load.
+func TestRestoreTrimsOversizedNames(t *testing.T) {
+	names := make(map[string]string, maxCachedNames+100)
+	for i := 0; i < maxCachedNames+100; i++ {
+		names[fmt.Sprintf("id-%d", i)] = "T"
+	}
+	data, err := json.Marshal(persistedState{Names: names})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := New(Config{BaseURL: "http://127.0.0.1:1", Interval: time.Hour, Store: &memStore{data: data}})
+	svc.Restore(context.Background())
+	svc.mu.RLock()
+	n := len(svc.names)
+	svc.mu.RUnlock()
+	if n > maxCachedNames {
+		t.Fatalf("restored names = %d, want <= %d", n, maxCachedNames)
 	}
 }

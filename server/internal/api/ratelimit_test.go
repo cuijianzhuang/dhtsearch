@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -169,5 +170,62 @@ func TestAdminExemptFromPublicLimiter(t *testing.T) {
 	// The public API is still throttled afterwards.
 	if got := get("/api/search?q=", ""); got != http.StatusTooManyRequests {
 		t.Fatalf("public request after admin calls: status %d, want 429", got)
+	}
+}
+
+// TestIPLimiterHardCapEvictsLRU fills the limiter past maxBuckets
+// with buckets that are all ACTIVE (touched well inside the idle
+// TTL), so the idle sweep alone can never shrink the map. The hard
+// cap must still hold, by evicting least-recently-used buckets.
+func TestIPLimiterHardCapEvictsLRU(t *testing.T) {
+	l := newIPLimiter(1e9, 1<<30) // refill/burst never refuse
+	base := time.Unix(1_700_000_000, 0)
+	var tick int64
+	l.now = func() time.Time {
+		tick++
+		return base.Add(time.Duration(tick) * time.Millisecond)
+	}
+	key := func(i int) string { return "k" + strconv.Itoa(i) }
+	total := maxBuckets + 5000
+	for i := 0; i < total; i++ {
+		if !l.allow(key(i)) {
+			t.Fatalf("allow(%d) refused", i)
+		}
+		if len(l.buckets) > maxBuckets {
+			t.Fatalf("buckets = %d > cap %d at insert %d", len(l.buckets), maxBuckets, i)
+		}
+	}
+	if _, ok := l.buckets[key(total-1)]; !ok {
+		t.Fatal("most recent key missing")
+	}
+	if _, ok := l.buckets[key(0)]; ok {
+		t.Fatal("oldest key survived; want LRU eviction")
+	}
+}
+
+// TestTokenLimiterHardCapEvictsLRU is the same guarantee for the
+// per-token limiter.
+func TestTokenLimiterHardCapEvictsLRU(t *testing.T) {
+	l := newTokenLimiter()
+	base := time.Unix(1_700_000_000, 0)
+	var tick int64
+	l.now = func() time.Time {
+		tick++
+		return base.Add(time.Duration(tick) * time.Millisecond)
+	}
+	total := maxBuckets + 5000
+	for i := 0; i < total; i++ {
+		if !l.allow(int64(i), 1<<30) {
+			t.Fatalf("allow(%d) refused", i)
+		}
+		if len(l.buckets) > maxBuckets {
+			t.Fatalf("buckets = %d > cap %d at insert %d", len(l.buckets), maxBuckets, i)
+		}
+	}
+	if _, ok := l.buckets[int64(total-1)]; !ok {
+		t.Fatal("most recent token missing")
+	}
+	if _, ok := l.buckets[int64(0)]; ok {
+		t.Fatal("oldest token survived; want LRU eviction")
 	}
 }

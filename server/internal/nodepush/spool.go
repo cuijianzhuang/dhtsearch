@@ -145,6 +145,12 @@ func OpenSpool(dir string, maxBytes int64, logger *log.Logger) (*Spool, error) {
 			s.nextSeq = seq + 1
 		}
 	}
+	// Enforce the size cap on what was found, not just on future
+	// appends: the cap may have been lowered since the segments
+	// were written (or files added out of band), and without this
+	// pass the spool would sit over its configured bound until the
+	// first Append of the new run.
+	s.enforceCapLocked()
 	return s, nil
 }
 

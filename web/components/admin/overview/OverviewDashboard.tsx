@@ -542,6 +542,18 @@ export default function OverviewDashboard({
           <DetailRows
             rows={[
               ["数据库后端", o.dialect],
+              ...(o.runtime
+                ? ([
+                    ...(o.runtime.rss > 0
+                      ? [["进程内存 RSS", formatSize(o.runtime.rss)] as [string, string]]
+                      : []),
+                    [
+                      "Go 堆（已用 / 总量）",
+                      `${formatSize(o.runtime.heap_alloc)} / ${formatSize(o.runtime.heap_sys)}`,
+                    ],
+                    ["Goroutine", formatCount(o.runtime.goroutines)],
+                  ] as [string, string][])
+                : []),
               ...(o.feeds
                 ? Object.entries(o.feeds).map(
                     ([k, v]) => [`订阅源 ${k}`, formatCount(v)] as [string, string]

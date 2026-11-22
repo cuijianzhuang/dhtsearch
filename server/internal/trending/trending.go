@@ -46,6 +46,14 @@ const (
 	// maxBody bounds how much of a response is read; the real payloads are a
 	// few KB, so 1 MB means "something is very wrong upstream".
 	maxBody = 1 << 20
+	// maxCachedNames caps the subject-ID -> English-title cache. The
+	// charts hold at most a few dozen live subjects, but without a
+	// cap the cache (and the persisted blob carrying it) grew by one
+	// entry for every subject that ever charted, forever. The cache
+	// is purely an optimization — an evicted subject is simply
+	// re-resolved if it charts again — so at the cap the insert path
+	// evicts arbitrary entries until there is room.
+	maxCachedNames = 4096
 	// browserUA is required: Douban serves these JSON endpoints to browsers
 	// and rejects obvious non-browser clients.
 	browserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
@@ -207,6 +215,14 @@ func (s *Service) Restore(ctx context.Context) {
 	s.snap = st.Snapshot
 	if st.Names != nil {
 		s.names = st.Names
+		// States persisted by older builds can carry an uncapped
+		// cache; trim it back on load so the blob stops growing.
+		for id := range s.names {
+			if len(s.names) <= maxCachedNames {
+				break
+			}
+			delete(s.names, id)
+		}
 	}
 	if !st.Snapshot.UpdatedAt.IsZero() {
 		s.cfg.Logger.Printf("trending: restored snapshot from store (updated %s); serving it until the next successful fetch",
@@ -492,6 +508,14 @@ func (s *Service) englishTitle(ctx context.Context, sub subject) string {
 		name = sub.Title
 	}
 	s.mu.Lock()
+	if _, ok := s.names[sub.ID]; !ok && len(s.names) >= maxCachedNames {
+		for id := range s.names {
+			if len(s.names) < maxCachedNames {
+				break
+			}
+			delete(s.names, id)
+		}
+	}
 	s.names[sub.ID] = name
 	s.mu.Unlock()
 	return name

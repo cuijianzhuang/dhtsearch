@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -15,9 +16,11 @@ const (
 	// returning client tokens it was still owed.
 	bucketIdleTTL = 10 * time.Minute
 	sweepEvery    = time.Minute
-	// Hard cap on tracked addresses; when a large botnet pushes the map past
-	// this, sweeping runs on every call until it shrinks, so memory stays
-	// bounded even if the timer-based sweep cannot keep up.
+	// Hard cap on tracked addresses. The idle sweep cannot enforce it
+	// alone (active buckets are never swept), so inserting past the
+	// cap additionally evicts least-recently-used buckets — see
+	// evictToFit. Memory stays bounded even under a flood of distinct
+	// active keys.
 	maxBuckets = 1 << 17
 )
 
@@ -62,6 +65,7 @@ func (l *ipLimiter) allow(key string) bool {
 	}
 	b, ok := l.buckets[key]
 	if !ok {
+		l.evictToFit(now)
 		b = &bucket{tokens: l.burst, last: now}
 		l.buckets[key] = b
 	} else {
@@ -81,6 +85,39 @@ func (l *ipLimiter) sweep(now time.Time) {
 		if now.Sub(b.last) > bucketIdleTTL {
 			delete(l.buckets, k)
 		}
+	}
+}
+
+// evictToFit makes room for one new bucket when the map is at the
+// hard cap. The idle sweep alone cannot guarantee the cap: buckets
+// touched within bucketIdleTTL are never swept, so a flood of
+// distinct ACTIVE keys (a botnet, or one client minting per-user /
+// per-hash keys faster than the TTL) would otherwise grow the map
+// past maxBuckets for as long as the flood lasts. When the sweep
+// leaves the map at the cap, the least-recently-used buckets are
+// evicted down to 7/8 of the cap — an evicted client simply starts
+// over with a full bucket, the same cost as an idle eviction, and
+// the batch eviction amortizes the sort across many inserts.
+func (l *ipLimiter) evictToFit(now time.Time) {
+	if len(l.buckets) < maxBuckets {
+		return
+	}
+	l.sweep(now)
+	if len(l.buckets) < maxBuckets {
+		return
+	}
+	type aged struct {
+		key  string
+		last time.Time
+	}
+	all := make([]aged, 0, len(l.buckets))
+	for k, b := range l.buckets {
+		all = append(all, aged{k, b.last})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].last.Before(all[j].last) })
+	target := maxBuckets * 7 / 8
+	for i := 0; i < len(all) && len(l.buckets) > target; i++ {
+		delete(l.buckets, all[i].key)
 	}
 }
 

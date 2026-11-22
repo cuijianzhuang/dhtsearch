@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -43,8 +44,14 @@ const (
 	// forgetAfter drops bookkeeping for hashes no feed has listed for this
 	// long, keeping memory bounded on a long-running process.
 	forgetAfter = 7 * 24 * time.Hour
-	maxBody     = 8 << 20
-	browserUA   = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+	// maxEntries is a hard backstop on the entries map. forgetAfter
+	// bounds it by TIME (everything seen in the last 7 days stays),
+	// so a feed firehose inside that window could still grow it
+	// without limit; at the cap the stalest entries are evicted
+	// early. An evicted hash that reappears is simply treated as new.
+	maxEntries = 100_000
+	maxBody    = 8 << 20
+	browserUA  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
 		"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
@@ -244,6 +251,35 @@ func (s *Service) poll(ctx context.Context) {
 	s.mu.Unlock()
 }
 
+// evictStalestLocked makes room in the entries map when it reaches
+// maxEntries: first the entries the forgetAfter sweep would drop
+// anyway, then — if the map is still at the cap — the oldest
+// lastSeen entries in a batch, so the sort cost is amortized over
+// many inserts. Caller must hold s.mu.
+func (s *Service) evictStalestLocked() {
+	cutoff := s.now().Add(-forgetAfter)
+	for h, e := range s.entries {
+		if e.lastSeen.Before(cutoff) {
+			delete(s.entries, h)
+		}
+	}
+	if len(s.entries) < maxEntries {
+		return
+	}
+	type aged struct {
+		hash string
+		seen time.Time
+	}
+	all := make([]aged, 0, len(s.entries))
+	for h, e := range s.entries {
+		all = append(all, aged{h, e.lastSeen})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].seen.Before(all[j].seen) })
+	for i := 0; i < len(all) && i < 1024 && len(s.entries) >= maxEntries; i++ {
+		delete(s.entries, all[i].hash)
+	}
+}
+
 // handle routes one feed item: alias it if indexed, otherwise queue a fetch.
 func (s *Service) handle(it Item) {
 	now := s.now()
@@ -251,6 +287,9 @@ func (s *Service) handle(it Item) {
 	s.stats.Items++
 	e, ok := s.entries[it.InfoHash]
 	if !ok {
+		if len(s.entries) >= maxEntries {
+			s.evictStalestLocked()
+		}
 		e = &entry{}
 		s.entries[it.InfoHash] = e
 	}

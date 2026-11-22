@@ -890,6 +890,16 @@ func (s *Server) oidcDiscovery(ctx context.Context, issuer string) (*oidcProvide
 	if s.oidcProviders == nil {
 		s.oidcProviders = map[string]*oidcProvider{}
 	}
+	// Only one issuer is ever configured at a time, and every caller
+	// passes that issuer — providers cached under a previous issuer
+	// (an operator reconfigured OIDC) are dead weight, so drop them
+	// instead of letting the map accumulate one entry per issuer the
+	// process has ever seen.
+	for other := range s.oidcProviders {
+		if other != issuer {
+			delete(s.oidcProviders, other)
+		}
+	}
 	s.oidcProviders[issuer] = p
 	s.oidcMu.Unlock()
 	return p, nil

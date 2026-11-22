@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -323,5 +324,34 @@ func TestRunQueueDelivers(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("no record delivered")
+	}
+}
+
+// TestAttemptPeerSetsCapped: a peer feeding PEX additions could
+// grow an attempt's pool/queued/tried without limit for the whole
+// fetch timeout. Past maxAttemptPeers distinct candidates, new
+// addresses are dropped; completed blobs are likewise capped.
+func TestAttemptPeerSetsCapped(t *testing.T) {
+	a := newAttempt(nil, [20]byte{}, strings.Repeat("a", 40))
+	addrs := make([]string, 0, 2000)
+	for i := 0; i < 2000; i++ {
+		addrs = append(addrs, fmt.Sprintf("10.0.%d.%d:6881", i>>8, i&0xff))
+	}
+	a.addPeers(addrs)
+	a.mu.Lock()
+	remembered := len(a.tried) + len(a.queued)
+	pool := len(a.pool)
+	a.mu.Unlock()
+	if remembered > maxAttemptPeers || pool > maxAttemptPeers {
+		t.Fatalf("remembered = %d, pool = %d, want both <= %d", remembered, pool, maxAttemptPeers)
+	}
+	for i := 0; i < maxCompletedBlobs+10; i++ {
+		a.complete([]byte{1})
+	}
+	a.mu.Lock()
+	n := len(a.completed)
+	a.mu.Unlock()
+	if n > maxCompletedBlobs {
+		t.Fatalf("completed = %d, want <= %d", n, maxCompletedBlobs)
 	}
 }

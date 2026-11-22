@@ -197,3 +197,43 @@ func itoa(i int) string {
 	}
 	return string(b)
 }
+
+// TestRestoreRespectsCap: while a flush is in flight the pending
+// set restarts empty and can refill to the cap with NEW terms; the
+// failed batch's restore must not stack its own cap's worth on top.
+// Before the fix, every failed flush cycle under a store outage
+// added up to maxPendingTerms more entries, unbounded.
+func TestRestoreRespectsCap(t *testing.T) {
+	st := openStore(t)
+	svc := New(st, nil)
+	fixedNow(svc, testInstant)
+	day := store.SearchTermDay(testInstant)
+
+	for i := 0; i < maxPendingTerms; i++ {
+		svc.Record(termName(i), termName(i))
+	}
+	batch := make(map[pendingKey]*pendingTerm)
+	for i := 0; i < maxPendingTerms; i++ {
+		batch[pendingKey{day: day, term: "batch" + termName(i)}] = &pendingTerm{display: "x", count: 3}
+	}
+	svc.restore(batch)
+	svc.mu.Lock()
+	n := len(svc.pending)
+	svc.mu.Unlock()
+	if n > maxPendingTerms {
+		t.Fatalf("pending after restore = %d, want <= %d", n, maxPendingTerms)
+	}
+	if svc.Dropped() == 0 {
+		t.Fatal("restore dropped nothing at the cap; want Dropped() > 0")
+	}
+	// Keys already pending still merge their counts at the cap.
+	svc.restore(map[pendingKey]*pendingTerm{
+		{day: day, term: termName(0)}: {display: "x", count: 5},
+	})
+	svc.mu.Lock()
+	got := svc.pending[pendingKey{day: day, term: termName(0)}].count
+	svc.mu.Unlock()
+	if got != 6 {
+		t.Fatalf("merged count = %d, want 6 (1 recorded + 5 restored)", got)
+	}
+}

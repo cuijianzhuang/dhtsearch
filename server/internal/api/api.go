@@ -880,6 +880,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			"pending":       pending,
 			"blocked":       blocked,
 		},
+		// The serving process's own memory footprint (see
+		// runtime.go): a long-run soak is judged from these gauges.
+		"runtime": runtimeStatus(),
 	}
 	s.metaStatusInto(resp["fetch"].(map[string]any))
 	if s.crawler != nil {
