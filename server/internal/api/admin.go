@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -372,12 +373,22 @@ func toAdminItem(t store.AdminTorrent, trackers []string) adminItem {
 	}
 }
 
-// adminPage parses and clamps the shared pagination parameters the same
-// way handleSearch does.
+// adminPage parses the shared pagination parameters for the admin
+// handlers. Unlike handleSearch it does NOT cap the offset at
+// maxOffset: the public guard exists to stop anonymous deep scraping,
+// but the admin console is an authenticated single-operator surface and
+// the operator must be able to reach every page of the list — with a
+// million torrents at 20 per page, the maxOffset cap silently rewrote
+// every page past 501 to page 501 while the UI showed the requested
+// number. The only remaining page bound keeps (page-1)*pageSize from
+// overflowing int; at ~2.1 billion pages it restricts nothing real.
 func adminPage(r *http.Request) (page, pageSize int) {
 	page = atoiDefault(r.URL.Query().Get("page"), 1)
 	if page < 1 {
 		page = 1
+	}
+	if page > math.MaxInt32 {
+		page = math.MaxInt32
 	}
 	pageSize = atoiDefault(r.URL.Query().Get("page_size"), defaultPerPage)
 	if pageSize < 1 {
@@ -385,9 +396,6 @@ func adminPage(r *http.Request) (page, pageSize int) {
 	}
 	if pageSize > maxPageSize {
 		pageSize = maxPageSize
-	}
-	if (page-1)*pageSize > maxOffset {
-		page = maxOffset/pageSize + 1
 	}
 	return page, pageSize
 }

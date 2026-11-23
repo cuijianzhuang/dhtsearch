@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -521,4 +523,83 @@ func TestAdminListSortAndFilters(t *testing.T) {
 	check("size=100m_1g", 0, []string{})
 	check("size=gt10g", 0, []string{})
 	check("sort=bogus&category=bogus&size=bogus", 3, []string{hashC, hashB, hashA})
+}
+
+// TestAdminPageNotClamped locks the deep-pagination fix: adminPage must
+// not rewrite a large page number the way handleSearch's maxOffset
+// guard does. Production holds ~1.1M torrents — 55k pages at 20 per
+// page — and every page past 501 used to come back as page 501's data
+// while the UI showed the requested number.
+func TestAdminPageNotClamped(t *testing.T) {
+	cases := []struct {
+		query              string
+		wantPage, wantSize int
+	}{
+		{"", 1, 20},
+		{"page=501&page_size=20", 501, 20},
+		{"page=502&page_size=20", 502, 20},
+		{"page=55009&page_size=20", 55009, 20},
+		{"page=10002&page_size=1", 10002, 1},
+		{"page=0", 1, 20},
+		{"page=-3", 1, 20},
+		{"page_size=0", 1, 20},
+		{"page_size=500", 1, 100},              // the page-size cap is unchanged
+		{"page=3000000000", math.MaxInt32, 20}, // overflow guard only
+	}
+	for _, c := range cases {
+		r := httptest.NewRequest("GET", "/api/admin/torrents?"+c.query, nil)
+		page, pageSize := adminPage(r)
+		if page != c.wantPage || pageSize != c.wantSize {
+			t.Errorf("%q: adminPage = (%d, %d), want (%d, %d)",
+				c.query, page, pageSize, c.wantPage, c.wantSize)
+		}
+	}
+}
+
+// TestAdminListDeepPage seeds just over maxOffset rows and asks for the
+// very last page at page_size=1: its offset (maxOffset+1) exceeds the
+// old cap, so before the fix the handler silently served the previous
+// page's row and echoed that page number instead of the requested one.
+func TestAdminListDeepPage(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	const n = maxOffset + 2
+	for i := 0; i < n; i++ {
+		if err := st.Upsert(store.Torrent{
+			InfoHash:  fmt.Sprintf("%040x", i),
+			Name:      fmt.Sprintf("torrent-%d", i),
+			TotalSize: 1 << 20,
+			FileCount: 1,
+			Files:     []filter.File{{Path: "f.bin", Size: 1 << 20}},
+			CreatedAt: int64(1000 + i),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(New(st, nil, nil, Options{AdminToken: testAdminToken}).Handler())
+	t.Cleanup(srv.Close)
+
+	// Newest first, so the last page holds the oldest row (i=0).
+	code, m := adminReq(t, "GET",
+		fmt.Sprintf("%s/api/admin/torrents?page=%d&page_size=1", srv.URL, n),
+		testAdminToken, nil)
+	if code != 200 {
+		t.Fatalf("deep page: code %d (%v)", code, m)
+	}
+	if m["page"].(float64) != n {
+		t.Fatalf("deep page: echoed page %v, want %d", m["page"], n)
+	}
+	if m["total"].(float64) != n {
+		t.Fatalf("deep page: total %v, want %d", m["total"], n)
+	}
+	results := m["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("deep page: %d results, want 1", len(results))
+	}
+	if got := results[0].(map[string]any)["info_hash"]; got != fmt.Sprintf("%040x", 0) {
+		t.Fatalf("deep page: result %v, want the oldest torrent", got)
+	}
 }
