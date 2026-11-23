@@ -750,6 +750,64 @@ func main() {
 
 	trackerList := mgr.List(settings.KeyTrackers)
 
+	// Tracker quality (internal/scraper): one instance shared by
+	// the ingest scraper and the re-scraper, so both pipelines'
+	// rounds grade the same trackers into the same scores. The
+	// persisted snapshot warm-starts the grading — without it,
+	// every restart would spend its first minutes re-learning
+	// which trackers are dead while they tax every batch with a
+	// full timeout. Persistence is best-effort: a load failure
+	// just means a cold start, never a startup failure.
+	trackerQuality := scraper.NewTrackerQuality()
+	if saved, err := st.LoadTrackerQuality(ctx, 0); err != nil {
+		logger.Printf("scraper: tracker quality restore: %v (starting cold)", err)
+	} else if len(saved) > 0 {
+		seed := make([]scraper.PersistedTracker, 0, len(saved))
+		for _, tr := range saved {
+			seed = append(seed, scraper.PersistedTracker{
+				Host: tr.Host, SuccW: tr.SuccW, FailW: tr.FailW,
+				SeededW: tr.SeededW, AskedW: tr.AskedW,
+				LatencyMs: tr.LatencyMs, Attempts: tr.Attempts, UpdatedAt: tr.UpdatedAt,
+			})
+		}
+		trackerQuality.Seed(seed)
+		logger.Printf("scraper: restored quality for %d trackers", len(seed))
+	}
+	// Save the snapshot periodically and once more at shutdown;
+	// saves replace the table whole with the proven set.
+	go func() {
+		save := func() {
+			snap := trackerQuality.Snapshot()
+			if len(snap) == 0 {
+				return
+			}
+			rows := make([]store.TrackerQuality, 0, len(snap))
+			for _, p := range snap {
+				rows = append(rows, store.TrackerQuality{
+					Host: p.Host, SuccW: p.SuccW, FailW: p.FailW,
+					SeededW: p.SeededW, AskedW: p.AskedW,
+					LatencyMs: p.LatencyMs, Attempts: p.Attempts, UpdatedAt: p.UpdatedAt,
+				})
+			}
+			wctx, wcancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer wcancel()
+			if err := st.SaveTrackerQuality(wctx, rows); err != nil {
+				logger.Printf("scraper: tracker quality save: %v", err)
+			}
+		}
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				save()
+				return
+			case <-t.C:
+				save()
+			}
+		}
+	}()
+
 	// swarmSink is THE swarm write path: every scrape round's
 	// aggregated snapshots — the ingest pipeline's and the
 	// background re-scraper's alike — land through it, so both
@@ -861,6 +919,7 @@ func main() {
 			}
 			scr, err = scraper.New(scraper.Config{
 				Trackers: trackerList,
+				Quality:  trackerQuality,
 				Logger:   logger,
 				// Persist every scrape round's swarm snapshots: the
 				// search API serves them (seeder counts, dead-torrent
@@ -1158,6 +1217,7 @@ func main() {
 	if len(trackerList) > 0 && runsHousekeeping(worker) {
 		rs, err := scraper.NewRescraper(scraper.Config{
 			Trackers: trackerList,
+			Quality:  trackerQuality,
 			Logger:   logger,
 		})
 		if err != nil {
@@ -1297,6 +1357,18 @@ func main() {
 				// same way.
 				if fetcher != nil {
 					mainSourceMirror.apply(wctx, st, fetcher.SourceStats())
+					// Per-foundation attribution of the same
+					// counters, folded over sources and keyed by
+					// the EFFECTIVE foundation (metaBackend): a
+					// degraded selection — libtorrent requested,
+					// anacrolix running — attributes its fetches
+					// to the foundation that executed them. The
+					// feeds fetcher never contributes here: its
+					// outcomes are by_source's feed row, and
+					// folding them in would blur the foundation
+					// comparison whenever the main pipeline runs
+					// on another foundation.
+					mainBackendMirror.apply(wctx, st, metadata.BackendTotals(metaBackend, fetcher.SourceStats()))
 				}
 				if feedFetch != nil {
 					feedSourceMirror.apply(wctx, st, feedFetch.SourceStats())
@@ -1548,8 +1620,9 @@ var (
 // The per-source mirrors keep their own delta state (one per
 // fetcher instance: the main foundation and the feeds fetcher).
 var (
-	mainSourceMirror = newSourceStatMirror()
-	feedSourceMirror = newSourceStatMirror()
+	mainSourceMirror  = newSourceStatMirror()
+	feedSourceMirror  = newSourceStatMirror()
+	mainBackendMirror = newBackendStatMirror()
 )
 
 // sourceStatMirror applies one fetcher's per-source fetch counters
@@ -1583,6 +1656,42 @@ func (m *sourceStatMirror) apply(ctx context.Context, st *store.Store, stats []m
 			if delta != 0 {
 				st.IncrStatContext(ctx, key, delta)
 			}
+		}
+	}
+}
+
+// backendStatMirror applies the main foundation's per-foundation
+// fetch counters to the stats table as deltas since the previous
+// application, one stats key per (foundation, counter) pair — the
+// same mirror discipline as sourceStatMirror, factored separately
+// because the keying differs (the effective foundation name, not
+// the discovery source) and the delta state must not mix with the
+// per-source mirror's: both read the same SourceStats, and a
+// counter consumed by one mirror must still be seen by the other.
+type backendStatMirror struct {
+	prev map[string]int64
+}
+
+func newBackendStatMirror() *backendStatMirror {
+	return &backendStatMirror{prev: make(map[string]int64)}
+}
+
+func (m *backendStatMirror) apply(ctx context.Context, st *store.Store, totals metadata.FetchBackendStats) {
+	for _, c := range []struct {
+		name  string
+		value int64
+	}{
+		{metadata.SourceCounterAttempts, totals.Attempts},
+		{metadata.SourceCounterFetched, totals.Fetched},
+		{metadata.SourceCounterTimedOut, totals.TimedOut},
+		{metadata.SourceCounterFailed, totals.Failed},
+		{metadata.SourceCounterPrescreenDropped, totals.PrescreenDropped},
+	} {
+		key := metadata.BackendStatKey(totals.Backend, c.name)
+		delta := c.value - m.prev[key]
+		m.prev[key] = c.value
+		if delta != 0 {
+			st.IncrStatContext(ctx, key, delta)
 		}
 	}
 }

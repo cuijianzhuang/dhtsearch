@@ -213,6 +213,9 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 			// discovery channel (dht / scrape / feed) the fetches
 			// came from and how each channel's fetches ended.
 			"by_source": fetchBySource(counters),
+			// Per-foundation breakdown of the main pipeline's
+			// outcomes (see /api/stats' fetch section).
+			"by_backend": fetchByBackend(counters),
 		},
 		"moderation": map[string]any{
 			"enabled":       s.moderationEnabled(),
