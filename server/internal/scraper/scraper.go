@@ -86,6 +86,13 @@ type Config struct {
 	// with zeros — a real observation, not a gap. Nil disables
 	// persistence; the queue ranking is unaffected either way.
 	Sink func([]SwarmStat)
+	// Quality, when non-nil, is the tracker-quality tracker the
+	// rounds consult (which trackers to ask, in what order) and
+	// feed (what each tracker did). Sharing one instance between
+	// the ingest Scraper and the Rescraper pools their evidence —
+	// both ask the same trackers the same questions. Nil builds a
+	// private instance, so grading is always on.
+	Quality *TrackerQuality
 	// Logger, nil for log.Default().
 	Logger *log.Logger
 }
@@ -136,30 +143,63 @@ func buildTrackers(raw []string, logger *log.Logger) []*trackerConn {
 	return out
 }
 
-// queryTrackers scrapes ihs against every tracker in parallel and
-// merges the answers: best[i] is the per-field maximum across the
-// trackers that answered for hash i, and covered[i] records whether
-// any tracker answered for it at all. A short response (fewer
-// entries than requested) only covers its prefix. The returned
-// count is the number of failed tracker requests. This merge is the
-// one aggregation both the ingest pipeline and the background
-// re-scraper use, so their snapshots are built identically.
-func queryTrackers(ctx context.Context, trackers []*trackerConn, scrapeFn scrapeFunc, timeout time.Duration, ihs [][20]byte) (best []SwarmSample, covered []bool, errs int64) {
+// queryTrackers scrapes ihs against the round's trackers in
+// parallel and merges the answers: best[i] is the per-field
+// maximum across the trackers that answered for hash i, and
+// covered[i] records whether any tracker answered for it at all. A
+// short response (fewer entries than requested) only covers its
+// prefix. The returned count is the number of failed tracker
+// requests. This merge is the one aggregation both the ingest
+// pipeline and the background re-scraper use, so their snapshots
+// are built identically.
+//
+// The round's trackers are the ones quality selects (see
+// TrackerQuality.selectTrackers): trackers sat out by the grading
+// are not asked and count neither as answered nor as failed — the
+// round's all-failed verdict, and the coverage the sink persists,
+// are computed over the trackers actually asked, exactly as if
+// the sat-out ones were not configured. Every asked tracker's
+// outcome is recorded back into quality.
+func queryTrackers(ctx context.Context, quality *TrackerQuality, trackers []*trackerConn, scrapeFn scrapeFunc, timeout time.Duration, ihs [][20]byte) (best []SwarmSample, covered []bool, errs int64) {
 	best = make([]SwarmSample, len(ihs))
 	covered = make([]bool, len(ihs))
+	asked := trackers
+	if quality != nil {
+		asked = quality.selectTrackers(trackers)
+	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	var errCount atomic.Int64
-	for _, tc := range trackers {
+	for _, tc := range asked {
 		wg.Add(1)
 		go func(tc *trackerConn) {
 			defer wg.Done()
 			sctx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
+			start := time.Now()
 			res, err := scrapeFn(sctx, tc, ihs)
 			if err != nil {
 				errCount.Add(1)
+				if quality != nil {
+					quality.record(tc.host, false, 0, 0, 0)
+				}
 				return
+			}
+			if quality != nil {
+				coveredN := len(res)
+				if coveredN > len(ihs) {
+					coveredN = len(ihs)
+				}
+				seededN := 0
+				for i, n := range res {
+					if i >= len(ihs) {
+						break
+					}
+					if n.Seeders > 0 {
+						seededN++
+					}
+				}
+				quality.record(tc.host, true, time.Since(start), coveredN, seededN)
 			}
 			mu.Lock()
 			for i, n := range res {
@@ -211,6 +251,7 @@ func coveredStats(kept []string, best []SwarmSample, covered []bool) []SwarmStat
 type Scraper struct {
 	cfg      Config
 	trackers []*trackerConn
+	quality  *TrackerQuality
 	logger   *log.Logger
 
 	out      chan Item
@@ -252,8 +293,13 @@ func New(cfg Config) (*Scraper, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
+	quality := cfg.Quality
+	if quality == nil {
+		quality = NewTrackerQuality()
+	}
 	s := &Scraper{
 		cfg:           cfg,
+		quality:       quality,
 		logger:        logger,
 		out:           make(chan Item),
 		wake:          make(chan struct{}, 1),
@@ -360,6 +406,7 @@ const rescrapeBatchWorkers = 3
 // never invented zeros.
 type Rescraper struct {
 	trackers []*trackerConn
+	quality  *TrackerQuality
 	batchMax int
 	timeout  time.Duration
 	logger   *log.Logger
@@ -383,7 +430,12 @@ func NewRescraper(cfg Config) (*Rescraper, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
+	quality := cfg.Quality
+	if quality == nil {
+		quality = NewTrackerQuality()
+	}
 	r := &Rescraper{
+		quality:       quality,
 		batchMax:      batchMax,
 		timeout:       timeout,
 		logger:        logger,
@@ -439,7 +491,7 @@ func (r *Rescraper) Scrape(ctx context.Context, hashes []string) []SwarmStat {
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				best, covered, _ := queryTrackers(ctx, r.trackers, r.scrapeTracker, r.timeout, batches[i].ihs)
+				best, covered, _ := queryTrackers(ctx, r.quality, r.trackers, r.scrapeTracker, r.timeout, batches[i].ihs)
 				results[i] = coveredStats(batches[i].kept, best, covered)
 			}
 		}()
@@ -562,7 +614,7 @@ func (s *Scraper) scrapeBatch(ctx context.Context, hexes []string) {
 	}
 	// covered[i] records whether any tracker actually answered for
 	// hash i; the sink must not persist invented zeros for the rest.
-	best, covered, errs := queryTrackers(ctx, s.trackers, s.scrapeTracker, s.cfg.Timeout, ihs)
+	best, covered, errs := queryTrackers(ctx, s.quality, s.trackers, s.scrapeTracker, s.cfg.Timeout, ihs)
 	s.scrapeErrs.Add(errs)
 
 	items := make([]Item, len(kept))

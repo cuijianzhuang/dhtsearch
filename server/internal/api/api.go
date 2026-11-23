@@ -320,6 +320,58 @@ func fetchBySource(counters map[string]int64) []FetchSourceStats {
 	return rows
 }
 
+// FetchBackendStats is one fetch foundation's row in the fetch
+// section's by_backend breakdown: how many of the main pipeline's
+// fetches the foundation (META_FETCHER: anacrolix / native /
+// libtorrent) executed and how they ended. SuccessRate is
+// Fetched/Attempts derived at read time (0 when the foundation has
+// no attempts yet), rounded to four decimals, exactly like
+// FetchSourceStats. Only the main pipeline is attributed — the
+// feeds fetcher's outcomes live in by_source's feed row — so the
+// rows answer "which foundation should the main pipeline run on"
+// without a second pipeline's traffic blurring the comparison.
+type FetchBackendStats struct {
+	Backend          string  `json:"backend"`
+	Attempts         int64   `json:"attempts"`
+	Fetched          int64   `json:"fetched"`
+	TimedOut         int64   `json:"timed_out"`
+	Failed           int64   `json:"failed"`
+	PrescreenDropped int64   `json:"prescreen_dropped"`
+	SuccessRate      float64 `json:"success_rate"`
+}
+
+// fetchByBackend folds the persisted per-foundation fetch
+// counters into the fetch section's by_backend rows, in canonical
+// foundation order. The counters live in the stats table under
+// the keys cmd/server's mirror writes
+// (fetch_backend_<backend>_<counter> — see
+// metadata.BackendStatKey), so the breakdown is exactly as
+// durable as the counters themselves: both handlers publish it
+// from the same counters map they already loaded.
+func fetchByBackend(counters map[string]int64) []FetchBackendStats {
+	rows := make([]FetchBackendStats, 0, 3)
+	for _, name := range []string{"anacrolix", "native", "libtorrent"} {
+		get := func(counter string) int64 {
+			return counters["fetch_backend_"+name+"_"+counter]
+		}
+		attempts, fetched := get("attempts"), get("fetched")
+		rate := 0.0
+		if attempts > 0 {
+			rate = math.Round(float64(fetched)/float64(attempts)*10000) / 10000
+		}
+		rows = append(rows, FetchBackendStats{
+			Backend:          name,
+			Attempts:         attempts,
+			Fetched:          fetched,
+			TimedOut:         get("timed_out"),
+			Failed:           get("failed"),
+			PrescreenDropped: get("prescreen_dropped"),
+			SuccessRate:      rate,
+		})
+	}
+	return rows
+}
+
 // ScraperStatus describes the tracker-scrape prioritizer. Seeded/Scraped is
 // the share of discovered hashes with at least one tracker-known seeder;
 // Evicted counts hashes that lost their fetch slot to better-seeded ones.
@@ -871,6 +923,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			// discovery channel (dht / scrape / feed) the fetches
 			// came from and how each channel's fetches ended.
 			"by_source": fetchBySource(counters),
+			// Per-foundation breakdown of the main pipeline's
+			// outcomes: which fetch foundation (anacrolix /
+			// native / libtorrent) executed the fetches and how
+			// each foundation's fetches ended — the comparison a
+			// META_FETCHER switch is decided by.
+			"by_backend": fetchByBackend(counters),
 		},
 		"moderation": map[string]any{
 			"reviewed":      counters["llm_reviewed"],

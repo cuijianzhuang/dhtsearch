@@ -172,6 +172,25 @@ func (d dialect) schemaStatements() []string {
 			attempts   ` + intType + ` NOT NULL DEFAULT 0,
 			updated_at ` + intType + ` NOT NULL
 		)`,
+		// The scraper's persisted tracker-quality snapshot (see
+		// trackerquality.go): each configured tracker's decayed
+		// response/yield weights from the previous run, restored at
+		// startup so scrape rounds do not re-learn which trackers
+		// are dead from scratch. The whole table is one replace-all
+		// snapshot, rewritten by SaveTrackerQuality; like dht_nodes
+		// it is runtime state, not user data, so the cross-backend
+		// Migrate deliberately does not copy it — a database switch
+		// re-learns tracker quality within minutes.
+		`CREATE TABLE IF NOT EXISTS tracker_quality (
+			host       TEXT PRIMARY KEY,
+			succ_w     ` + realType + ` NOT NULL,
+			fail_w     ` + realType + ` NOT NULL,
+			seeded_w   ` + realType + ` NOT NULL DEFAULT 0,
+			asked_w    ` + realType + ` NOT NULL DEFAULT 0,
+			latency_ms ` + realType + ` NOT NULL DEFAULT 0,
+			attempts   ` + intType + ` NOT NULL DEFAULT 0,
+			updated_at ` + intType + ` NOT NULL
+		)`,
 		// Fetch admission negative cache (see fetchattempts.go):
 		// one row per infohash whose metadata fetch failed, carrying
 		// the consecutive-failure count and the instant the hash may
