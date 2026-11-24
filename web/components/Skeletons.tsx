@@ -12,7 +12,7 @@ function Bar({ className = "" }: { className?: string }) {
 /** One search-result card placeholder (title lines + meta row). */
 export function ResultCardSkeleton() {
   return (
-    <div className="rounded-xl border border-line bg-surface/60 p-4 shadow-card">
+    <div className="rounded-card border border-line bg-surface/60 p-4 shadow-card">
       <div className="flex items-start gap-3">
         <Bar className="mt-1 h-5 w-5 shrink-0" />
         <div className="min-w-0 flex-1 animate-pulse">
@@ -51,7 +51,7 @@ export function AdminListSkeleton({ rows = 8 }: { rows?: number }) {
         <Bar className="min-h-11 w-24 animate-pulse" />
         <Bar className="h-4 w-16 animate-pulse" />
       </div>
-      <div className="mt-4 overflow-hidden rounded-xl border border-line bg-surface shadow-card">
+      <div className="mt-4 overflow-hidden rounded-card border border-line bg-surface shadow-card">
         <div className="animate-pulse">
           {Array.from({ length: rows }, (_, i) => (
             <div

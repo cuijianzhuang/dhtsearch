@@ -273,7 +273,7 @@ var Registry = []Item{
 	// --- appearance: live, consumed by the web app via /api/site ---
 	{Key: KeySiteName, Group: "appearance", Label: "站点名称", Type: TypeString, Default: "DHTSearch", Editable: true, MaxLen: 60,
 		Desc: "浏览器标题、页头与分享标题里的站点名"},
-	{Key: KeyThemeColor, Group: "appearance", Label: "主色", Type: TypeEnum, Default: "teal", Editable: true,
+	{Key: KeyThemeColor, Group: "appearance", Label: "主色", Type: TypeEnum, Default: "blue", Editable: true,
 		Options: ThemeColors, Desc: "全站按钮、链接与徽标的主色预设"},
 	{Key: KeyThemeAppearance, Group: "appearance", Label: "默认外观", Type: TypeEnum, Default: "system", Editable: true,
 		Options: []string{"system", "light", "dark"}, Desc: "访客未手动切换时的初始外观；访客自己的选择优先"},

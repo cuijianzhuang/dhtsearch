@@ -26,9 +26,9 @@ export default function Pagination({ q, page, total, pageSize, category = "", so
   };
 
   const btnCls =
-    "inline-flex min-h-11 items-center rounded-lg border border-input bg-soft px-4 text-sm text-ink-2 transition-colors hover:border-accent hover:text-accent-ink";
+    "inline-flex min-h-11 items-center rounded-full border border-input bg-soft px-4 text-sm text-ink-2 transition-colors hover:border-accent hover:text-accent-ink";
   const disabledCls =
-    "inline-flex min-h-11 cursor-not-allowed items-center rounded-lg border border-line bg-surface px-4 text-sm text-faint";
+    "inline-flex min-h-11 cursor-not-allowed items-center rounded-full border border-line bg-surface px-4 text-sm text-faint";
   const navigate = (event: MouseEvent<HTMLAnchorElement>, href: string) => {
     event.preventDefault();
     window.location.assign(href);

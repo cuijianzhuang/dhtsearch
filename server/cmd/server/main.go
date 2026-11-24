@@ -540,7 +540,7 @@ func main() {
 	reg(settings.KeyAdminToken, *adminToken)
 	reg(settings.KeyEnvFile, envPath)
 	reg(settings.KeySiteName, envDefault("SITE_NAME", "DHTSearch"))
-	reg(settings.KeyThemeColor, envDefault("THEME_COLOR", "teal"))
+	reg(settings.KeyThemeColor, envDefault("THEME_COLOR", "blue"))
 	reg(settings.KeyThemeAppearance, envDefault("THEME_APPEARANCE", "system"))
 	reg(settings.KeyCrawlEnabled, strconv.FormatBool(*crawlEnabled))
 	reg(settings.KeyCrawlerWatchdogEnabled, strconv.FormatBool(envBool("CRAWLER_WATCHDOG_ENABLED", true)))

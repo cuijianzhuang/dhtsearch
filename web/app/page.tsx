@@ -80,7 +80,7 @@ export default async function Home() {
           type no longer steps up at xl: the 6xl logo cost ~16px the
           one-viewport budget needs for the five trending groups. */}
       <div className="w-full max-w-2xl xl:max-w-[54rem]">
-        <h1 className="text-center text-4xl font-bold tracking-tight sm:text-5xl">
+        <h1 className="text-center text-4xl font-semibold tracking-tight sm:text-5xl">
           <SiteLogo name={site.name} />
         </h1>
         <p className="mt-3 text-center text-sm text-mute sm:text-base xl:mt-2 xl:text-lg">

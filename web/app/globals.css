@@ -1,14 +1,16 @@
 @import "tailwindcss";
 
-/* Design tokens, aligned with Polaris: neutral semantic surfaces plus one
-   primary accent. The accent is a preset chosen in the admin settings
+/* Design tokens, in Apple's design language: the SF type stack,
+   Apple's neutral surfaces and system colors, and one primary
+   accent. The accent is a preset chosen in the admin settings
    (THEME_COLOR): the root layout inlines the preset's values as
    --pri-base / --pri-hover-base / --pri-ink-light / --pri-ink-dark on
    <html>, and everything below derives from them, so no component ever
-   names a raw color. The default preset (no inline values) is Polaris
-   teal: primary #0E7490, dark-mode ink brightened to #2DD4BF so accent
-   text stays legible while filled accent surfaces keep the primary
-   and white label text keeps its contrast.
+   names a raw color. The default preset (and the fallback when no
+   inline values are present) is Apple system blue: filled surfaces
+   #0071E3, light-mode ink #0066CC, dark-mode ink brightened to
+   #2997FF so accent text stays legible while filled accent surfaces
+   keep the primary and white label text keeps its contrast.
    Appearance (light/dark) is driven by the data-appearance attribute
    on <html>: "dark" forces the dark palette, "light" forces light,
    "system" (the default) follows prefers-color-scheme. The attribute
@@ -20,19 +22,19 @@
    (The page background token is `canvas`, not `base`: a `--color-base`
    would collide with Tailwind's `text-base` font-size utility.) */
 :root {
-  --bg: #fcfcfd;
+  --bg: #f5f5f7;
   --card: #ffffff;
-  --ink: #18181b;
-  --ink-2: #3f3f46;
-  --mute: #71717a;
-  --faint: #73737d;
-  --line: #e7e7eb;
-  --line-2: #f0f0f3;
-  --input: #dce0e6;
-  --soft: #f4f4f6;
-  --pri: var(--pri-base, #0e7490);
-  --pri-hover: var(--pri-hover-base, #155e75);
-  --pri-ink: var(--pri-ink-light, #155e75);
+  --ink: #1d1d1f;
+  --ink-2: #424245;
+  --mute: #86868b;
+  --faint: #6e6e73;
+  --line: #d2d2d7;
+  --line-2: #e8e8ed;
+  --input: #c7c7cc;
+  --soft: #e8e8ed;
+  --pri: var(--pri-base, #0071e3);
+  --pri-hover: var(--pri-hover-base, #0077ed);
+  --pri-ink: var(--pri-ink-light, #0066cc);
   --pri-soft: color-mix(in srgb, var(--pri) 7%, var(--card));
   --pri-line: color-mix(in srgb, var(--pri) 26%, var(--card));
   /* Pipeline hero backdrops: the spider web's threads and the
@@ -48,13 +50,18 @@
      the rings' full-strength bands. */
   --track-c: color-mix(in srgb, var(--pri) 52%, var(--card));
   --on-pri: #ffffff;
-  --warn: #d97706;
-  --warn-ink: #92400e;
-  --danger: #dc2626;
-  --danger-ink: #b91c1c;
-  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.04);
+  /* Semantic colors are Apple's system colors; the -ink variants are
+     the deepened shades used when the color carries text (Apple's
+     accessible text variants, e.g. #D70015 red and #248A3D green). */
+  --ok: #34c759;
+  --ok-ink: #248a3d;
+  --warn: #ff9500;
+  --warn-ink: #a35b00;
+  --danger: #ff3b30;
+  --danger-ink: #d70015;
+  --shadow-1: 0 2px 10px rgba(0, 0, 0, 0.07);
   --shadow-2:
-    0 8px 24px -8px rgba(15, 23, 42, 0.12), 0 2px 6px -2px rgba(15, 23, 42, 0.05);
+    0 16px 40px -12px rgba(0, 0, 0, 0.18), 0 3px 10px -3px rgba(0, 0, 0, 0.1);
   color-scheme: light;
 }
 
@@ -62,60 +69,64 @@
    and for "system" (or a missing attribute, i.e. pre-script) under a
    dark OS preference. The two blocks must stay identical. */
 :root[data-appearance="dark"] {
-  --bg: #0a0d11;
-  --card: #11151b;
-  --ink: #e8ebef;
-  --ink-2: #c5cbd3;
-  --mute: #9199a4;
-  --faint: #7e8791;
-  --line: #222830;
-  --line-2: #1a1f26;
-  --input: #2e353e;
-  --soft: #161b21;
+  --bg: #000000;
+  --card: #1d1d1f;
+  --ink: #f5f5f7;
+  --ink-2: #d2d2d7;
+  --mute: #86868b;
+  --faint: #8e8e93;
+  --line: rgba(255, 255, 255, 0.12);
+  --line-2: rgba(255, 255, 255, 0.06);
+  --input: #3a3a3c;
+  --soft: #2c2c2e;
   --pri-hover: color-mix(in srgb, var(--pri) 85%, #fff);
-  --pri-ink: var(--pri-ink-dark, #2dd4bf);
+  --pri-ink: var(--pri-ink-dark, #2997ff);
   --pri-soft: color-mix(in srgb, var(--pri) 14%, var(--card));
   --pri-line: color-mix(in srgb, var(--pri) 40%, var(--card));
   --web-c: color-mix(in srgb, var(--pri) 62%, var(--card));
   --mesh-c: color-mix(in srgb, var(--pri) 50%, var(--card));
   --track-c: color-mix(in srgb, var(--pri) 70%, var(--card));
-  --warn: #f59e0b;
-  --warn-ink: #fcd34d;
-  --danger: #f87171;
-  --danger-ink: #fca5a5;
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --ok: #30d158;
+  --ok-ink: #30d158;
+  --warn: #ff9f0a;
+  --warn-ink: #ffb340;
+  --danger: #ff453a;
+  --danger-ink: #ff9d97;
+  --shadow-1: 0 2px 10px rgba(0, 0, 0, 0.45);
   --shadow-2:
-    0 8px 24px -8px rgba(0, 0, 0, 0.65), 0 2px 6px -2px rgba(0, 0, 0, 0.4);
+    0 16px 40px -12px rgba(0, 0, 0, 0.7), 0 3px 10px -3px rgba(0, 0, 0, 0.5);
   color-scheme: dark;
 }
 
 @media (prefers-color-scheme: dark) {
   :root[data-appearance="system"],
   :root:not([data-appearance]) {
-    --bg: #0a0d11;
-    --card: #11151b;
-    --ink: #e8ebef;
-    --ink-2: #c5cbd3;
-    --mute: #9199a4;
-    --faint: #7e8791;
-    --line: #222830;
-    --line-2: #1a1f26;
-    --input: #2e353e;
-    --soft: #161b21;
+    --bg: #000000;
+    --card: #1d1d1f;
+    --ink: #f5f5f7;
+    --ink-2: #d2d2d7;
+    --mute: #86868b;
+    --faint: #8e8e93;
+    --line: rgba(255, 255, 255, 0.12);
+    --line-2: rgba(255, 255, 255, 0.06);
+    --input: #3a3a3c;
+    --soft: #2c2c2e;
     --pri-hover: color-mix(in srgb, var(--pri) 85%, #fff);
-    --pri-ink: var(--pri-ink-dark, #2dd4bf);
+    --pri-ink: var(--pri-ink-dark, #2997ff);
     --pri-soft: color-mix(in srgb, var(--pri) 14%, var(--card));
     --pri-line: color-mix(in srgb, var(--pri) 40%, var(--card));
     --web-c: color-mix(in srgb, var(--pri) 62%, var(--card));
     --mesh-c: color-mix(in srgb, var(--pri) 50%, var(--card));
     --track-c: color-mix(in srgb, var(--pri) 70%, var(--card));
-    --warn: #f59e0b;
-    --warn-ink: #fcd34d;
-    --danger: #f87171;
-    --danger-ink: #fca5a5;
-    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --ok: #30d158;
+    --ok-ink: #30d158;
+    --warn: #ff9f0a;
+    --warn-ink: #ffb340;
+    --danger: #ff453a;
+    --danger-ink: #ff9d97;
+    --shadow-1: 0 2px 10px rgba(0, 0, 0, 0.45);
     --shadow-2:
-      0 8px 24px -8px rgba(0, 0, 0, 0.65), 0 2px 6px -2px rgba(0, 0, 0, 0.4);
+      0 16px 40px -12px rgba(0, 0, 0, 0.7), 0 3px 10px -3px rgba(0, 0, 0, 0.5);
     color-scheme: dark;
   }
 }
@@ -137,21 +148,39 @@
   --color-accent-soft: var(--pri-soft);
   --color-accent-line: var(--pri-line);
   --color-on-accent: var(--on-pri);
+  --color-ok: var(--ok);
+  --color-ok-ink: var(--ok-ink);
   --color-warn: var(--warn);
   --color-warn-ink: var(--warn-ink);
   --color-danger: var(--danger);
   --color-danger-ink: var(--danger-ink);
   --shadow-card: var(--shadow-1);
   --shadow-bar: var(--shadow-2);
+  /* The SF type stack: system fonts only, so every platform renders
+     its own SF/PingFang cut — no webfont download, no FOUT. */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+    "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+  /* Apple's corner radii: cards 18px, controls 12px; primary buttons
+     and chips use the full pill (rounded-full). */
+  --radius-card: 18px;
+  --radius-control: 12px;
 }
 
 @layer base {
   body {
     font-family:
-      -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+      "PingFang SC", "Helvetica Neue", Arial, sans-serif;
     background: var(--bg);
     color: var(--ink);
+  }
+
+  /* Large titles tighten like Apple's display type; body-size
+     headings keep the default tracking. */
+  h1,
+  h2 {
+    letter-spacing: -0.02em;
   }
 
   ::selection {
@@ -163,6 +192,20 @@
     outline: 2px solid var(--pri);
     outline-offset: 2px;
   }
+}
+
+/* The nav material from apple.com: a translucent canvas wash with
+   saturate(180%) blur(20px) behind it. Applied to the one sticky
+   header the product has (the admin shell's mobile top bar). The
+   public pages deliberately do NOT use it on their bars: a blurred
+   bar over scrolling content re-samples every frame and janks on
+   phones (the documented reason MobileBottomNav and the search
+   bulk bar are solid), and the public headers are pinned by their
+   shells rather than stuck over content. */
+.glass-bar {
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
 }
 
 /* Search page app shell: while /search is mounted, the document is
@@ -825,7 +868,7 @@ body:has(> main[data-search-shell]) {
    end of a traverse, or the frontier retreating — is a fade cycle
    (.spider-faded): fade out in place, reposition while invisible,
    fade back in, then crawl forward again.
-   The spider alone breaks the teal discipline: near-black body
+   The spider alone breaks the single-accent discipline: near-black body
    and legs with red eyes and a red abdomen marking. In dark
    appearance a soft light halo (drop-shadow) keeps the black
    silhouette readable. On the diagnosed fetch stall (.spider-alarm)

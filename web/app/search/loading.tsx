@@ -13,11 +13,11 @@ export default function SearchLoading() {
     >
       <div className="flex items-center gap-4" aria-hidden>
         <div className="h-7 w-28 shrink-0 animate-pulse rounded-md bg-soft" />
-        <div className="h-11 min-w-0 flex-1 animate-pulse rounded-lg bg-soft" />
+        <div className="h-11 min-w-0 flex-1 animate-pulse rounded-control bg-soft" />
         <div className="h-11 w-24 shrink-0 animate-pulse rounded-full bg-soft" />
       </div>
       <div
-        className="mt-4 h-11 animate-pulse rounded-lg bg-soft"
+        className="mt-4 h-11 animate-pulse rounded-control bg-soft"
         aria-hidden
       />
       <div className="mt-4 flex gap-2" aria-hidden>

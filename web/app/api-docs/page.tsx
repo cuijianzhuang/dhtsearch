@@ -21,7 +21,7 @@ const API = "https://api.example.com";
 
 function Code({ children }: { children: string }) {
   return (
-    <pre className="overflow-x-auto rounded-lg border border-line bg-soft p-3 font-mono text-xs leading-relaxed text-ink-2">
+    <pre className="overflow-x-auto rounded-control border border-line bg-soft p-3 font-mono text-xs leading-relaxed text-ink-2">
       {children}
     </pre>
   );
@@ -95,7 +95,7 @@ function ParamTable({
   rows: { name: string; type: string; def: string; desc: string }[];
 }) {
   return (
-    <div className="overflow-x-auto rounded-lg border border-line">
+    <div className="overflow-x-auto rounded-control border border-line">
       <table className="w-full min-w-[540px] text-left text-xs leading-relaxed">
         <thead>
           <tr className="border-b border-line bg-soft text-mute">
