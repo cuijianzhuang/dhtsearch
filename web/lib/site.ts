@@ -20,7 +20,7 @@ export interface SiteConfig {
 
 const FALLBACK: SiteConfig = {
   name: "DHTSearch",
-  themeColor: "teal",
+  themeColor: "blue",
   themeAppearance: "system",
 };
 

@@ -7,8 +7,8 @@
 // the primary itself (filled surfaces in both modes), its hover
 // shade and the accent-ink for light mode, plus a brightened accent
 // ink for dark mode, where the raw primary is too dark to read as
-// text on the dark surface (Polaris's rule: filled surfaces keep the
-// primary, text brightens). Derived shades (soft backgrounds, lines)
+// text on the dark surface (filled surfaces keep the primary, text
+// brightens). Derived shades (soft backgrounds, lines)
 // are computed in globals.css with color-mix from --pri.
 
 export interface ThemePreset {
@@ -32,10 +32,13 @@ export const THEME_PRESETS: Record<string, ThemePreset> = {
   blue: {
     key: "blue",
     label: "蓝色",
-    pri: "#2563eb",
-    hover: "#1d4ed8",
-    inkLight: "#1d4ed8",
-    inkDark: "#93c5fd",
+    // Apple system blue: filled surfaces take the apple.com button
+    // blue, text accents take the lighter link blue, and dark mode
+    // brightens the ink to the dark-system link blue.
+    pri: "#0071e3",
+    hover: "#0077ed",
+    inkLight: "#0066cc",
+    inkDark: "#2997ff",
   },
   violet: {
     key: "violet",
@@ -71,7 +74,7 @@ export const THEME_PRESETS: Record<string, ThemePreset> = {
   },
 };
 
-export const DEFAULT_PRESET = THEME_PRESETS.teal;
+export const DEFAULT_PRESET = THEME_PRESETS.blue;
 
 export function themePreset(key: string | undefined): ThemePreset {
   return (key && THEME_PRESETS[key]) || DEFAULT_PRESET;

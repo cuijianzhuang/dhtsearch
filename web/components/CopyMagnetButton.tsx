@@ -21,7 +21,7 @@ export default function CopyMagnetButton({ magnet }: { magnet: string }) {
       onClick={copy}
       title={label}
       aria-label={label}
-      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border text-xs font-medium transition-colors sm:h-11 sm:w-auto sm:px-3 ${
+      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border text-xs font-medium transition-colors sm:h-11 sm:w-auto sm:px-3 ${
         copied
           ? "border-accent bg-accent-soft text-accent-ink"
           : "border-input bg-soft text-ink-2 hover:border-accent hover:text-accent-ink"

@@ -158,7 +158,7 @@ func TestAdminSettingsPutValidationAndApply(t *testing.T) {
 	defer resp.Body.Close()
 	var site map[string]string
 	json.NewDecoder(resp.Body).Decode(&site)
-	if site["name"] != "My Search" || site["theme_color"] != "teal" || site["theme_appearance"] != "system" {
+	if site["name"] != "My Search" || site["theme_color"] != "blue" || site["theme_appearance"] != "system" {
 		t.Fatalf("/api/site = %v", site)
 	}
 }

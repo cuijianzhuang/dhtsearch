@@ -114,7 +114,7 @@ export default function AppearanceSwitcher({
 
   return (
     <div
-      className="inline-flex items-center gap-1 rounded-full border border-line bg-surface p-1"
+      className="inline-flex items-center gap-1 rounded-full bg-soft p-1"
       role="group"
       aria-label="外观切换"
     >
@@ -127,8 +127,8 @@ export default function AppearanceSwitcher({
           title={a.label}
           className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
             mode === a.key
-              ? "bg-accent-soft text-accent-ink"
-              : "text-mute hover:text-accent-ink"
+              ? "bg-surface text-ink shadow-card"
+              : "text-mute hover:text-ink"
           }`}
         >
           <Icon mode={a.key} />

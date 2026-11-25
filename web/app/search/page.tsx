@@ -142,7 +142,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
       <header className="flex flex-wrap items-center gap-x-4 gap-y-3">
         <Link
           href="/"
-          className="inline-flex min-h-11 shrink-0 items-center text-xl font-bold tracking-tight hover:text-accent-ink"
+          className="inline-flex min-h-11 shrink-0 items-center text-xl font-semibold tracking-tight hover:text-accent-ink"
         >
           <SiteLogo name={site.name} />
         </Link>
@@ -157,7 +157,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
         </div>
       </header>
 
-      <div className="mt-4 flex items-center gap-2 rounded-lg border border-accent-line bg-accent-soft px-4 py-3 text-xs text-accent-ink">
+      <div className="mt-4 flex items-center gap-2 rounded-control border border-accent-line bg-accent-soft px-4 py-3 text-xs text-accent-ink">
         <svg
           viewBox="0 0 24 24"
           fill="none"

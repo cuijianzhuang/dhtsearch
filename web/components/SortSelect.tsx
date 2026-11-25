@@ -35,7 +35,7 @@ export default function SortSelect({
         value={sort}
         onChange={onChange}
         aria-label="结果排序"
-        className="min-h-11 rounded-lg border border-input bg-surface px-3 text-sm text-ink-2 outline-none focus:border-accent"
+        className="min-h-11 rounded-control border border-input bg-surface px-3 text-sm text-ink-2 outline-none focus:border-accent"
       >
         {SORTS.map((s) => (
           <option key={s.key} value={s.key}>

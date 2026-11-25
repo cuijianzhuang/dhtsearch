@@ -133,13 +133,13 @@ export default function SearchBox({ initialQuery = "", large = false }: SearchBo
             // min-w-0 lets the input shrink past its intrinsic size; without it
             // the row overflows narrow viewports and pushes the submit button
             // off-screen.
-            className={`min-w-0 flex-1 rounded-lg border border-input bg-surface text-ink placeholder-faint outline-none focus:border-accent focus:ring-4 focus:ring-accent/15 ${
+            className={`min-w-0 flex-1 rounded-control border border-input bg-surface text-ink placeholder-faint outline-none focus:border-accent focus:ring-4 focus:ring-accent/15 ${
               large ? "h-12 px-4 text-lg" : "h-11 px-4 text-sm"
             }`}
           />
           <button
             type="submit"
-            className={`inline-flex shrink-0 items-center justify-center rounded-lg bg-accent font-medium text-on-accent transition-colors hover:bg-accent-hover ${
+            className={`inline-flex shrink-0 items-center justify-center rounded-full bg-accent font-medium text-on-accent transition-colors hover:bg-accent-hover ${
               large ? "h-12 px-6 text-lg" : "h-11 px-4 text-sm"
             }`}
           >
@@ -149,7 +149,7 @@ export default function SearchBox({ initialQuery = "", large = false }: SearchBo
       </form>
 
       {showDropdown && (
-        <div className="absolute inset-x-0 top-full z-30 mt-2 overflow-hidden rounded-xl border border-line bg-surface shadow-bar">
+        <div className="absolute inset-x-0 top-full z-30 mt-2 overflow-hidden rounded-card border border-line bg-surface shadow-bar">
           <ul id="search-history-listbox" role="listbox" aria-label="最近搜索">
             {suggestions.map((item) => (
               <li key={item} className="flex items-center">

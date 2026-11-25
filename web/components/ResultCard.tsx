@@ -28,7 +28,7 @@ const CATEGORY_LABELS: Record<string, string> = Object.fromEntries(
 const FILES_PAGE_SIZE = 100;
 
 const pagerBtnCls =
-  "inline-flex min-h-8 items-center rounded-md border border-input bg-soft px-3 text-xs text-ink-2 transition-colors hover:border-accent hover:text-accent-ink disabled:cursor-not-allowed disabled:opacity-50";
+  "inline-flex min-h-8 items-center rounded-full border border-input bg-soft px-3 text-xs text-ink-2 transition-colors hover:border-accent hover:text-accent-ink disabled:cursor-not-allowed disabled:opacity-50";
 
 export default function ResultCard({
   result,
@@ -183,7 +183,7 @@ export default function ResultCard({
 
   return (
     <div
-      className={`rounded-xl border bg-surface/60 p-4 shadow-card transition-colors ${
+      className={`rounded-card border bg-surface/60 p-4 shadow-card transition-colors ${
         selected
           ? "border-accent bg-accent-soft"
           : "border-line hover:border-input"
@@ -260,7 +260,7 @@ export default function ResultCard({
       </div>
 
       {expanded && (
-        <div className="mt-3 rounded-lg border border-line bg-canvas/60 p-3">
+        <div className="mt-3 rounded-control border border-line bg-canvas/60 p-3">
           {/* Swarm health from tracker scrapes. Rendered only when a
               scrape actually reported: no section at all beats a
               section of invented zeros. */}
@@ -329,7 +329,7 @@ export default function ResultCard({
                   onChange={(e) => onFilterInput(e.target.value)}
                   placeholder="按文件名过滤…"
                   aria-label="按文件名过滤文件列表"
-                  className="h-10 min-w-0 flex-1 rounded-lg border border-input bg-surface px-3 text-xs text-ink placeholder-faint outline-none focus:border-accent focus:ring-4 focus:ring-accent/15 sm:max-w-64"
+                  className="h-10 min-w-0 flex-1 rounded-control border border-input bg-surface px-3 text-xs text-ink placeholder-faint outline-none focus:border-accent focus:ring-4 focus:ring-accent/15 sm:max-w-64"
                 />
                 {(filterInput.trim() !== "" || filtering) && (
                   <span className="text-xs tabular-nums text-mute">

@@ -93,11 +93,15 @@ export default function AdminShellClient({
   return (
     <div className="flex flex-1 flex-col">
       {/* Mobile top bar: brand + appearance + the drawer trigger.
-          Desktop has no top bar — the sidebar carries the brand. */}
-      <div className="sticky top-0 z-30 flex items-center gap-2 border-b border-line bg-canvas px-4 py-1.5 lg:hidden">
+          Desktop has no top bar — the sidebar carries the brand.
+          The bar wears the glass nav material (see .glass-bar in
+          globals.css): it is the product's one sticky header, small
+          and single-row, unlike the full-width scrolling bars that
+          stay solid for scroll performance. */}
+      <div className="glass-bar sticky top-0 z-30 flex items-center gap-2 border-b border-line px-4 py-1.5 lg:hidden">
         <Link
           href="/admin"
-          className="inline-flex min-h-11 items-center text-lg font-bold tracking-tight"
+          className="inline-flex min-h-11 items-center text-lg font-semibold tracking-tight"
         >
           <SiteLogo name={siteName} />
           <span className="ml-2 rounded-md bg-accent-soft px-2 py-1 text-xs font-medium text-accent-ink">

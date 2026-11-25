@@ -420,7 +420,7 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | `INTERNAL_API_TOKEN` | 无 | 第一方内部令牌：web 以 `X-Internal-Token` 头呈现给 API，绕过令牌强制且不计配额；install.sh 在 API 与 web 两侧自动生成一致的值，手动部署需两侧设置相同值 |
 | `PUBLIC_API_TOKEN_RATE_PER_MIN` | `600` | 新建令牌的默认每分钟配额（0 = 不限） |
 | `SITE_NAME` | `DHTSearch` | 站点名称（标题、页头、OG 默认标题） |
-| `THEME_COLOR` | `teal` | 主色预设：`teal` / `blue` / `violet` / `green` / `orange` / `red` |
+| `THEME_COLOR` | `blue` | 主色预设：`blue`（Apple 系统蓝）/ `teal` / `violet` / `green` / `orange` / `red` |
 | `THEME_APPEARANCE` | `system` | 默认外观：`system` / `light` / `dark`（访客本地选择优先） |
 | `FILTER_BLOCK_WORDS` | 空 | 逗号分隔的屏蔽词，命中种子名或文件路径即丢弃（单独计数） |
 | `FILTER_ADULT_WORDS` | 空 | 逗号分隔，追加到内置成人词表，命中即按成人内容丢弃 |

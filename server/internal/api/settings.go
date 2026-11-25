@@ -25,7 +25,7 @@ import (
 
 // handleSite serves the web app's presentation configuration.
 func (s *Server) handleSite(w http.ResponseWriter, r *http.Request) {
-	name, color, appearance := "DHTSearch", "teal", "system"
+	name, color, appearance := "DHTSearch", "blue", "system"
 	if s.opts.Settings != nil {
 		name = s.opts.Settings.Get(settings.KeySiteName)
 		color = s.opts.Settings.Get(settings.KeyThemeColor)
